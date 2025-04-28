@@ -1,7 +1,19 @@
-import re
+import logging
 import traceback
 import oracledb
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, as_completed
+
+# Configurar logger profesional
+logger = logging.getLogger("terminusdb")
+logger.setLevel(logging.DEBUG)
+console_handler = logging.StreamHandler()
+formatter = logging.Formatter(
+    fmt="%(asctime)s [%(levelname)s] %(processName)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
 parallel_max = 10  # Adjust to your needs
 dsn = "leon.etimo.cl:1521/alpha"
 user = "tdb"
@@ -26,7 +38,6 @@ def get_rows_processed(owner, table_name, process_date, action, process_start, m
         result = cursor.fetchone()
         if result:
             return result[0]
-        print(f"[WARN] No records found for {owner}.{table_name} on {process_date}, marking as ERROR")
         cursor.execute("SELECT sysdate FROM dual")
         process_end, = cursor.fetchone()
         sqlcode = cursor.var(oracledb.NUMBER)
@@ -36,7 +47,7 @@ def get_rows_processed(owner, table_name, process_date, action, process_start, m
         conn.commit()
         return 0
     except oracledb.DatabaseError as e:
-        traceback.print_exc()
+        logger.critical(f"Unexpected error in process_table for {owner}.{table_name}:", exc_info=True)
         return 0
     finally:
         if cursor:
@@ -44,14 +55,14 @@ def get_rows_processed(owner, table_name, process_date, action, process_start, m
 
 def process_table(owner, table_name, plsql_code, referencing_tables, process_date, dsn, user, password):
     conn = cursor = None
-    print(f"Processing table {owner}.{table_name}...")
+    logger.info(f"Processing table {owner}.{table_name}...")
     try:
         conn = oracledb.connect(user=user, password=password, dsn=dsn)
-        print(f"Connected to {dsn} as {user}")
+        logger.info(f"Connected to {dsn} as {user}")
         cursor = conn.cursor()
         cursor.execute("SELECT sysdate FROM dual")
         process_start, = cursor.fetchone()
-        print(f"Executing PL/SQL for {owner}.{table_name}...")
+        logger.info(f"Executing ILM for {owner}.{table_name}...")
         cursor.setinputsizes(plsql_code=oracledb.CLOB)
         cursor.execute(plsql_code, { "plsql_code": plsql_code })
         rows_processed = get_rows_processed(owner, table_name, process_date, action, process_start, None, plsql_code, conn)
@@ -106,9 +117,9 @@ def process_tables(tables_cnf, process_date, connection):
                                 all_referencing_tables_ready = False
                                 break # referencing table not TEND status
                     if not all_referencing_tables_ready:
-                        print(f"Table {owner}.{table_name} is waiting for referencing tables to finish...")
+                        logger.debug(f"Table {owner}.{table_name} is waiting for referencing tables to finish...")
                         continue
-                    print(f"Launching process for {owner}.{table_name}...")
+                    logger.info(f"Launching background process for {owner}.{table_name}...")
                     future = executor.submit(
                         process_table, owner, table_name, table_info['plsql'],
                         referencing_tables, process_date, dsn, user, password
@@ -121,7 +132,7 @@ def process_tables(tables_cnf, process_date, connection):
                     break  # Launch only one process at a time
                 if not cycle_launched:
                     break  # There are no processes to launch, so go to waitting some process to end
-            print(f"Active processes: {len(processes)}")
+            logger.debug(f"Active processes: {len(processes)}")
             if processes:
                 # Wait for some process to finish
                 for completed_future in as_completed(processes):
@@ -129,12 +140,12 @@ def process_tables(tables_cnf, process_date, connection):
                     cdr = tables_cnf[(owner, table_name)]["conds"][0]
                     if status == 'ERROR' and rows_processed == 0:
                         status = 'SKIPPED'
-                    print(f"Table {owner}.{table_name} finished with status {status} and {rows_processed} rows processed.")
+                    logger.info(f"Table {owner}.{table_name} finished with status {status} and {rows_processed} rows processed.")
                     cdr["ctl_status"] = status
                     if status == 'ERROR':
-                        print(f"  Error {sqlcode}: {message}")
+                        logger.info(f"  Error {sqlcode}: {message}")
                     elif status == 'SKIPPED':
-                        print(f"  Skipped {sqlcode}: {message}")
+                        logger.info(f"  Skipped {sqlcode}: {message}")
                     active_tables.remove((owner, table_name))
                     processes.remove(completed_future)
                     break
@@ -142,12 +153,12 @@ def process_tables(tables_cnf, process_date, connection):
                 break
     if all_status_tend(tables_cnf, process_date, connection):
         if process_launched:
-            print("All tables processed successfully.")
+            logger.info("All tables processed successfully.")
         else:
-            print("No tables to process.")
+            logger.info("No tables to process.")
         exit(0)
     else:
-        print("Some tables did not finish successfully.")
+        logger.warn("Some tables did not finish successfully.")
         exit(1)
 
 def run_cli():
@@ -324,22 +335,14 @@ def run_cli():
             process_tables(tables_cnf, process_date, connection)
     except oracledb.DatabaseError as e:
         error, = e.args
-        print(f"Database error: {error.code}: {error.message}")
-        traceback.print_exc()
+        logger.critical(f"Database error:", exc_info=True)
     except Exception as e:
-        print(f"Error:", e)
-        traceback.print_exc()
+        logger.critical(f"Error:", exc_info=True)
     finally:
         if cursor:
-            try:
-                cursor.close()
-            except Exception as e:
-                pass
+            cursor.close()
         if connection:
-            try:
-                connection.close()
-            except Exception as e:
-                pass
+            connection.close()
     
 if __name__ == "__main__":
     run_cli()
