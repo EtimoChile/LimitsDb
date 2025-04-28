@@ -1,110 +1,150 @@
-print("__name__=", __name__)
-if __name__ == "__main__":
-    import re
-    import oracledb
-    from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
-    parallel_max = 10  # Ajusta a tu necesidad
-    dsn = "leon.etimo.cl:1521/alpha"
-    user = "tdb"
-    password = "etm1tdb"
-    action = "MANT_PROD" # "MANT_PROD" o "MANT_HIST"
-    mode = "ALL" # "ALL" o "QUERY ONLY"
-    chunk_size = 100000 # Tamaño del chunk para el procesamiento
-    use_added_cols = True # Si es True, agrega columnas adicionales a la tabla de destino
-    execute = True  # Si es True, ejecuta el bloque PL/SQL, si es False, solo lo imprime
+import re
+import traceback
+import oracledb
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, as_completed
+parallel_max = 10  # Adjust to your needs
+dsn = "leon.etimo.cl:1521/alpha"
+user = "tdb"
+password = "etm1tdb"
+action = "MANT_PROD" # "MANT_PROD" or "MANT_HIST"
+mode = "ALL" # "ALL" or "QUERY ONLY"
+chunk_size = 100000 # Chunk size for processing
+use_added_cols = False # If True, adds additional columns to the destination table
+do_process_tables = True  # If True, executes the PL/SQL block; if False, only prints it
 
 
 def nvl(value, default):
     return default if value is None else value
 
+def get_rows_processed(owner, table_name, process_date, action, process_start, message, plsql_code, conn):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT ctl_rows_processed FROM tdb_ctl
+            WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD')
+        """, [owner, table_name, process_date])
+        result = cursor.fetchone()
+        if result:
+            return result[0]
+        print(f"[WARN] No records found for {owner}.{table_name} on {process_date}, marking as ERROR")
+        cursor.execute("SELECT sysdate FROM dual")
+        process_end, = cursor.fetchone()
+        sqlcode = cursor.var(oracledb.NUMBER)
+        out_message = cursor.var(oracledb.STRING)
+        cursor.callproc('check_save_status', [ owner, table_name, oracledb.Date.fromisoformat(process_start.strftime('%Y-%m-%d')),
+            action, 'ERROR', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message ])
+        conn.commit()
+        return 0
+    except oracledb.DatabaseError as e:
+        traceback.print_exc()
+        return 0
+    finally:
+        if cursor:
+            cursor.close()
+
 def process_table(owner, table_name, plsql_code, referencing_tables, process_date, dsn, user, password):
-    """Worker: ejecuta el bloque PL/SQL para una tabla"""
+    conn = cursor = None
     print(f"Processing table {owner}.{table_name}...")
     try:
         conn = oracledb.connect(user=user, password=password, dsn=dsn)
         print(f"Connected to {dsn} as {user}")
-        print("conn=", conn)
         cursor = conn.cursor()
+        cursor.execute("SELECT sysdate FROM dual")
+        process_start, = cursor.fetchone()
         print(f"Executing PL/SQL for {owner}.{table_name}...")
-        # Intentar marcar TSTART
-        p_sqlcode = cursor.var(oracledb.NUMBER)
-        p_out_message = cursor.var(oracledb.STRING)
-        cursor.callproc('check_save_status', [
-            owner, table_name, process_date, 'MANT_PROD', 'TSTART',
-            None, None, None, None, 0, plsql_code, p_sqlcode, p_out_message
-        ])
-        print(f"check_save_status: {p_sqlcode.getvalue()}")
-        if p_sqlcode.getvalue() is not None:
-            return (owner, table_name, 'SKIPPED', p_sqlcode.getvalue(), p_out_message.getvalue())
-        # Verificar dependencias con check_referencing_tables
-        if referencing_tables:
-            ref_table_array = cursor.arrayvar(oracledb.STRING, [f"{r[0]}.{r[1]}" for r in referencing_tables])
-            cursor.callproc('check_referencing_tables', [ref_table_array, process_date])
-        # Ejecutar el bloque PL/SQL
-        cursor.execute(plsql_code)
-        conn.commit()
-        return (owner, table_name, 'TEND', None, None)
+        cursor.setinputsizes(plsql_code=oracledb.CLOB)
+        cursor.execute(plsql_code, { "plsql_code": plsql_code })
+        rows_processed = get_rows_processed(owner, table_name, process_date, action, process_start, None, plsql_code, conn)
+        return (owner, table_name, 'TEND', rows_processed, None, None)
     except oracledb.DatabaseError as e:
         error, = e.args
-        return (owner, table_name, 'ERROR', error.code, error.message)
+        rows_processed = get_rows_processed(owner, table_name, process_date, action, process_start, error.message, plsql_code, conn)
+        return (owner, table_name, 'ERROR', rows_processed, error.code, error.message)
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def all_status_tend(tables_cnf, process_date, conn):
-    """Verifica si todas las tablas están en TEND para la fecha de proceso"""
-    cursor = conn.cursor()
-    for (owner, table_name) in tables_cnf.keys():
-        cursor.execute("""
-            SELECT ctl_status FROM tdb_ctl
-            WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD')
-        """, [owner, table_name, process_date])
-        result = cursor.fetchone()
-        if not result or result[0] != 'TEND':
+    #Checks if all tables are in TEND status for process_date
+    try:
+        cursor = conn.cursor()
+        for (owner, table_name) in tables_cnf.keys():
+            cursor.execute("""
+                SELECT ctl_status FROM tdb_ctl
+                WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD')
+            """, [owner, table_name, process_date])
+            result = cursor.fetchone()
+            if not result or result[0] != 'TEND':
+                return False
+        return True
+    finally:
+        if 'cursor' in locals():
             cursor.close()
-            return False
-    cursor.close()
-    return True
 
-def execute(tables_cnf, process_date, connection):
+def process_tables(tables_cnf, process_date, connection):
     processes = []
     active_tables = set()
     with ProcessPoolExecutor(max_workers=parallel_max) as executor:
+        process_launched = False
         while True:
-            launched = False
-            # Mientras haya cupo y tablas listas, lanzar procesos
+            # While there are space in the pool, try to launch new processes
             while len(processes) < parallel_max:
+                cycle_launched = False
+                # Search for a process to launch
                 for (owner, table_name), table_info in tables_cnf.items():
-                    if (owner, table_name) in active_tables:
-                        continue  # ya está corriendo
-                    # Lanzar proceso sin verificar dependencias en Python (se hará en Oracle)
+                    cd = tables_cnf[(owner, table_name)]["conds"][0]
+                    if cd["ctl_status"] in ["SKIPPED", "TEND"] or (owner, table_name) in active_tables:
+                        continue
+                    referencing_tables = table_info['referencing_tables']
+                    all_referencing_tables_ready = True
+                    if referencing_tables:
+                        for ref_owner, ref_table in referencing_tables:
+                            cdr = tables_cnf[(ref_owner, ref_table)]["conds"][0]
+                            if cdr["ctl_status"] != "TEND":
+                                all_referencing_tables_ready = False
+                                break # referencing table not TEND status
+                    if not all_referencing_tables_ready:
+                        print(f"Table {owner}.{table_name} is waiting for referencing tables to finish...")
+                        continue
                     print(f"Launching process for {owner}.{table_name}...")
                     future = executor.submit(
                         process_table, owner, table_name, table_info['plsql'],
-                        table_info['referencing_tables'], process_date, dsn, user, password
+                        referencing_tables, process_date, dsn, user, password
                     )
                     processes.append(future)
                     active_tables.add((owner, table_name))
-                    launched = True
-                    break  # lanzar solo uno por iteración
-                if not launched:
-                    break  # no hay más tablas disponibles por ahora
+                    table_info["conds"][0]["ctl_status"] = "TSTART"
+                    cycle_launched = True
+                    process_launched = True
+                    break  # Launch only one process at a time
+                if not cycle_launched:
+                    break  # There are no processes to launch, so go to waitting some process to end
+            print(f"Active processes: {len(processes)}")
             if processes:
-                # Esperar que termine al menos un proceso
-                done, _ = wait(processes, return_when=FIRST_COMPLETED)
-                for d in done:
-                    owner, table_name, status, sqlcode, message = d.result()
-                    print(f"Table {owner}.{table_name} finished with status {status}")
+                # Wait for some process to finish
+                for completed_future in as_completed(processes):
+                    owner, table_name, status, rows_processed, sqlcode, message = completed_future.result()
+                    cdr = tables_cnf[(owner, table_name)]["conds"][0]
+                    if status == 'ERROR' and rows_processed == 0:
+                        status = 'SKIPPED'
+                    print(f"Table {owner}.{table_name} finished with status {status} and {rows_processed} rows processed.")
+                    cdr["ctl_status"] = status
                     if status == 'ERROR':
                         print(f"  Error {sqlcode}: {message}")
                     elif status == 'SKIPPED':
                         print(f"  Skipped {sqlcode}: {message}")
                     active_tables.remove((owner, table_name))
-                    processes.remove(d)
+                    processes.remove(completed_future)
+                    break
             else:
                 break
     if all_status_tend(tables_cnf, process_date, connection):
-        print("All tables processed successfully.")
+        if process_launched:
+            print("All tables processed successfully.")
+        else:
+            print("No tables to process.")
         exit(0)
     else:
         print("Some tables did not finish successfully.")
@@ -116,15 +156,16 @@ def run_cli():
         cursor = connection.cursor()
         cursor.execute("select to_char(sysdate,'YYYYMMDD') from dual")
         process_date, = cursor.fetchone()
-        if not execute:
-            process_date = "&process_date"
         cursor.execute("""select cnf_id, cnf_prod_owner, cnf_hist_owner, cnf_table_name, cnf_months_keep_prod, cnf_months_keep_hist, cnf_exec_day, cnf_frecuency, 
             cnf_is_active, cnf_purge_limit_date_expr, cnf_additional_expr, cnf_prod_orphan_purge, cnf_orphan_chk_column, cnf_has_lob, 
-            cnf_ref_tables, cnf_join_expr, cnf_hint_expr, cnf_long_cols
-            from tdb_conf
-            where cnf_is_active = 'Y'""")
+            cnf_ref_tables, cnf_join_expr, cnf_hint_expr, cnf_long_cols, ctl_status
+            from tdb_conf cnf
+            left outer join tdb_ctl ctl on (cnf_prod_owner = ctl_owner  and cnf_table_name = ctl_table_name and ctl_process_date = to_date(:1, 'YYYYMMDD'))
+            where cnf_is_active = 'Y'""", [process_date])
         columns = [col[0].lower() for col in cursor.description]
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        if not do_process_tables:
+            process_date = "&process_date"
         tables_cnf = {}
         for row in rows:
             key = (row["cnf_prod_owner"], row["cnf_table_name"])
@@ -140,7 +181,7 @@ def run_cli():
                     ref_key = (ref_owner.upper(), ref_table.upper())
                     if ref_key not in tables_cnf: tables_cnf[ref_key] = { "conds": [], "referencing_tables": [] }
                     tables_cnf[ref_key]["referencing_tables"].append(key)
-        if not execute:
+        if not do_process_tables:
             print("""
 
 
@@ -156,7 +197,6 @@ def run_cli():
             ref_tables = cnd["cnf_ref_tables"]
             added_conds = [("A", cond) for cond in table_cnf["conds"]]
             referencing_tables = table_cnf["referencing_tables"]
-            # print("referencing_tables", referencing_tables)
             if ref_tables:
                 for ref_table in ref_tables.split(","):
                     ref_table = ref_table.strip()
@@ -165,7 +205,6 @@ def run_cli():
                     ref_table, alias = ref_table.split(" ")
                     ref_conds = tables_cnf[(ref_owner, ref_table)]["conds"]
                     added_conds.extend([(alias, cond) for cond in ref_conds])
-            # print("added_conds", added_conds)
             for al, cd in added_conds:
                 cond_list = []
                 pld_expr = nvl(cd["cnf_purge_limit_date_expr"], "")
@@ -207,7 +246,7 @@ def run_cli():
                     l_referencing_tables t_referencing_tables := t_referencing_tables({", ".join([f"'{rt[0]+"."+rt[1]}'" for rt in referencing_tables])});
                     l_process_start date;
                     l_record_count pls_integer := 0;
-                    l_plsql clob;
+                    l_plsql clob := {"null" if not do_process_tables else ":plsql_code"};
                     l_sqlcode number := null;
                     l_out_message varchar2(200) := null;{f"""
                     l_chunk_size pls_integer := {chunk_size};
@@ -220,7 +259,7 @@ def run_cli():
                     r_rec t_records;""" if cnd["cnf_has_lob"] == "N" else ""}
                 begin
                     l_process_start := sysdate;
-                    check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TSTART', l_process_start, null, null, l_message, 0, null, l_sqlcode, l_out_message);
+                    check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TSTART', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
                     if l_sqlcode is not null then
                         raise_application_error(l_sqlcode, l_out_message);
                     end if;
@@ -269,29 +308,38 @@ def run_cli():
                     check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'ERROR', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
                     commit;
                     if l_sqlcode not in (-20003) then
-                    raise;
+                        raise;
                     end if;
                 end;"""
-            if not execute:
+            if not do_process_tables:
                 print(f"rem table: {cnf_table_name}")
                 print(plsql)
                 print("/")
             tables_cnf[key]["plsql"] = plsql
-        if not execute:
+        if not do_process_tables:
             print("""spool off
     exit 0
     """)
-        cursor.close()
-        execute(tables_cnf, process_date, connection)
-        connection.close()
+        else:
+            process_tables(tables_cnf, process_date, connection)
     except oracledb.DatabaseError as e:
         error, = e.args
         print(f"Database error: {error.code}: {error.message}")
+        traceback.print_exc()
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"Error:", e)
+        traceback.print_exc()
     finally:
-        if 'cursor' in locals():
-            cursor.close()
-        if 'connection' in locals():
-            connection.close()
+        if cursor:
+            try:
+                cursor.close()
+            except Exception as e:
+                pass
+        if connection:
+            try:
+                connection.close()
+            except Exception as e:
+                pass
     
+if __name__ == "__main__":
+    run_cli()
