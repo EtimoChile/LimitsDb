@@ -1,35 +1,15 @@
 import logging
 import datetime
 import oracledb
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from terminusdb.db.oracle.plsql_generator import generate_plsql_block
+from terminusdb.core.config import DEFAULT_CONFIG, Config
+from terminusdb.core.utils import get_logger, load_yaml_config, merge_configs, nvl, configure_logger, parse_args, reconfigure_logger
 
-# Executions parameters
-parallel_max = 10  # Adjust to your needs
-dsn = "leon.etimo.cl:1521/alpha"
-user = "tdb"
-password = "etm1tdb"
-action = "MANT_PROD" # "MANT_PROD" or "MANT_HIST"
-mode = "ALL" # "ALL" or "QUERY ONLY"
-chunk_size = 100000 # Chunk size for processing
-use_added_cols = False # If True, adds additional columns to the destination table
-do_process_tables = True  # If True, executes the PL/SQL block; if False, only prints it
+configure_logger(level="WARNING")
 
-# Configure professional logger
-logger = logging.getLogger("terminusdb")
-logger.setLevel(logging.DEBUG)
-console_handler = logging.StreamHandler()
-formatter = logging.Formatter(
-    fmt="%(asctime)s [%(levelname)s] %(processName)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
-
-def nvl(value, default):
-    return default if value is None else value
-
-def get_rows_processed(owner, table_name, process_date, conn):
+def get_rows_processed(config, owner, table_name, process_date, conn):
+    logger = get_logger()
     try:
         cursor = conn.cursor()
         cursor.execute("""
@@ -50,7 +30,8 @@ def get_rows_processed(owner, table_name, process_date, conn):
         if cursor:
             cursor.close()
 
-def save_error_status(owner, table_name, process_date, action, process_start, message, plsql_code, conn):
+def save_error_status(config, owner, table_name, process_date, process_start, message, plsql_code, conn):
+    logger = get_logger()
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT sysdate FROM dual")
@@ -59,7 +40,7 @@ def save_error_status(owner, table_name, process_date, action, process_start, me
         out_message = cursor.var(oracledb.STRING)
         process_date = datetime.datetime.strptime(process_date, "%Y%m%d").date()
         cursor.callproc('check_save_status', [ owner, table_name, process_date,
-            action, 'ERROR', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message ])
+            config.action, 'ERROR', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message ])
         conn.commit()
     except Exception as e:
         logger.critical(f"Unexpected error in process_table for {owner}.{table_name}:", exc_info=True)
@@ -68,13 +49,14 @@ def save_error_status(owner, table_name, process_date, action, process_start, me
         if cursor:
             cursor.close()
 
-def process_table(owner, table_name, plsql_code, referencing_tables, process_date, dsn, user, password):
+def process_table(config, owner, table_name, plsql_code, referencing_tables, process_date):
+    logger = get_logger()
     conn = cursor = None
     logger.info(f"Processing table {owner}.{table_name}...")
     prev_rows_processed = 0
     try:
-        conn = oracledb.connect(user=user, password=password, dsn=dsn)
-        logger.info(f"Connected to {dsn} as {user}")
+        conn = oracledb.connect(user=config.user, password=config.password, dsn=config.dsn)
+        logger.info(f"Connected to {config.dsn} as {config.user}")
         cursor = conn.cursor()
         cursor.execute("SELECT sysdate FROM dual")
         process_start, = cursor.fetchone()
@@ -88,7 +70,7 @@ def process_table(owner, table_name, plsql_code, referencing_tables, process_dat
         error, = e.args
         try:
             rows_processed = get_rows_processed(owner, table_name, process_date, conn)
-            save_error_status(owner, table_name, process_date, action, process_start, error.message, plsql_code, conn)
+            save_error_status(config, owner, table_name, process_date, process_start, error.message, plsql_code, conn)
         except Exception as e:
             logger.critical(f"Error getting rows processed for {owner}.{table_name}:", exc_info=True)
             rows_processed = 0
@@ -99,7 +81,7 @@ def process_table(owner, table_name, plsql_code, referencing_tables, process_dat
         if conn:
             conn.close()
 
-def all_status_tend(tables_cnf, process_date, conn):
+def all_status_tend(config, tables_cnf, process_date, conn):
     #Checks if all tables are in TEND status for process_date
     try:
         cursor = conn.cursor()
@@ -116,16 +98,16 @@ def all_status_tend(tables_cnf, process_date, conn):
         if 'cursor' in locals():
             cursor.close()
 
-def print_tables(tables_cnf):
+def print_tables(config, tables_cnf):
     print("""
 
 
-        whenever oserror exit 1
-        whenever sqlerror exit 1
-        set echo on ver off trimspool on
-        spool tdb_BHE.log
-        COLUMN process_date NEW_VALUE process_date
-        SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
+whenever oserror exit 1
+whenever sqlerror exit 1
+set echo on ver off trimspool on
+spool tdb_BHE.log
+COLUMN process_date NEW_VALUE process_date
+SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
     """)
     while True:
         cycle_printed = False
@@ -151,18 +133,19 @@ def print_tables(tables_cnf):
         if not cycle_printed:
             break  # There are no processes to launch, so go to waitting some process to end
     print("""
-        spool off
-        exit 0
-        """)
+spool off
+exit 0
+""")
 
-def process_tables(tables_cnf, process_date, connection):
+def process_tables(config, tables_cnf, process_date, connection):
+    logger = get_logger()
     processes = []
     active_tables = set()
-    with ProcessPoolExecutor(max_workers=parallel_max) as executor:
+    with ProcessPoolExecutor(max_workers=config.parallel_max) as executor:
         process_launched = False
         while True:
             # While there are space in the pool, try to launch new processes
-            while len(processes) < parallel_max:
+            while len(processes) < config.parallel_max:
                 cycle_launched = False
                 # Search for a process to launch
                 for (owner, table_name), table_info in tables_cnf.items():
@@ -182,8 +165,8 @@ def process_tables(tables_cnf, process_date, connection):
                         continue
                     logger.info(f"Launching background process for {owner}.{table_name}...")
                     future = executor.submit(
-                        process_table, owner, table_name, table_info['plsql'],
-                        referencing_tables, process_date, dsn, user, password
+                        process_table, config, owner, table_name, table_info['plsql'],
+                        referencing_tables, process_date, config
                     )
                     processes.append(future)
                     active_tables.add((owner, table_name))
@@ -212,7 +195,7 @@ def process_tables(tables_cnf, process_date, connection):
                     break
             else:
                 break
-    if all_status_tend(tables_cnf, process_date, connection):
+    if all_status_tend(config, tables_cnf, process_date, connection):
         if process_launched:
             logger.info("All tables processed successfully.")
         else:
@@ -223,8 +206,17 @@ def process_tables(tables_cnf, process_date, connection):
         exit(1)
 
 def run_cli():
+    logger = get_logger()
+    args = parse_args()
+    file_config = load_yaml_config(args.config_file)
+    raw_config = merge_configs(DEFAULT_CONFIG, file_config, args)
+    config = Config(raw_config)
+    reconfigure_logger(level=config.log_level)
+    logger.debug(f"Default Configuration: {DEFAULT_CONFIG}")
+    logger.debug(f"Args Configuration: {args}")
+    logger.debug(f"Configuration: {config.as_dict()}")
     try:
-        connection = oracledb.connect(user=user, password=password, dsn=dsn)
+        connection = oracledb.connect(user=config.user, password=config.password, dsn=config.dsn)
         cursor = connection.cursor()
         cursor.execute("select to_char(sysdate,'YYYYMMDD') from dual")
         process_date, = cursor.fetchone()
@@ -236,7 +228,7 @@ def run_cli():
             where cnf_is_active = 'Y'""", [process_date])
         columns = [col[0].lower() for col in cursor.description]
         rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        if not do_process_tables:
+        if config.print_process:
             process_date = "&process_date"
         tables_cnf = {}
         for row in rows:
@@ -279,9 +271,9 @@ def run_cli():
             cnf_months_keep_hist_max = max(cd.get("cnf_months_keep_hist", 0) or 0 for al, cd in added_conds)
             where_expr = "\n        or ".join([f"({cd["cond_expr"]})" for al, cd in added_conds if cd["cond_expr"]])
             other_cols_exprs = [f"{cd["cnf_purge_limit_date_expr"].replace("@", f"{al}.")} tdb_date_{al}{cd["cnf_id"]}"
-                for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if use_added_cols else []
+                for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if config.use_added_cols else []
             other_cols_alias = [f"tdb_date_{al}{cd["cnf_id"]}"
-                for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if use_added_cols else []
+                for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if config.use_added_cols else []
             cnf_table_name, cnf_prod_owner, cnf_hist_owner = cnd["cnf_table_name"], cnd["cnf_prod_owner"], cnd["cnf_hist_owner"]
             cnf_join_expr, cnf_prod_orphan_purge, cnf_hint_expr = cnd["cnf_join_expr"], cnd["cnf_prod_orphan_purge"], cnd["cnf_hint_expr"]
             cursor.execute("""select lower(column_name) column_name
@@ -297,13 +289,13 @@ def run_cli():
             if cnd["cnf_long_cols"] and has_lob:
                 long_cols = [c.strip().lower() for c in cnd["cnf_long_cols"].split(",")]
                 table_columns = list(set([col.lower for col in table_columns]) - set(long_cols))
-            plsql = generate_plsql_block(cnf_prod_owner, cnf_hist_owner, cnf_table_name, process_date, action, mode, chunk_size, do_process_tables,
-                cnf_hint_expr, query_expr, table_columns, other_cols_exprs, other_cols_alias, referencing_tables, has_lob, cnf_months_keep_hist_max)
+            plsql = generate_plsql_block(config, cnf_prod_owner, cnf_hist_owner, cnf_table_name, process_date, cnf_hint_expr,
+                query_expr, table_columns, other_cols_exprs, other_cols_alias, referencing_tables, has_lob, cnf_months_keep_hist_max)
             tables_cnf[key]["plsql"] = plsql
-        if not do_process_tables:
-            print_tables(tables_cnf)
+        if config.print_process:
+            print_tables(config, tables_cnf)
         else:
-            process_tables(tables_cnf, process_date, connection)
+            process_tables(config, tables_cnf, process_date, connection)
     except oracledb.DatabaseError as e:
         error, = e.args
         logger.critical(f"Database error:", exc_info=True)
