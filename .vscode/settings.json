@@ -1,0 +1,14 @@
+{
+    "python.analysis.extraPaths": ["./terminusdb"],
+    "python.defaultInterpreterPath": ".venv/Scripts/python.exe",  // en Windows
+    "python.analysis.typeCheckingMode": "strict",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "always",
+      "source.fixAll": "always"
+    },
+    "files.exclude": {
+      "**/__pycache__/": true
+    }
+  }
+  

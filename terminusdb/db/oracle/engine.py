@@ -1,0 +1,303 @@
+from terminusdb.db.engines import DatabaseEngine
+from terminusdb.core.utils import Config, get_logger
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+import oracledb
+
+class OracleEngine(DatabaseEngine):
+    """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
+
+    @staticmethod
+    def get_connection(config: Config) -> oracledb.Connection:
+        """Returns an Oracle connection using provided config.
+        Args:
+            config: Database config object.
+        Returns:
+            An active oracledb.Connection."""
+        logger = get_logger()
+        try:
+            return oracledb.connect(user=config.user, password=config.password, dsn=config.dsn) # type: ignore
+        except Exception:
+            logger.critical("Failed to connect to Oracle DB.", exc_info=True)
+            raise
+
+    @staticmethod
+    def get_system_date(conn: oracledb.Connection) -> datetime:
+        """Returns the current system date from Oracle.
+        Args:
+            conn: Active Oracle connection.
+        Returns:
+            Current system date as Python date."""
+        logger = get_logger()
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT SYSDATE FROM dual") # type: ignore
+            sysdate: datetime = cursor.fetchone()[0]
+            return sysdate
+        except Exception:
+            logger.critical("Failed to retrieve system date from Oracle.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def load_config(conn: oracledb.Connection) -> List[Dict[str, Any]]:
+        """Loads configuration from tdb_conf.
+        Args:
+            conn: Active Oracle connection.
+        Returns:
+            List of configuration rows."""
+        logger = get_logger()
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute( # type: ignore
+                """SELECT cnf_id, cnf_prod_owner, cnf_hist_owner, cnf_table_name, cnf_months_keep_prod,
+                       cnf_months_keep_hist, cnf_exec_day, cnf_frecuency, cnf_is_active, cnf_purge_limit_date_expr,
+                       cnf_additional_expr, cnf_prod_orphan_purge, cnf_orphan_chk_column, cnf_has_lob,
+                       cnf_ref_tables, cnf_join_expr, cnf_hint_expr, cnf_long_cols, null ctl_status
+                FROM tdb_conf
+                WHERE cnf_is_active = 'Y'""")
+            cols = [col[0].lower() for col in cursor.description] # type: ignore
+            return [dict(zip(cols, row)) for row in cursor.fetchall()] # type: ignore
+        except Exception:
+            logger.critical("Failed to load configuration from Oracle.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def get_status(conn: oracledb.Connection, process_date: str) -> List[Dict[str, Any]]:
+        """Loads status from tdb_ctl for the given process date.
+        Args:
+            conn: Active Oracle connection.
+            process_date: Date in 'YYYYMMDD' format.
+        Returns:
+            List of status rows."""
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute( # type: ignore
+                """SELECT ctl_owner, ctl_table_name, ctl_status
+                FROM tdb_ctl
+                WHERE ctl_process_date = TO_DATE(:1, 'YYYYMMDD')""", [process_date])
+            cols = [col[0].lower() for col in cursor.description] # type: ignore
+            return [dict(zip(cols, row)) for row in cursor.fetchall()] # type: ignore
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def generate_proc(config: Config, prod_owner: str, hist_owner: str, table_name: str, process_date: str, hint_expr: str,
+                      query_expr: str, table_columns: List[str], other_cols_exprs: List[str], other_cols_alias: List[str],
+                      referencing_tables: List[Tuple[str, str]], has_lob: bool, cnf_months_keep_hist_max: int) -> str:
+        """Generates a PL/SQL block for table processing with optional chunking and LOB handling.
+        Args:
+            config: Config with action, mode, chunk_size, print_process.
+            prod_owner: Production schema.
+            hist_owner: History schema.
+            table_name: Table to process.
+            process_date: YYYYMMDD date.
+            hint_expr: SQL hint.
+            query_expr: Main FROM/WHERE clause.
+            table_columns: Base columns.
+            other_cols_exprs: Extra column expressions.
+            other_cols_alias: Aliases for extra columns.
+            referencing_tables: Tables with FK to current.
+            has_lob: If table contains LOBs.
+            cnf_months_keep_hist_max: Retention months.
+        Returns:
+            PL/SQL block as string."""
+        logger = get_logger()
+        logger.debug(f"Generating PL/SQL block for table {prod_owner}.{table_name} with process date {process_date}")
+        ref_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
+        col_insert = ", ".join(table_columns + other_cols_alias)
+        col_values = ", ".join([f"r_rec(i).{col}" for col in table_columns + other_cols_alias])
+        plsql = f"""declare
+        l_prod_owner varchar2(50) := '{prod_owner}'; l_hist_owner varchar2(50) := '{hist_owner}';
+        l_action varchar2(10) := '{config.action}'; l_mode varchar2(10) := '{config.mode}';
+        l_message varchar2(200) := case when l_mode = 'ALL' then null else 'QUERY ONLY' end;
+        l_table_name varchar2(50) := '{table_name}'; l_process_date date := to_date('{process_date}', 'YYYYMMDD');
+        l_referencing_tables t_referencing_tables := t_referencing_tables({ref_tables});
+        l_process_start date; l_record_count pls_integer := 0;
+        l_plsql clob := {'null' if config.print_process else ':plsql_code'};
+        l_sqlcode number := null; l_out_message varchar2(200) := null;
+        """
+        if not has_lob:
+            cols_expr = ", ".join(["A.*"] + other_cols_exprs)
+            plsql += f"""
+        l_chunk_size pls_integer := {config.chunk_size}; l_chunk_start date;
+        cursor c_records is select /*+ {hint_expr} */ A.rowid, {cols_expr} {query_expr};
+        type t_records is table of c_records%rowtype index by pls_integer; r_rec t_records;
+        """
+        plsql += """
+    begin
+        l_process_start := sysdate;
+        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TSTART', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
+        if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;
+        check_referencing_tables(l_referencing_tables, l_process_date); commit;
+        """
+        if not has_lob:
+            plsql += """
+        open c_records; loop l_chunk_start := sysdate;
+        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'CSTART', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
+        fetch c_records bulk collect into r_rec limit l_chunk_size;
+        if r_rec.count > 0 then if (l_mode = 'ALL') then
+        """
+            if config.action == "MANT_PROD" and cnf_months_keep_hist_max > 0:
+                plsql += f"""
+            for i in 1 .. r_rec.count loop
+                insert into {table_name.lower()}@hist ({col_insert}) values ({col_values});
+            end loop;
+                """
+            plsql += f"""
+            forall i in 1 .. r_rec.count delete from {table_name.lower()} where rowid = r_rec(i).rowid;
+            end if; l_record_count := l_record_count + r_rec.count;
+            check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'CEND', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
+            commit; else exit; end if;
+        end loop; close c_records;
+            """
+        else:
+            cols_select = ", ".join([f"a.{col}" for col in table_columns] + other_cols_exprs)
+            plsql += f"""
+        if (l_mode = 'ALL') then
+            insert into {table_name.lower()}@hist ({col_insert}) select /*+ {hint_expr} */ {cols_select} {query_expr};
+            delete from {table_name.lower()} where rowid in (select /*+ {hint_expr} */ a.rowid {query_expr});
+            l_record_count := sql%rowcount;
+        else select /*+ {hint_expr} */ count(*) into l_record_count {query_expr}; end if;
+            """
+        plsql += """
+        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TEND', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
+        commit;
+    exception
+        when others then rollback;
+        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'ERROR', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
+        commit; if l_sqlcode not in (-20003) then raise; end if;
+    end;"""
+        return plsql
+
+    @staticmethod
+    def get_rows_processed(conn: oracledb.Connection, owner: str, table_name: str, process_date: str) -> int:
+        """Returns rows processed for a given table and process date from tdb_ctl.
+        Args:
+            conn: Active Oracle connection.
+            owner: Schema owner of the table.
+            table_name: Table name.
+            process_date: Target process date in 'YYYYMMDD'.
+        Returns:
+            Number of rows processed or 0 if none found or mismatched date."""
+        logger = get_logger()
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute( # type: ignore
+                """SELECT ctl_rows_processed
+                FROM tdb_ctl WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD')""",
+                [owner, table_name, process_date])
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        except Exception:
+            logger.critical(f"Unexpected error in get_rows_processed for {owner}.{table_name}:", exc_info=True)
+            return 0
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def save_error_status(conn: oracledb.Connection, config: Config, owner: str, table_name: str, process_date: str, process_start: datetime, message: str, plsql_code: str) -> None:
+        logger = get_logger()
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            process_end = OracleEngine.get_system_date(conn)
+            sqlcode = cursor.var(oracledb.NUMBER) # type: ignore
+            out_message = cursor.var(oracledb.STRING) # type: ignore
+            cursor.callproc('check_save_status', [owner, table_name, datetime.strptime(process_date, "%Y%m%d").date(), # type: ignore
+                config.action, 'ERROR', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message])
+            conn.commit()
+        except Exception as e:
+            logger.critical(f"Unexpected error in process_table for {owner}.{table_name}:", exc_info=True)
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def sp_run(conn: oracledb.Connection, plsql_code: str, owner: str, table_name: str) -> None:
+        """Executes a PL/SQL block on the database.
+        Args:
+            conn: Active Oracle connection.
+            plsql_code: The PL/SQL block to execute.
+            owner: Schema owner.
+            table_name: Table name (used for logging)."""
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.setinputsizes(plsql_code=oracledb.CLOB)  # type: ignore
+            cursor.execute(plsql_code, {"plsql_code": plsql_code})  # type: ignore
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def all_status_tend(conn: oracledb.Connection, tables_cnf: Dict[Tuple[str, str], Any], process_date: str) -> bool:
+        """Checks if all referenced tables have status 'TEND' in tdb_ctl.
+        Args:
+            conn: Active Oracle connection.
+            tables_cnf: Dict of (owner, table_name) keys representing configured tables.
+            process_date: Processing date in 'YYYYMMDD' format.
+        Returns:
+            True if all tables have status 'TEND' for the given process date, False otherwise."""
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            for (owner, table_name) in tables_cnf.keys():
+                cursor.execute( # type: ignore
+                    """SELECT ctl_status FROM tdb_ctl
+                    WHERE ctl_owner = :1 AND ctl_table_name = :2
+                    AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD') AND ctl_status = 'TEND'""",
+                    [owner, table_name, process_date])
+                if not cursor.fetchone():
+                    return False
+            return True
+        finally:
+            if cursor:
+                cursor.close()
+
+
+    @staticmethod
+    def get_table_columns(conn: oracledb.Connection, owner: str, table_name: str) -> List[str]:
+        """Returns a list of column names for a given table in the specified schema.
+        Args:
+            conn: Active Oracle connection.
+            owner: Schema owner of the table.
+            table_name: Table name.
+        Returns:
+            List of column names in lowercase."""
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute( # type: ignore
+                """select lower(column_name) column_name
+                from all_tab_columns
+                where  owner = upper(:2)  and table_name = upper(:1) and column_id is not null
+                order by column_id""", (owner, table_name))
+            return [row[0] for row in cursor.fetchall()] # type: ignore
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def close_connection(conn: oracledb.Connection) -> None:
+        """Closes the Oracle connection.
+        Args:
+            conn: Active Oracle connection."""
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            logger = get_logger()
+            logger.critical("Failed to close Oracle DB connection.", exc_info=True)
+
