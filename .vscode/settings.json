@@ -1,5 +1,5 @@
 {
-    "python.analysis.extraPaths": ["./terminusdb"],
+    "python.analysis.extraPaths": ["."],
     "python.defaultInterpreterPath": ".venv/Scripts/python.exe",  // en Windows
     "python.analysis.typeCheckingMode": "strict",
     "editor.formatOnSave": true,

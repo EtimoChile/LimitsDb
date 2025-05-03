@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from terminusdb.core.utils import Config
+from terminusdb.core.config import Config
 from typing import Any, List, Dict, Tuple
 from datetime import datetime
 
@@ -78,7 +78,7 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def generate_proc(config: Config, prod_owner: str, hist_owner: str, table_name: str, process_date: str,
+    def generate_sql_block(config: Config, prod_owner: str, hist_owner: str, table_name: str, process_date: str,
                       hint_expr: str, query_expr: str, table_columns: List[str], other_cols_exprs: List[str],
                       other_cols_alias: List[str], referencing_tables: List[Tuple[str, str]], has_lob: bool,
                       cnf_months_keep_hist_max: int) -> str:
@@ -103,7 +103,7 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def sp_run(conn: Any, plsql_code: str, owner: str, table_name: str) -> None:
+    def sql_block_run(conn: Any, plsql_code: str, owner: str, table_name: str) -> None:
         """Executes a PL/SQL or SQL block against the database.
         Args:
             conn: Active database connection.

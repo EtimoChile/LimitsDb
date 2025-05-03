@@ -1,5 +1,6 @@
+from terminusdb.core.config import Config
 from terminusdb.db.engines import DatabaseEngine
-from terminusdb.core.utils import Config, get_logger
+from terminusdb.core.logger import get_logger
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import oracledb
@@ -91,7 +92,7 @@ class OracleEngine(DatabaseEngine):
                 cursor.close()
 
     @staticmethod
-    def generate_proc(config: Config, prod_owner: str, hist_owner: str, table_name: str, process_date: str, hint_expr: str,
+    def generate_sql_block(config: Config, prod_owner: str, hist_owner: str, table_name: str, process_date: str, hint_expr: str,
                       query_expr: str, table_columns: List[str], other_cols_exprs: List[str], other_cols_alias: List[str],
                       referencing_tables: List[Tuple[str, str]], has_lob: bool, cnf_months_keep_hist_max: int) -> str:
         """Generates a PL/SQL block for table processing with optional chunking and LOB handling.
@@ -116,67 +117,67 @@ class OracleEngine(DatabaseEngine):
         ref_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
         col_insert = ", ".join(table_columns + other_cols_alias)
         col_values = ", ".join([f"r_rec(i).{col}" for col in table_columns + other_cols_alias])
-        plsql = f"""declare
-        l_prod_owner varchar2(50) := '{prod_owner}'; l_hist_owner varchar2(50) := '{hist_owner}';
-        l_action varchar2(10) := '{config.action}'; l_mode varchar2(10) := '{config.mode}';
-        l_message varchar2(200) := case when l_mode = 'ALL' then null else 'QUERY ONLY' end;
-        l_table_name varchar2(50) := '{table_name}'; l_process_date date := to_date('{process_date}', 'YYYYMMDD');
-        l_referencing_tables t_referencing_tables := t_referencing_tables({ref_tables});
-        l_process_start date; l_record_count pls_integer := 0;
-        l_plsql clob := {'null' if config.print_process else ':plsql_code'};
-        l_sqlcode number := null; l_out_message varchar2(200) := null;
-        """
+        if config.print_process: process_date = "&process_date"
+        plsql = f"""        declare
+            l_prod_owner varchar2(50) := '{prod_owner}';
+            l_hist_owner varchar2(50) := '{hist_owner}';
+            l_action varchar2(10) := '{config.action}';
+            l_mode varchar2(10) := '{config.mode}';
+            l_message varchar2(200) := case when l_mode = 'ALL' then null else 'QUERY ONLY' end;
+            l_table_name varchar2(50) := '{table_name}';
+            l_process_date date := to_date('{process_date}', 'YYYYMMDD');
+            l_referencing_tables t_referencing_tables := t_referencing_tables({ref_tables});
+            l_process_start date;
+            l_record_count pls_integer := 0;
+            l_plsql clob := {'null' if config.print_process else ':plsql_code'};
+            l_sqlcode number := null;
+            l_out_message varchar2(200) := null;"""
         if not has_lob:
             cols_expr = ", ".join(["A.*"] + other_cols_exprs)
             plsql += f"""
-        l_chunk_size pls_integer := {config.chunk_size}; l_chunk_start date;
-        cursor c_records is select /*+ {hint_expr} */ A.rowid, {cols_expr} {query_expr};
-        type t_records is table of c_records%rowtype index by pls_integer; r_rec t_records;
-        """
+            l_chunk_size pls_integer := {config.chunk_size}; l_chunk_start date;
+            cursor c_records is select /*+ {hint_expr} */ A.rowid, {cols_expr} {query_expr};
+            type t_records is table of c_records%rowtype index by pls_integer; r_rec t_records;"""
         plsql += """
-    begin
-        l_process_start := sysdate;
-        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TSTART', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
-        if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;
-        check_referencing_tables(l_referencing_tables, l_process_date); commit;
-        """
+        begin
+            l_process_start := sysdate;
+            check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TSTART', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
+            if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;
+            check_referencing_tables(l_referencing_tables, l_process_date); commit;"""
         if not has_lob:
             plsql += """
-        open c_records; loop l_chunk_start := sysdate;
-        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'CSTART', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
-        fetch c_records bulk collect into r_rec limit l_chunk_size;
-        if r_rec.count > 0 then if (l_mode = 'ALL') then
-        """
+            open c_records; loop l_chunk_start := sysdate;
+            check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'CSTART', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
+            fetch c_records bulk collect into r_rec limit l_chunk_size;
+            if r_rec.count > 0 then if (l_mode = 'ALL') then"""
             if config.action == "MANT_PROD" and cnf_months_keep_hist_max > 0:
                 plsql += f"""
-            for i in 1 .. r_rec.count loop
-                insert into {table_name.lower()}@hist ({col_insert}) values ({col_values});
-            end loop;
-                """
+                for i in 1 .. r_rec.count loop
+                    insert into {table_name.lower()}@hist ({col_insert}) values ({col_values});
+                end loop;"""
             plsql += f"""
-            forall i in 1 .. r_rec.count delete from {table_name.lower()} where rowid = r_rec(i).rowid;
-            end if; l_record_count := l_record_count + r_rec.count;
-            check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'CEND', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
-            commit; else exit; end if;
-        end loop; close c_records;
-            """
+                forall i in 1 .. r_rec.count delete from {table_name.lower()} where rowid = r_rec(i).rowid;
+                end if; l_record_count := l_record_count + r_rec.count;
+                check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'CEND', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
+                commit; else exit; end if;
+            end loop; close c_records;"""
         else:
             cols_select = ", ".join([f"a.{col}" for col in table_columns] + other_cols_exprs)
             plsql += f"""
-        if (l_mode = 'ALL') then
-            insert into {table_name.lower()}@hist ({col_insert}) select /*+ {hint_expr} */ {cols_select} {query_expr};
-            delete from {table_name.lower()} where rowid in (select /*+ {hint_expr} */ a.rowid {query_expr});
-            l_record_count := sql%rowcount;
-        else select /*+ {hint_expr} */ count(*) into l_record_count {query_expr}; end if;
-            """
+            if (l_mode = 'ALL') then
+                insert into {table_name.lower()}@hist ({col_insert}) select /*+ {hint_expr} */ {cols_select} {query_expr};
+                delete from {table_name.lower()} where rowid in (select /*+ {hint_expr} */ a.rowid {query_expr});
+                l_record_count := sql%rowcount;
+            else select /*+ {hint_expr} */ count(*) into l_record_count {query_expr}; end if;"""
         plsql += """
-        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TEND', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
-        commit;
-    exception
-        when others then rollback;
-        check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'ERROR', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
-        commit; if l_sqlcode not in (-20003) then raise; end if;
-    end;"""
+            check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'TEND', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
+            commit;
+        exception
+            when others then rollback;
+            check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'ERROR', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
+            commit; if l_sqlcode not in (-20003) then raise; end if;
+        end;"""
+        plsql = "\n".join([line[8:] if line.startswith("        ") else line for line in plsql.splitlines()])
         return plsql
 
     @staticmethod
@@ -218,14 +219,14 @@ class OracleEngine(DatabaseEngine):
             cursor.callproc('check_save_status', [owner, table_name, datetime.strptime(process_date, "%Y%m%d").date(), # type: ignore
                 config.action, 'ERROR', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message])
             conn.commit()
-        except Exception as e:
+        except Exception:
             logger.critical(f"Unexpected error in process_table for {owner}.{table_name}:", exc_info=True)
         finally:
             if cursor:
                 cursor.close()
 
     @staticmethod
-    def sp_run(conn: oracledb.Connection, plsql_code: str, owner: str, table_name: str) -> None:
+    def sql_block_run(conn: oracledb.Connection, plsql_code: str, owner: str, table_name: str) -> None:
         """Executes a PL/SQL block on the database.
         Args:
             conn: Active Oracle connection.
@@ -282,8 +283,8 @@ class OracleEngine(DatabaseEngine):
             cursor.execute( # type: ignore
                 """select lower(column_name) column_name
                 from all_tab_columns
-                where  owner = upper(:2)  and table_name = upper(:1) and column_id is not null
-                order by column_id""", (owner, table_name))
+                where  owner = upper(:1) and table_name = upper(:2) and column_id is not null
+                order by column_id""", [owner, table_name])
             return [row[0] for row in cursor.fetchall()] # type: ignore
         finally:
             if cursor:
