@@ -92,26 +92,19 @@ class OracleEngine(DatabaseEngine):
                 cursor.close()
 
     @staticmethod
-    def generate_sql_block(config: Config, prod_owner: str, hist_owner: str, table_name: str, process_date: str, hint_expr: str,
-                      query_expr: str, table_columns: List[str], other_cols_exprs: List[str], other_cols_alias: List[str],
-                      referencing_tables: List[Tuple[str, str]], has_lob: bool, cnf_months_keep_hist_max: int) -> str:
+    def generate_sql_block(config: Config, table_cnf: Dict[str, Any], process_date: str) -> str:
         """Generates a PL/SQL block for table processing with optional chunking and LOB handling.
         Args:
-            config: Config with action, mode, chunk_size, print_process.
-            prod_owner: Production schema.
-            hist_owner: History schema.
-            table_name: Table to process.
-            process_date: YYYYMMDD date.
-            hint_expr: SQL hint.
-            query_expr: Main FROM/WHERE clause.
-            table_columns: Base columns.
-            other_cols_exprs: Extra column expressions.
-            other_cols_alias: Aliases for extra columns.
-            referencing_tables: Tables with FK to current.
-            has_lob: If table contains LOBs.
-            cnf_months_keep_hist_max: Retention months.
+            config: Configuration object.
+            table_cnf: Processed table configuration object.
+            process_date: Process date in 'YYYYMMDD' format.
         Returns:
             PL/SQL block as string."""
+        cnd0 = table_cnf["conds"][0]
+        prod_owner, hist_owner, table_name = cnd0["cnf_prod_owner"], cnd0["cnf_hist_owner"], cnd0["cnf_table_name"]
+        hint_expr, has_lob = cnd0["cnf_hint_expr"], cnd0["cnf_has_lob"]
+        other_cols_exprs, other_cols_alias, referencing_tables = table_cnf["other_cols_exprs"], table_cnf["other_cols_alias"], table_cnf["referencing_tables"]
+        query_expr, table_columns, months_keep_hist_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_hist_max"]
         logger = get_logger()
         logger.debug(f"Generating PL/SQL block for table {prod_owner}.{table_name} with process date {process_date}")
         ref_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
@@ -150,7 +143,7 @@ class OracleEngine(DatabaseEngine):
             check_save_status(l_prod_owner, l_table_name, l_process_date, l_action, 'CSTART', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
             fetch c_records bulk collect into r_rec limit l_chunk_size;
             if r_rec.count > 0 then if (l_mode = 'ALL') then"""
-            if config.action == "MANT_PROD" and cnf_months_keep_hist_max > 0:
+            if config.action == "MANT_PROD" and months_keep_hist_max > 0:
                 plsql += f"""
                 for i in 1 .. r_rec.count loop
                     insert into {table_name.lower()}@hist ({col_insert}) values ({col_values});
@@ -226,13 +219,11 @@ class OracleEngine(DatabaseEngine):
                 cursor.close()
 
     @staticmethod
-    def sql_block_run(conn: oracledb.Connection, plsql_code: str, owner: str, table_name: str) -> None:
+    def sql_block_run(conn: oracledb.Connection, plsql_code: str) -> None:
         """Executes a PL/SQL block on the database.
         Args:
             conn: Active Oracle connection.
-            plsql_code: The PL/SQL block to execute.
-            owner: Schema owner.
-            table_name: Table name (used for logging)."""
+            plsql_code: The PL/SQL block to execute."""
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()

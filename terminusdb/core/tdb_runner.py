@@ -8,7 +8,7 @@ from terminusdb.db.engine_loader import get_db_engine
 from terminusdb.db.engines import DatabaseEngine
 
 
-def process_table(config: Config, owner: str, table_name: str, plsql_code: str, referencing_tables: List[Tuple[str, str]], process_date: str) -> Tuple[str, str, str, int, int, Optional[int], Optional[str]]:
+def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> Tuple[str, str, str, int, int, Optional[int], Optional[str]]:
     logger = get_logger()
     conn: Any
     logger.info(f"Processing table {owner}.{table_name}...")
@@ -22,7 +22,7 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
         try:
             logger.info(f"Executing ILM for {owner}.{table_name}...")
             prev_rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-            engine.sql_block_run(conn, process_date, owner, table_name)
+            engine.sql_block_run(conn, plsql_code)
             rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
             return (owner, table_name, 'TEND', prev_rows_processed, rows_processed, None, None)
         except Exception as e:
@@ -75,7 +75,7 @@ spool off
 exit 0
 """)
 
-def get_next_ready_table(tables_cnf: Dict[Tuple[str, str], Dict[str, Any]], active_tables: set[Tuple[str, str]]) -> Optional[Tuple[str, str, Dict[str, Any], Any]]: # type: ignore
+def get_next_ready_table(tables_cnf: Dict[Tuple[str, str], Dict[str, Any]], active_tables: set[Tuple[str, str]]) -> Optional[Tuple[str, str, Dict[str, Any]]]: # type: ignore
     logger = get_logger()
     for (owner, table_name), table_info in tables_cnf.items():
         cd = tables_cnf[(owner, table_name)]["conds"][0]
@@ -90,9 +90,9 @@ def get_next_ready_table(tables_cnf: Dict[Tuple[str, str], Dict[str, Any]], acti
                     all_referencing_tables_ready = False
                     break  # referencing table not TEND status
         if not all_referencing_tables_ready:
-            logger.debug(f"Table {owner}.{table_name} is waiting for referencing tables to finish...")
+            logger.debug(f"Table {owner}.{table_name} has to wait for referencing tables to finish...")
             continue
-        return (owner, table_name, table_info, referencing_tables)  # Found a table ready to process
+        return (owner, table_name, table_info)  # Found a table ready to process
     return None  # No tables ready to process
  
 def tdb_exec_ilm(config: Config, tables_cnf: Dict[Tuple[str, str], Dict[str, Any]], process_date: str, engine: DatabaseEngine, connection: Any) -> None:
@@ -108,12 +108,9 @@ def tdb_exec_ilm(config: Config, tables_cnf: Dict[Tuple[str, str], Dict[str, Any
                 # Search for a process to launch
                 next_ready_table = get_next_ready_table(tables_cnf, active_tables)
                 if next_ready_table:
-                    owner, table_name, table_info, referencing_tables = next_ready_table
+                    owner, table_name, table_info = next_ready_table
                     logger.info(f"Launching background process for {owner}.{table_name}...")
-                    future = executor.submit(
-                        process_table, config, owner, table_name, table_info['sql_block'],
-                        referencing_tables, process_date
-                    )
+                    future = executor.submit(process_table, config, owner, table_name, table_info['sql_block'], process_date)
                     processes.append(future)
                     active_tables.add((owner, table_name))
                     table_info["conds"][0]["ctl_status"] = "TSTART"
@@ -179,20 +176,20 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                 ref_key = (ref_owner.upper(), ref_table.upper())
                 if ref_key not in tables_cnf: tables_cnf[ref_key] = {"conds": [], "referencing_tables": []}
                 tables_cnf[ref_key]["referencing_tables"].append(key)
-    # Populate ctl_status in tables_cnf based on tdb_ctl_status_rows
-    for tdb_ctl_status_row in tdb_ctl_status_rows:
-        key = (tdb_ctl_status_row["ctl_prod_owner"], tdb_ctl_status_row["ctl_table_name"])
-        if key in tables_cnf:
-            for cond in tables_cnf[key]["conds"]:
-                cond["ctl_status"] = tdb_ctl_status_row["ctl_status"]
+    if not config.print_process:
+        # Populate ctl_status in tables_cnf based on tdb_ctl_status_rows
+        for tdb_ctl_status_row in tdb_ctl_status_rows:
+            key = (tdb_ctl_status_row["ctl_owner"], tdb_ctl_status_row["ctl_table_name"])
+            if key in tables_cnf:
+                for cond in tables_cnf[key]["conds"]:
+                    cond["ctl_status"] = tdb_ctl_status_row["ctl_status"]
     # Populate added_conds with own table conds and referencing table conds
     # Populate cond_list with expressions captured from cnf_purge_limit_date_expr and cnf_additional_expr of all conds acumulated in added_conds
     # Populate cond_expr with the cond_list expressions joined by " and "
     for key, table_cnf in tables_cnf.items():
-        cnd = table_cnf["conds"][0]
-        ref_tables = cnd["cnf_ref_tables"]
+        cnd0 = table_cnf["conds"][0]
+        ref_tables = cnd0["cnf_ref_tables"]
         added_conds = [("A", cond) for cond in table_cnf["conds"]]
-        referencing_tables = table_cnf["referencing_tables"]
         if ref_tables:
             for ref_table in ref_tables.split(","):
                 ref_table = ref_table.strip()
@@ -212,34 +209,33 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                 cond_list.append(f"({pld_expr.replace("@", al+".")} < add_months(l_process_date,-{mkp}))") # type: ignore
             cd["cond_expr"] = " and ".join(cond_list)
         # get the maximum cnf_months_keep_hist from all added_conds
-        cnf_months_keep_hist_max = max(cd.get("cnf_months_keep_hist", 0) or 0 for _, cd in added_conds)
+        table_cnf["months_keep_hist_max"] = max(cd.get("cnf_months_keep_hist", 0) or 0 for _, cd in added_conds)
         # get where expression from cond_expr of all added_conds joined by " or "
         where_expr = "\n        or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
         # get columns expression to be added to historical table from cnf_purge_limit_date_expr of all added_conds
-        other_cols_exprs = [f"{cd['cnf_purge_limit_date_expr'].replace('@', f'{al}.')} tdb_date_{al}{cd['cnf_id']}"
+        table_cnf["other_cols_exprs"] = [f"{cd['cnf_purge_limit_date_expr'].replace('@', f'{al}.')} tdb_date_{al}{cd['cnf_id']}"
             for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if config.use_added_cols else []
         # get columns allias to be added to historical table from cnf_purge_limit_date_expr of all added_conds
-        other_cols_alias = [f"tdb_date_{al}{cd['cnf_id']}"
+        table_cnf["other_cols_alias"] = [f"tdb_date_{al}{cd['cnf_id']}"
             for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if config.use_added_cols else []
-        cnf_table_name, cnf_prod_owner, cnf_hist_owner = cnd["cnf_table_name"], cnd["cnf_prod_owner"], cnd["cnf_hist_owner"]
-        cnf_join_expr, cnf_prod_orphan_purge, cnf_hint_expr = cnd["cnf_join_expr"], cnd["cnf_prod_orphan_purge"], cnd["cnf_hint_expr"]
+        cnf_prod_owner, cnf_table_name = key
+        cnf_join_expr, cnf_prod_orphan_purge = cnd0["cnf_join_expr"], cnd0["cnf_prod_orphan_purge"]
         # get the columns names from DB for cnf_table_name and cnf_prod_owner
         table_columns = engine.get_table_columns(connection, cnf_prod_owner, cnf_table_name)
         # Prepare join_expr changing type of join based on cnf_prod_orphan_purge
         join_expr = cnf_join_expr.replace("@", "left outer" if cnf_prod_orphan_purge == "Y" else "inner") if cnf_join_expr else ""
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
-        query_expr = f"""from {cnf_table_name.lower()} A{f"""
+        table_cnf["query_expr"] = f"""from {cnf_prod_owner.lower()}.{cnf_table_name.lower()} A{f"""
         {join_expr}""" if join_expr else ""}{f"""
         where {where_expr}""" if where_expr else ""}"""
         # if table has lob columns and long type columns, remove long type columns from table_columns
-        has_lob = cnd["cnf_has_lob"] != "N"
-        if cnd["cnf_long_cols"] and has_lob:
-            long_cols = [c.strip().lower() for c in cnd["cnf_long_cols"].split(",")]
+        if cnd0["cnf_long_cols"] and cnd0["cnf_has_lob"] != "N":
+            long_cols = [c.strip().lower() for c in cnd0["cnf_long_cols"].split(",")]
             table_columns = list(set([col.lower() for col in table_columns]) - set(long_cols))
+        table_cnf["table_columns"] = table_columns
         # get sql_block and add it to tables_cnf
-        sql_block = engine.generate_sql_block(config, cnf_prod_owner, cnf_hist_owner, cnf_table_name, process_date, cnf_hint_expr,
-            query_expr, table_columns, other_cols_exprs, other_cols_alias, referencing_tables, has_lob, cnf_months_keep_hist_max)
-        tables_cnf[key]["sql_block"] = sql_block
+        sql_block = engine.generate_sql_block(config, table_cnf, process_date)
+        table_cnf["sql_block"] = sql_block
     return tables_cnf
 
 

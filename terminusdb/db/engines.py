@@ -76,40 +76,26 @@ class DatabaseEngine(ABC):
             plsql_code: PL/SQL or SQL block executed."""
         pass
 
+
     @staticmethod
     @abstractmethod
-    def generate_sql_block(config: Config, prod_owner: str, hist_owner: str, table_name: str, process_date: str,
-                      hint_expr: str, query_expr: str, table_columns: List[str], other_cols_exprs: List[str],
-                      other_cols_alias: List[str], referencing_tables: List[Tuple[str, str]], has_lob: bool,
-                      cnf_months_keep_hist_max: int) -> str:
+    def generate_sql_block(config: Config, table_cnf: Dict[str, Any], process_date: str) -> str:
         """Generates a SQL/PL block to process a given table.
         Args:
             config: Configuration object.
-            prod_owner: Schema owner of the production table.
-            hist_owner: Schema owner of the history table.
-            table_name: Name of the table to process.
+            table_cnf: Processed table configuration object.
             process_date: Process date in 'YYYYMMDD' format.
-            hint_expr: SQL hint expression.
-            query_expr: Main FROM/WHERE query expression.
-            table_columns: List of base table columns.
-            other_cols_exprs: List of extra column expressions.
-            other_cols_alias: List of aliases for the extra expressions.
-            referencing_tables: List of referencing tables.
-            has_lob: Whether the table includes LOBs.
-            cnf_months_keep_hist_max: History retention in months.
         Returns:
             The PL/SQL or SQL block to execute."""
         pass
 
     @staticmethod
     @abstractmethod
-    def sql_block_run(conn: Any, plsql_code: str, owner: str, table_name: str) -> None:
+    def sql_block_run(conn: Any, plsql_code: str) -> None:
         """Executes a PL/SQL or SQL block against the database.
         Args:
             conn: Active database connection.
-            plsql_code: The PL/SQL or SQL block to execute.
-            owner: Schema owner.
-            table_name: Table name (used for logging)."""
+            plsql_code: The PL/SQL or SQL block to execute."""
         pass
 
     @staticmethod
