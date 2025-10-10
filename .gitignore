@@ -175,3 +175,4 @@ cython_debug/
 # But keep shared project settings
 !.vscode/settings.json
 !.vscode/launch.json
+structure.txt
