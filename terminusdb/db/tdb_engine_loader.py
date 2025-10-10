@@ -1,5 +1,5 @@
 from typing import cast
-from terminusdb.db.engines import DatabaseEngine
+from terminusdb.db.tdb_engines import DatabaseEngine
 
 
 def get_db_engine(engine_name: str) -> DatabaseEngine:
@@ -9,6 +9,6 @@ def get_db_engine(engine_name: str) -> DatabaseEngine:
     Returns:
         type: DatabaseEngine interface"""
     if engine_name == "oracle":
-        from terminusdb.db.oracle.engine import OracleEngine
+        from terminusdb.db.oracle.tdb_engine import OracleEngine
         return cast(DatabaseEngine, OracleEngine)
     raise ValueError(f"Unknown engine: {engine_name}")

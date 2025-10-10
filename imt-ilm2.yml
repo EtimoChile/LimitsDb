@@ -13,26 +13,10 @@ tables:
     conds:
       - is_active: true
         months_keep_prod: 84
-        months_keep_hist: 0
+        months_keep_hist:
         purge_limit_date_expr: "@BHE_FECHA_ATENCION"
         additional_expr: "(@CNTR_RUT, @CNTR_DV, @BHE_NUM_BOLETA) not in (select CNTR_RUT, CNTR_DV, max(BHE_NUM_BOLETA) from IMT_BOLETAS_HONORARIOS_ELEC Z group by CNTR_RUT, CNTR_DV)"
-  - prod_owner: IMT
-    hist_owner: IMT
-    table_name: IMT_CONSULTA_REALIZADA
-    exec_day: null
-    frecuency: D
-    prod_orphan_purge: false
-    orphan_chk_column: null
-    has_lob: false
-    ref_tables: null
-    join_expr: null
-    hint_expr: full(A)
-    conds:
-      - is_active: true
-        months_keep_prod: 84
-        months_keep_hist: 100
-        purge_limit_date_expr: "@CON_FECHA_CONSULTA"
-        additional_expr: null
+        additional_hist_expr: "@bhe_es_boleta_sociedad = 'N'"
   - prod_owner: IMT
     hist_owner: IMT
     table_name: IMT_DETALLE_BHE
@@ -46,5 +30,3 @@ tables:
     hint_expr: full(A) full(B) use_hash(A, B)
     conds:
       - is_active: true
-
-

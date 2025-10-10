@@ -1,11 +1,12 @@
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+import re
 from typing import Any, Dict, List, Optional, Tuple
-from terminusdb.core.config import Config
-from terminusdb.core.logger import get_logger
-from terminusdb.core.utils import nvl
-from terminusdb.core.yml_loader import load_rows_from_yaml
-from terminusdb.db.engine_loader import get_db_engine
-from terminusdb.db.engines import DatabaseEngine
+from terminusdb.core.tdb_params_config import Config
+from terminusdb.core.tdb_logger import get_logger
+from terminusdb.core.tdb_utils import max_ignore_none, nvl
+from terminusdb.core.tdb_iml_config import load_rows_from_yaml
+from terminusdb.db.tdb_engine_loader import get_db_engine
+from terminusdb.db.tdb_engines import DatabaseEngine
 
 
 def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> Tuple[str, str, str, int, int, Optional[int], Optional[str]]:
@@ -50,6 +51,7 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
     while True:
         cycle_printed = False
         for (owner, table_name), table_info in tables_cnf.items():
+            if table_info["skip"]: continue
             cd = tables_cnf[(owner, table_name)]["conds"][0]
             if cd["ctl_status"] in ["PEND"]:
                 continue
@@ -58,7 +60,7 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
             if referencing_tables:
                 for ref_owner, ref_table in referencing_tables:
                     cdr = tables_cnf[(ref_owner, ref_table)]["conds"][0]
-                    if cdr["ctl_status"] != "PEND":
+                    if cdr["ctl_status"] != "PEND": # print end
                         all_referencing_tables_ready = False
                         break  # referencing table not PEND status
             if not all_referencing_tables_ready:
@@ -66,7 +68,7 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
             print(f"rem table: {owner}.{table_name}")
             print(table_info["sql_block"])
             print("/")
-            cd["ctl_status"] = "PEND"
+            cd["ctl_status"] = "PEND" # print end
             cycle_printed = True
         if not cycle_printed:
             break  # There are no processes to launch, so go to waiting some process to end
@@ -77,11 +79,12 @@ exit 0
 
 def get_next_ready_table(tables_cnf: Dict[Tuple[str, str], Dict[str, Any]], active_tables: set[Tuple[str, str]]) -> Optional[Tuple[str, str, Dict[str, Any]]]: # type: ignore
     logger = get_logger()
-    for (owner, table_name), table_info in tables_cnf.items():
+    for (owner, table_name), table_cnf in tables_cnf.items():
+        if table_cnf["skip"]: continue
         cd = tables_cnf[(owner, table_name)]["conds"][0]
         if cd["ctl_status"] in ["SKIPPED", "TEND"] or (owner, table_name) in active_tables:
             continue
-        referencing_tables = table_info['referencing_tables']
+        referencing_tables = table_cnf['referencing_tables']
         all_referencing_tables_ready = True
         if referencing_tables:
             for ref_owner, ref_table in referencing_tables:
@@ -92,7 +95,7 @@ def get_next_ready_table(tables_cnf: Dict[Tuple[str, str], Dict[str, Any]], acti
         if not all_referencing_tables_ready:
             logger.debug(f"Table {owner}.{table_name} has to wait for referencing tables to finish...")
             continue
-        return (owner, table_name, table_info)  # Found a table ready to process
+        return (owner, table_name, table_cnf)  # Found a table ready to process
     return None  # No tables ready to process
  
 def tdb_exec_ilm(config: Config, tables_cnf: Dict[Tuple[str, str], Dict[str, Any]], process_date: str, engine: DatabaseEngine, connection: Any) -> None:
@@ -159,13 +162,14 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
     tdb_ctl_status_rows = engine.get_status(connection, process_date)
     tables_cnf: Dict[Tuple[str, str], Dict[str, Any]] = {}
     # Populate tables_cnf with tdb_conf_rows
-    # appends tdb_ctl_status_rows to tables_cnf based on cnf_prod_owner and cnf_table_name
-    # and adds ctl_status to the conds in tables_cnf
     # popultes referencing_tables in tables_cnf based on cnf_ref_tables
+    mant_prod = (config.action == "MANT_PROD")
     for tdb_cnf_row in tdb_conf_rows:
         key = (tdb_cnf_row["cnf_prod_owner"], tdb_cnf_row["cnf_table_name"])
         if key not in tables_cnf: tables_cnf[key] = {"conds": [], "referencing_tables": []}
         tables_cnf[key]["conds"].append(tdb_cnf_row)
+    for tdb_cnf_row in tdb_conf_rows:
+        key = (tdb_cnf_row["cnf_prod_owner"], tdb_cnf_row["cnf_table_name"])
         ref_tables = tdb_cnf_row["cnf_ref_tables"]
         if ref_tables:
             for ref_table in ref_tables.split(","):
@@ -174,7 +178,8 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                 else: ref_owner = tdb_cnf_row["cnf_prod_owner"]
                 ref_table, alias = ref_table.split(" ")
                 ref_key = (ref_owner.upper(), ref_table.upper())
-                if ref_key not in tables_cnf: tables_cnf[ref_key] = {"conds": [], "referencing_tables": []}
+                if ref_key not in tables_cnf:
+                    raise ValueError(f"Table {ref_owner}.{ref_table} not found in tdb_conf_rows")
                 tables_cnf[ref_key]["referencing_tables"].append(key)
     if not config.print_process:
         # Populate ctl_status in tables_cnf based on tdb_ctl_status_rows
@@ -196,28 +201,66 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                 if "." in ref_table: ref_owner, ref_table = ref_table.split(".")
                 else: ref_owner = tdb_cnf_row["cnf_prod_owner"] # type: ignore
                 ref_table, alias = ref_table.split(" ")
+                if (ref_owner, ref_table) not in tables_cnf:
+                    raise ValueError(f"Table {ref_owner}.{ref_table} not found in tdb_conf_rows")
                 ref_conds = tables_cnf[(ref_owner, ref_table)]["conds"]
                 added_conds.extend([(alias, cond) for cond in ref_conds])
         for al, cd in added_conds:
             cond_list: List[str] = []
             pld_expr = nvl(cd["cnf_purge_limit_date_expr"], "")
-            addtl_expr = nvl(cd["cnf_additional_expr"], "")
-            mkp = nvl(cd["cnf_months_keep_prod"], 9999999999999)
+            # En caso de mantención hitórica se ocupa cnf_additional_hist_expr si no es nula, sino se ocupa cnf_additional_expr
+            addtl_prod_expr = " ".join(nvl(cd["cnf_additional_expr"], "").splitlines())
+            addtl_hist_expr = " ".join(nvl(cd["cnf_additional_hist_expr"], addtl_prod_expr).splitlines())
+            addtl_expr = addtl_prod_expr if mant_prod else addtl_hist_expr
+            mkp, mkh = cd["cnf_months_keep_prod"], cd["cnf_months_keep_hist"]
+            logger.debug(f"Processing cond for table {key} alias {al}: pld_expr={pld_expr}, mkp={mkp}, mkh={mkh}, addtl_expr={addtl_expr}")
+            if mkp is not None and mkh is not None:
+                mkh += mkp
+            mk = mkp if mant_prod else mkh
+            if pld_expr and not mkp:
+                raise ValueError(f"cnf_months_keep_prod is required when cnf_purge_limit_date_expr is set for {key}")
+            if mkp and not pld_expr:
+                raise ValueError(f"cnf_purge_limit_date_expr is required when cnf_months_keep_prod is set for {key}")
+            if mkh and not mkp:
+                raise ValueError(f"cnf_months_keep_hist is required when cnf_months_keep_prod is set for {key}")
+            alexp = al+"."
+            mod_alexp = alexp if mant_prod else "A."
+            mod_alexp_uac = alexp if mant_prod and config.use_added_cols else "A."
             if addtl_expr:
-                cond_list.append(f"({" ".join(addtl_expr.replace("@", al+".").splitlines())})") # type: ignore
+                if mant_prod:
+                    cond_list.append(addtl_expr.replace("@", mod_alexp))
+                else:
+                    cond_list.append(addtl_hist_expr.replace('@', mod_alexp_uac))
             if pld_expr:
-                cond_list.append(f"({pld_expr.replace("@", al+".")} < add_months(l_process_date,-{mkp}))") # type: ignore
+                if mant_prod or not config.use_added_cols or al == "A":
+                    cond_list.append(engine.get_date_cond(pld_expr.replace("@", alexp), mk))
+                else:
+                    cond_list.append(engine.get_date_cond(f"A.tdb_date_{al}", mkh))
             cd["cond_expr"] = " and ".join(cond_list)
+            cd["addtl_hist_expr"] = addtl_hist_expr
         # get the maximum cnf_months_keep_hist from all added_conds
-        table_cnf["months_keep_hist_max"] = max(cd.get("cnf_months_keep_hist", 0) or 0 for _, cd in added_conds)
+        table_cnf["months_keep_hist_max"] = max_ignore_none([cd["cnf_months_keep_hist"] for _, cd in added_conds])
+        # if mant_hist and cnf_months_keep_hist_max is None, skip the table
+        if not mant_prod and table_cnf["months_keep_hist_max"] is None:
+            table_cnf["skip"] = True
+            continue
+        table_cnf["skip"] = False
         # get where expression from cond_expr of all added_conds joined by " or "
-        where_expr = "\n        or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
-        # get columns expression to be added to historical table from cnf_purge_limit_date_expr of all added_conds
-        table_cnf["other_cols_exprs"] = [f"{cd['cnf_purge_limit_date_expr'].replace('@', f'{al}.')} tdb_date_{al}{cd['cnf_id']}"
-            for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if config.use_added_cols else []
-        # get columns allias to be added to historical table from cnf_purge_limit_date_expr of all added_conds
-        table_cnf["other_cols_alias"] = [f"tdb_date_{al}{cd['cnf_id']}"
-            for al, cd in added_conds if cd["cnf_purge_limit_date_expr"] and al != "A"] if config.use_added_cols else []
+        where_expr = "\n   or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
+        table_cnf["other_cols_exprs"] = []
+        table_cnf["other_cols_alias"] = []
+        if config.use_added_cols:
+            for al, cd in added_conds:
+                if al != "A":
+                    # Add the cnf_purge_limit_date_expr to other_cols_exprs and other_cols_alias for referencing tables
+                    if f"tdb_date_{al}" not in table_cnf["other_cols_alias"] and cd["cnf_purge_limit_date_expr"]:
+                        table_cnf["other_cols_exprs"].append(f"{nvl(cd["cnf_purge_limit_date_expr"], "").replace('@', f'{al}.')} tdb_date_{al}") # type: ignore
+                        table_cnf["other_cols_alias"].append(f"tdb_date_{al}") # type: ignore
+                    # Add columns in cnf_additional_hist_expr to other_cols_exprs and other_cols_alias for referencing tables
+                    for col in [match[0] for match in re.findall(r'@("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)', cd["addtl_hist_expr"])]:
+                        if col not in table_cnf["other_cols_alias"]:
+                            table_cnf["other_cols_exprs"].append(al+'.'+col) # type: ignore
+                            table_cnf["other_cols_alias"].append(col) # type: ignore
         cnf_prod_owner, cnf_table_name = key
         cnf_join_expr, cnf_prod_orphan_purge = cnd0["cnf_join_expr"], cnd0["cnf_prod_orphan_purge"]
         # get the columns names from DB for cnf_table_name and cnf_prod_owner
@@ -226,8 +269,8 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
         join_expr = cnf_join_expr.replace("@", "left outer" if cnf_prod_orphan_purge == "Y" else "inner") if cnf_join_expr else ""
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
         table_cnf["query_expr"] = f"""from {cnf_prod_owner.lower()}.{cnf_table_name.lower()} A{f"""
-        {join_expr}""" if join_expr else ""}{f"""
-        where {where_expr}""" if where_expr else ""}"""
+   {join_expr}""" if join_expr else ""}{f"""
+where {where_expr}""" if where_expr else ""}"""
         # if table has lob columns and long type columns, remove long type columns from table_columns
         if cnd0["cnf_long_cols"] and cnd0["cnf_has_lob"] != "N":
             long_cols = [c.strip().lower() for c in cnd0["cnf_long_cols"].split(",")]
@@ -237,7 +280,6 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
         sql_block = engine.generate_sql_block(config, table_cnf, process_date)
         table_cnf["sql_block"] = sql_block
     return tables_cnf
-
 
 def tdb_run(config: Config) -> None:
     logger = get_logger()

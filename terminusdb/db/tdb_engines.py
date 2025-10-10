@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from terminusdb.core.config import Config
+from terminusdb.core.tdb_params_config import Config
 from typing import Any, List, Dict, Tuple
 from datetime import datetime
 
@@ -121,6 +121,18 @@ class DatabaseEngine(ABC):
         Returns:
             List of column names in lowercase."""
         pass
+
+    @staticmethod
+    @abstractmethod
+    def get_date_cond(date_expr: str, mkp: int) -> str:
+        """Returns a date condition for the given date expression and months to keep.
+        Args:
+            date_expr: Date expression to evaluate.
+            mkp: Months to keep.
+        Returns:
+            Date condition as string."""
+        pass
+    
 
     @staticmethod
     @abstractmethod
