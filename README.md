@@ -85,7 +85,7 @@ Generated files (default root is `~/.config/TerminusDB`):
       └─ secrets.<PROFILE>.json      # secret fields with empty values
 ```
 
-Note: profile parameter is optional, if omitted the .\<PROFILE\> filenames part is omited also
+Note: the profile parameter is optional. If omitted, the `.<PROFILE>` filename part is omitted as well.
 
 Options:
 
@@ -99,10 +99,10 @@ Options:
 
 ```json
 {
-  "source_credentials": "tdb/etm1tdb@host:1521/service",
-  "history_credentials": "",
-  "source_admin_credentials": "system/etm1alpha@host:1521/service",
-  "history_admin_credentials": ""
+  "source_password": "wdx",
+  "history_password": "",
+  "source_admin_password": "xyz",
+  "history_admin_password": ""
 }
 ```
 
@@ -120,9 +120,9 @@ Note: the local key is created in your user context and must be protected by OS 
 ## Run ILM
 
 ```bash
-poetry run tdb --schema <SCHEMA> --profile <PROFILE> --action SOURCE_ILM
+poetry run tdb-run --schema <SCHEMA> --profile <PROFILE> --action SOURCE_ILM
 # or
-poetry run tdb --schema <SCHEMA> --profile <PROFILE> --action HISTORY_ILM
+poetry run tdb-run --schema <SCHEMA> --profile <PROFILE> --action HISTORY_ILM
 ```
 
 Common overrides:
@@ -130,10 +130,10 @@ Common overrides:
 ```
 --mode ALL|QUERY_ONLY                         # To control actual ILM execution: ALL: do ILM, QUERY_ONLY: do a dry run
 --parallel-max <int>                          # Sets the grade of parallel tables to process
---chunk-size <int>                            # Sets how many rows to process in one commit chunck
---use-added-cols / --no-use-added-cols        # If to add columns to history env to independize cleanup
---add-tdb-columns / --no-add-tdb-columns      # If to add columns to register ilm process date and transfer time
---print-process / --no-print-process          # To print procedure for executing IML outside TerminusDB control
+--chunk-size <int>                            # Sets how many rows to process in one commit chunk
+--use-added-cols / --no-use-added-cols        # Whether to add helper columns in history to decouple cleanup logic
+--add-tdb-columns / --no-add-tdb-columns      # Whether to add columns that register ILM process date and transfer time
+--print-process / --no-print-process          # To print the procedure for executing ILM outside TerminusDB control
 --log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Set logging LEVEL
 --tdb-config-file <path>                      # bypass DB discovery from tdb_config table
 --config-dir <root>                           # override config root discovery
@@ -145,11 +145,22 @@ Examples:
 
 ```bash
 # Dry-run with verbose logging
-poetry run tdb --schema billing --profile prod --action SOURCE_ILM --print-process --log-level DEBUG
+poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --print-process --log-level DEBUG
 
 # Apply quick overrides without editing files
-poetry run tdb --schema billing --profile prod --action SOURCE_ILM --set chunk_size=200000 --set parallel_max=8
+poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chunk_size=200000 --set parallel_max=8
 ```
+
+## ILM Rule Semantics
+
+Each entry in `ilm.<PROFILE>.yml` merges table-level attributes with one or more rule conditions defined under `conds`. When `conds` is omitted, TerminusDB assumes a single active rule so the table remains eligible for processing.
+
+- **Activation:** A condition runs only when `is_active: true`. Deactivating the sole condition for a table effectively removes that table from the run.
+- **Retention windows:** `retain_months_source` is required whenever `purge_date_expr` is present. `retain_months_history` extends the history window but also depends on defining the source retention. During `HISTORY_ILM` runs, the engine sums source and history months to determine the cut-off date.
+- **Date expressions:** `purge_date_expr` identifies the date column (or expression) that anchors retention. Prefix column references with `@` (for example, `"@DSP_DATE"`); the runner swaps the prefix for the proper table alias at execution time.
+- **Additional filters:** Add optional filters through `additional_filter_expr` (source runs) and `history_additional_filter_expr` (history runs). Both accept the same `@column` syntax, and the history expression falls back to the source expression when omitted.
+- **Referencing tables:** Use `referencing_tables` to pull parent conditions into child tables. List entries as `<TABLE> <ALIAS>` (optionally `<OWNER>.<TABLE> <ALIAS>`) and supply matching `join_expr` fragments. The runner inherits active conditions from each referenced table and rewrites the join fragments—`@` becomes `inner` joins by default or `left outer` joins when `source_orphan_purge: true` to find orphans.
+- **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to delete child rows whose parents no longer qualify. The engine also materializes helper columns (e.g., `tdb_date_<alias>`) when `use_added_columns` is enabled so history cleanups can reference parent timestamps.
 
 ## Configuration Resolution (Overlay Order)
 
