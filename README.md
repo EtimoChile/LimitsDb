@@ -99,10 +99,10 @@ Options:
 
 ```json
 {
-  "source_password": "wdx",
+  "source_password": "",
   "history_password": "",
-  "source_admin_password": "xyz",
-  "history_admin_password": ""
+  "admin_source_password": "",
+  "admin_history_password": ""
 }
 ```
 
@@ -111,6 +111,13 @@ Options:
 ```bash
 poetry run tdb-crypt --schema <SCHEMA> --profile <PROFILE>
 ```
+
+TerminusDB derives the list of secrets from the configuration model. Currently, `secret_keys_from_config()` produces the following keys, which must live in `secrets.<PROFILE>.json` and are always stored encrypted:
+
+- `source_password`
+- `history_password`
+- `admin_source_password`
+- `admin_history_password`
 
 The tool ensures an encryption key exists locally and replaces any non-empty plaintext with `enc:v1:aes256gcm:...`.
 If you forget this step, the main loader will reject plaintext secrets by default.
@@ -128,28 +135,88 @@ poetry run tdb-run --schema <SCHEMA> --profile <PROFILE> --action HISTORY_ILM
 Common overrides:
 
 ```
---mode ALL|QUERY_ONLY                         # To control actual ILM execution: ALL: do ILM, QUERY_ONLY: do a dry run
---parallel-max <int>                          # Sets the grade of parallel tables to process
---chunk-size <int>                            # Sets how many rows to process in one commit chunk
---use-added-cols / --no-use-added-cols        # Whether to add helper columns in history to decouple cleanup logic
---add-tdb-columns / --no-add-tdb-columns      # Whether to add columns that register ILM process date and transfer time
---print-process / --no-print-process          # To print the procedure for executing ILM outside TerminusDB control
---log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Set logging LEVEL
---tdb-config-file <path>                      # bypass DB discovery from tdb_config table
---config-dir <root>                           # override config root discovery
---config-file <yaml>                          # extra overlay (highest priority)
---set key=value                               # generic override (supports dotted keys)
+--mode ALL|QUERY_ONLY                         # Run everything or only generate queries (dry-run)
+--generate-script / --no-generate-script      # Emit SQL to disk instead of executing it
+--chunk-size <int>                            # Rows per chunk when processing large tables
+--parallel-max <int>                          # Maximum number of tables processed in parallel
+--use-added-columns / --no-use-added-columns  # Toggle helper columns in history tables
+--add-tdb-columns / --no-add-tdb-columns      # Toggle ILM execution timestamp columns
+--log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Adjust logger verbosity
+--ilm-config-file <path>                      # Point to a specific ILM YAML file
+--config-dir <root>                           # Override config root discovery
+--config-file <yaml>                          # Extra overlay (highest priority)
+--set key=value                               # Generic override (supports dotted keys)
 ```
 
 Examples:
 
 ```bash
 # Dry-run with verbose logging
-poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --print-process --log-level DEBUG
+poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --generate-script --log-level DEBUG
 
 # Apply quick overrides without editing files
 poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chunk_size=200000 --set parallel_max=8
 ```
+
+### Configuration parameters reference
+
+| Parameter | Purpose | Default / values |
+| --- | --- | --- |
+| `action` | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history). | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`. |
+| `mode` | Run everything or only generate queries (dry-run). | Default `ALL`; choices `ALL`, `QUERY_ONLY`. |
+| `chunk_size` | Rows per chunk when processing large tables. | Default `100000`. |
+| `use_added_columns` | Populate derived columns in history tables. | Default `True` (boolean toggle). |
+| `add_tdb_columns` | Add TerminusDB execution-date columns in history tables. | Default `True` (boolean toggle). |
+| `generate_script` | Dry-run: generate SQL script without executing. | Default `False` (boolean toggle). |
+| `parallel_max` | Maximum number of parallel processes. | Default `10`. |
+| `db_engine` | Database engine. | Default `"oracle"`; choices `"oracle"`, `"postgres"`. |
+| `log_level` | Logging level. | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
+| `schema` | Schema name (folder under `schemas/`). | Required on CLI; no persisted default. |
+| `profile` | Profile name (e.g., `dev`, `prod`). | Optional; default `null`. |
+| `ilm_config_file` | YAML file with tables (bypass DB discovery). | Optional; default `null`. |
+| `source_dsn` | Source DSN / connection descriptor. | Default empty string. |
+| `source_username` | Source username. | Default empty string. |
+| `source_password` | Source password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
+| `history_dsn` | History DSN / connection descriptor. | Default empty string. |
+| `history_username` | History username. | Default empty string. |
+| `history_password` | History password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
+| `admin_source_dsn` | Admin source DSN / connection descriptor. | Default empty string. |
+| `admin_source_username` | Admin source username. | Default empty string. |
+| `admin_source_password` | Admin source password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
+| `admin_history_dsn` | Admin history DSN / connection descriptor. | Default empty string. |
+| `admin_history_username` | Admin history username. | Default empty string. |
+| `admin_history_password` | Admin history password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
+
+#### Overrides matrix (CLI, env, YAML)
+
+| Parameter | CLI flag | Environment variable | YAML key |
+| --- | --- | --- | --- |
+| `action` | `--action` | `TDB_ACTION` | `config.<PROFILE>.yml: action` |
+| `mode` | `--mode` | `TDB_MODE` | `config.<PROFILE>.yml: mode` |
+| `chunk_size` | `--chunk-size` | `TDB_CHUNK_SIZE` | `config.<PROFILE>.yml: chunk_size` |
+| `use_added_columns` | `--use-added-columns` | `TDB_USE_ADDED_COLS` | `config.<PROFILE>.yml: use_added_columns` |
+| `add_tdb_columns` | `--add-tdb-columns` | `TDB_ADD_TDB_COLUMNS` | `config.<PROFILE>.yml: add_tdb_columns` |
+| `generate_script` | `--generate-script` | `TDB_GENERATE_SCRIPT` | `config.<PROFILE>.yml: generate_script` |
+| `parallel_max` | `--parallel-max` | `TDB_PARALLEL_MAX` | `config.<PROFILE>.yml: parallel_max` |
+| `db_engine` | `--db-engine` | `TDB_DB_ENGINE` | `config.<PROFILE>.yml: db_engine` |
+| `log_level` | `--log-level` | `TDB_LOG_LEVEL` | `config.<PROFILE>.yml: log_level` |
+| `schema` | `--schema` | `TDB_SCHEMA` | CLI only (not stored). |
+| `profile` | `--profile` | `TDB_PROFILE` | CLI only (not stored). |
+| `ilm_config_file` | `--ilm-config-file` | `ILM_CONFIG_FILE` | CLI only (not stored). |
+| `source_dsn` | `--source-dsn` | `TDB_SOURCE_DSN` | `config.<PROFILE>.yml: source_dsn` |
+| `source_username` | `--source-username` | `TDB_SOURCE_USERNAME` | `config.<PROFILE>.yml: source_username` |
+| `source_password` | — | — | `secrets.<PROFILE>.json: source_password` |
+| `history_dsn` | `--history-dsn` | `TDB_HISTORY_DSN` | `config.<PROFILE>.yml: history_dsn` |
+| `history_username` | `--history-username` | `TDB_HISTORY_USERNAME` | `config.<PROFILE>.yml: history_username` |
+| `history_password` | — | — | `secrets.<PROFILE>.json: history_password` |
+| `admin_source_dsn` | `--admin-source-dsn` | `TDB_ADMIN_SOURCE_DSN` | `config.<PROFILE>.yml: admin_source_dsn` |
+| `admin_source_username` | `--admin-source-username` | `TDB_ADMIN_SOURCE_USERNAME` | `config.<PROFILE>.yml: admin_source_username` |
+| `admin_source_password` | — | — | `secrets.<PROFILE>.json: admin_source_password` |
+| `admin_history_dsn` | `--admin-history-dsn` | `TDB_ADMIN_HISTORY_DSN` | `config.<PROFILE>.yml: admin_history_dsn` |
+| `admin_history_username` | `--admin-history-username` | `TDB_ADMIN_HISTORY_USERNAME` | `config.<PROFILE>.yml: admin_history_username` |
+| `admin_history_password` | — | — | `secrets.<PROFILE>.json: admin_history_password` |
+
+Builder-only flags (`--config-dir`, `--config-file`, `--set`) control how overlays are discovered and do not map to configuration keys.
 
 ## ILM Rule Semantics
 
@@ -184,16 +251,15 @@ Generated from the Config model (single source of truth).
 Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
-# action: "SOURCE_ILM"  # ILM target: source (SOURCE_ILM) or history (HISTORY_ILM)
+# action: "SOURCE_ILM"  # ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)
 # mode: "ALL"           # Run everything (ALL) or only generate queries (QUERY_ONLY)
 # chunk_size: 100000    # Rows per chunk when processing large tables
-# use_added_cols: true  # Populate derived columns in history tables
-# add_tdb_columns: true # Add TerminusDB execution-date columns in history tables
-# print_process: false  # Dry-run: generate SQL script without executing
+# use_added_columns: True  # Populate derived columns in history tables
+# add_tdb_columns: True  # Add TerminusDB execution-date columns in history tables
+# generate_script: False  # Dry-run: generate SQL script without executing
 # parallel_max: 10      # Maximum number of parallel processes
-# db_engine: "oracle"   # Database engine (choices: 'oracle', 'postgres')
-# log_level: "INFO"     # Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-# tdb_config_file: null # YAML file with tables (bypass DB discovery)
+# db_engine: "oracle"   # Database engine
+# log_level: "INFO"     # Logging level
 ```
 
 Uncomment and set values as needed. Secrets are not listed here (they live in `secrets.<PROFILE>.json`).
