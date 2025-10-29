@@ -162,8 +162,7 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
         tdb_conf_rows = engine.load_config(connection)
         tdb_ctl_status_rows = engine.get_status(connection, process_date)
     tables_config: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    # Populate tables_config with tdb_conf_rows
-    # popultes referencing_tables in tables_config based on cnf_referencing_tables
+    # Populate tables_config with the raw rows and derive referencing tables from cnf_referencing_tables.
     is_source_mode = (config.action == "SOURCE_ILM")
     for tdb_cnf_row in tdb_conf_rows:
         key = (tdb_cnf_row["cnf_source_owner"], tdb_cnf_row["cnf_table_name"])
@@ -183,15 +182,15 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in tdb_conf_rows")
                 tables_config[ref_key]["referencing_tables"].append(key)
     if not config.generate_script:
-        # Populate ctl_status in tables_config based on tdb_ctl_status_rows
+        # Inject ctl_status values loaded from the database when resuming a run.
         for tdb_ctl_status_row in tdb_ctl_status_rows:
             key = (tdb_ctl_status_row["ctl_owner"], tdb_ctl_status_row["ctl_table_name"])
             if key in tables_config:
                 for cond in tables_config[key]["conds"]:
                     cond["ctl_status"] = tdb_ctl_status_row["ctl_status"]
-    # Populate added_conds with own table conds and referencing table conds
-    # Populate cond_list with expressions captured from cnf_purge_date_expr and cnf_additional_filter_expr of all conds acumulated in added_conds
-    # Populate cond_expr with the cond_list expressions joined by " and "
+    # Collect each table's active conditions along with inherited referencing-table conditions.
+    # Track every expression needed to build the WHERE clause for the combined predicate across all contributing conditions.
+    # Persist the resulting predicate in cond_expr so later stages can reuse it.
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
         referencing_tables = cnd0["cnf_referencing_tables"]
@@ -209,9 +208,9 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
         for al, cd in added_conds:
             cond_list: List[str] = []
             pld_expr = nvl(cd["cnf_purge_date_expr"], "")
-            # En caso de mantención hitórica se ocupa cnf_history_additional_filter_expr si no es nula, sino se ocupa cnf_additional_filter_expr
+            # Prefer the history-only filter during HISTORY_ILM runs; otherwise use the source filter.
             addtl_source_expr = " ".join(nvl(cd["cnf_additional_filter_expr"], "").splitlines())
-            addtl_history_expr = " ".join(nvl(cd["cnf_history_additional_filter_expr"], addtl_source_expr).splitlines())
+            addtl_history_expr = " ".join(nvl(cd["cnf_history_addtl_filter_expr"], addtl_source_expr).splitlines())
             addtl_expr = addtl_source_expr if is_source_mode else addtl_history_expr
             months_keep_src, months_keep_hist = cd["cnf_retain_months_source"], cd["cnf_retain_months_history"]
             logger.debug(f"Processing cond for table {key} alias {al}: pld_expr={pld_expr}, months_keep_src={months_keep_src}, months_keep_hist={months_keep_hist}, addtl_expr={addtl_expr}")
@@ -257,7 +256,7 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                     if f"tdb_date_{al}" not in table_cnf["other_cols_alias"] and cd["cnf_purge_date_expr"]:
                         table_cnf["other_cols_exprs"].append(f"{nvl(cd["cnf_purge_date_expr"], "").replace('@', f'{al}.')} tdb_date_{al}") # type: ignore
                         table_cnf["other_cols_alias"].append(f"tdb_date_{al}") # type: ignore
-                    # Add columns in cnf_history_additional_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
+                    # Add columns in cnf_history_addtl_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
                     for col in [match[0] for match in re.findall(r'@("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)', cd["addtl_history_expr"])]:
                         if col not in table_cnf["other_cols_alias"]:
                             table_cnf["other_cols_exprs"].append(al+'.'+col) # type: ignore

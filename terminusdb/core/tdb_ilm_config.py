@@ -1,4 +1,4 @@
-# terminusdb/core/tdb_iml_config.py
+# terminusdb/core/tdb_ilm_config.py
 from __future__ import annotations
 import yaml
 from typing import Dict, List, Any, Tuple, Optional, Set, Mapping, ItemsView, cast
@@ -15,14 +15,14 @@ def normalize_table_row(table: Dict[str, Any], cond: Dict[str, Any]) -> Dict[str
     global _id_counter
     row: Dict[str, Any] = {}
 
-    # merge table + cond (sin 'conds')
+    # Merge the table definition with the condition (excluding nested "conds").
     for key, value in list(table.items()) + list(cond.items()):
         if key == "conds":
             continue
         row[f"cnf_{key}"] = _normalize_bool(value) if isinstance(value, bool) else value
         row["ctl_status"] = None
 
-    # defaults faltantes
+    # Ensure default flags are present when omitted.
     for key in ["is_active", "source_orphan_purge", "has_lob_columns"]:
         if "cnf_" + key not in row:
             row["cnf_" + key] = "N" if key != "is_active" else "Y"
@@ -30,7 +30,7 @@ def normalize_table_row(table: Dict[str, Any], cond: Dict[str, Any]) -> Dict[str
     for key in [
         "source_owner", "history_owner", "table_name", "retain_months_source", "retain_months_history",
         "exec_day", "frecuency", "purge_date_expr", "additional_filter_expr",
-        "history_additional_filter_expr", "orphan_check_column", "referencing_tables", "join_expr",
+        "history_addtl_filter_expr", "orphan_check_column", "referencing_tables", "join_expr",
         "hint_expr", "long_columns",
     ]:
         if "cnf_" + key not in row:
@@ -47,7 +47,7 @@ def _ensure_mapping(obj: Any, where: str) -> Dict[str, Any]:
     if not isinstance(obj, Mapping):
         raise TypeError(f"YAML root at {where} must be a mapping (dict). Got {type(obj).__name__}")
     out: Dict[str, Any] = {}
-    # Tipar explícitamente el ItemsView
+    # Explicitly type the ItemsView iterator for mypy.
     obj_items: ItemsView[Any, Any] = cast(Mapping[Any, Any], obj).items()
     for k_any, v_any in obj_items:
         key: str = str(k_any)
@@ -62,7 +62,7 @@ def _ensure_list_of_mappings(obj: Any, where: str) -> List[Dict[str, Any]]:
     if not isinstance(obj, list):
         raise TypeError(f"'{where}' must be a list. Got {type(obj).__name__}")
     out: List[Dict[str, Any]] = []
-    # Forzar tipo de la lista
+    # Cast the heterogeneous list so we can iterate with type checking.
     obj_list: List[Any] = cast(List[Any], obj)
     for i, el_any in enumerate(obj_list):
         if not isinstance(el_any, Mapping):
@@ -92,7 +92,7 @@ def load_rows_from_yaml(yaml_path: str) -> List[Dict[str, Any]]:
         if (owner, table_name) in _loaded_tables:
             raise ValueError(f"Duplicate table in ilm-config-file: {owner}.{table_name}")
 
-        # conds
+        # Normalize nested "conds" entries for the table.
         conds_any = table.get("conds")
         conds: List[Dict[str, Any]] = _ensure_list_of_mappings(conds_any, "conds") if conds_any is not None else []
         if not conds:

@@ -60,9 +60,8 @@ class OracleEngine(DatabaseEngine):
             cursor.execute( # type: ignore
                 """SELECT cnf_id, cnf_source_owner, cnf_history_owner, cnf_table_name, cnf_retain_months_source,
                        cnf_retain_months_history, cnf_exec_day, cnf_frecuency, cnf_is_active, cnf_purge_date_expr,
-                       cnf_additional_filter_expr, cnf_history_additional_filter_expr, cnf_source_orphan_purge,
-                       cnf_orphan_check_column, cnf_has_lob_columns, cnf_referencing_tables, cnf_join_expr,
-                       cnf_hint_expr, cnf_long_columns, null ctl_status
+                       cnf_additional_filter_expr, cnf_history_addtl_filter_expr, cnf_source_orphan_purge, cnf_orphan_check_column, cnf_has_lob_columns,
+                       cnf_referencing_tables, cnf_join_expr, cnf_hint_expr, cnf_long_columns, null ctl_status
                 FROM tdb_conf
                 WHERE cnf_is_active = 'Y'""")
             cols = [col[0].lower() for col in cursor.description] # type: ignore

@@ -15,6 +15,7 @@
 #         retain_months_history: 0
 #         purge_date_expr: "@INVD_DATE"
 #         additional_filter_expr: "@INV_STATUS='A'"
+#         history_addtl_filter_expr: "@INV_STATUS='H'" # Optional history-only expression. Falls back to additional_filter_expr when omitted.
 #   - source_owner: GL # Child table definition. Inherit conditions from parent tables. Can have multiple parent tables
 #     history_owner: GL
 #     table_name: INV_DET
