@@ -176,3 +176,5 @@ cython_debug/
 !.vscode/settings.json
 !.vscode/launch.json
 structure.txt
+terminusdb.zip
+*.yml
