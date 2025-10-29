@@ -1,138 +1,203 @@
 # terminusdb/core/tdb_params_config.py
+from __future__ import annotations
+
 import argparse
-from dataclasses import dataclass
-from typing import Any, Dict, Literal, Mapping, Optional, TypedDict, Sequence
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Mapping, Optional, Sequence, Literal, Annotated, get_args, get_origin, get_type_hints
 
 from terminusdb.core.tdb_config_loader import load_runtime_config
+from terminusdb.core.tdb_logger import get_logger
+from terminusdb.core.tdb_meta import Help, Cli, Secret, Env, CliOnly
+from terminusdb.core.tdb_utils import resolve_schema_file  # markers for Annotated metadata
+logger = get_logger("params_config")
 
-class DefaultConfigType(TypedDict, total=False):
-    parallel_max: int
-    db_engine: Literal["oracle", "postgres"]
-    # Estos 4 vendrán de secrets.json normalmente (pueden no estar en defaults):
-    prod_credentials: str
-    hist_credentials: str
-    prod_admin_credentials: str
-    hist_admin_credentials: str
-    action: Literal["MANT_PROD", "MANT_HIST"]
-    mode: Literal["ALL", "QUERY_ONLY"]
-    chunk_size: int
-    use_added_cols: bool
-    add_tdb_columns: bool
-    print_process: bool
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-
+# ------------------------------------------------------------------------------
+# Single source of truth: Config + Annotated metadata
+# ------------------------------------------------------------------------------
 @dataclass
 class Config:
-    action: Literal["MANT_PROD","MANT_HIST"] = "MANT_PROD"
-    mode: Literal["ALL","QUERY_ONLY"] = "ALL"
-    chunk_size: int = 100000
-    use_added_cols: bool = True
-    add_tdb_columns: bool = True
-    print_process: bool = False
-    parallel_max: int = 10
-    db_engine: Literal["oracle","postgres"] = "oracle"
-    prod_credentials: Optional[str] = None
-    hist_credentials: Optional[str] = None
-    prod_admin_credentials: Optional[str] = None
-    hist_admin_credentials: Optional[str] = None
-    log_level: Literal["DEBUG","INFO","WARNING","ERROR","CRITICAL"] = "INFO"
-    schema: str = ""         # requerido (validar no vacío en __post_init__)
-    profile: Optional[str] = None
-    tdb_config_file: Optional[str] = None
+    #Execution mode parameters
+    action: Annotated[Literal["SOURCE_ILM", "HISTORY_ILM"], Help("ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)"), Cli("--action"), Env("TDB_ACTION")] = "SOURCE_ILM"
+    mode: Annotated[Literal["ALL", "QUERY_ONLY"], Help("Run everything (ALL) or only generate queries (QUERY_ONLY)"), Cli("--mode"), Env("TDB_MODE")] = "ALL"
+    chunk_size: Annotated[int, Help("Rows per chunk when processing large tables"), Cli("--chunk-size"), Env("TDB_CHUNK_SIZE")] = 100000
+    use_added_columns: Annotated[bool, Help("Populate derived columns in history tables"), Cli("--use-added-columns"), Env("TDB_USE_ADDED_COLS")] = True
+    add_tdb_columns: Annotated[bool, Help("Add TerminusDB execution-date columns in history tables"), Cli("--add-tdb-columns"), Env("TDB_ADD_TDB_COLUMNS")] = True
+    generate_script: Annotated[bool, Help("Dry-run: generate SQL script without executing"), Cli("--generate-script"), Env("TDB_GENERATE_SCRIPT")] = False
+    parallel_max: Annotated[int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("TDB_PARALLEL_MAX")] = 10
+    db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine"), Cli("--db-engine"), Env("TDB_DB_ENGINE")] = "oracle"
+    log_level: Annotated[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], Help("Logging level"), Cli("--log-level"), Env("TDB_LOG_LEVEL")] = "INFO"
 
-    def __post_init__(self):
+    # schema/profile + optional tables override file
+    schema: Annotated[str, Help("Schema name (folder under schemas/)"), Cli("--schema"), Env("TDB_SCHEMA"), CliOnly()] = ""
+    profile: Annotated[Optional[str], Help("Profile name (e.g., dev, prod)"), Cli("--profile"), Env("TDB_PROFILE"), CliOnly()] = None
+    ilm_config_file: Annotated[Optional[str], Help("YAML file with tables (bypass DB discovery)"), Cli("--ilm-config-file"), Env("ILM_CONFIG_FILE"), CliOnly()] = None
+
+    # Database connection parameters
+    source_dsn: Annotated[Optional[str], Cli("--source-dsn"), Env("TDB_SOURCE_DSN"), Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
+    source_username: Annotated[Optional[str], Cli("--source-username"), Env("TDB_SOURCE_USERNAME") , Help("Username")] = ""
+    source_password: Annotated[Optional[str], Help("Password"), Secret()] = ""
+    history_dsn: Annotated[Optional[str], Cli("--history-dsn"), Env("TDB_HISTORY_DSN"), Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
+    history_username: Annotated[Optional[str], Cli("--history-username"), Env("TDB_HISTORY_USERNAME"), Help("Username")] = ""
+    history_password: Annotated[Optional[str], Help("Password"), Secret()] = ""
+    admin_source_dsn: Annotated[Optional[str], Cli("--admin-source-dsn"), Env("TDB_ADMIN_SOURCE_DSN"), Help("Admin DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
+    admin_source_username: Annotated[Optional[str], Cli("--admin-source-username"), Env("TDB_ADMIN_SOURCE_USERNAME"), Help("Admin username")] = ""
+    admin_source_password: Annotated[Optional[str], Help("Admin Source password"), Secret()] = ""
+    admin_history_dsn: Annotated[Optional[str], Cli("--admin-history-dsn"), Env("TDB_ADMIN_HISTORY_DSN"), Help("Admin History DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
+    admin_history_username: Annotated[Optional[str], Cli("--admin-history-username"), Env("TDB_ADMIN_HISTORY_USERNAME"), Help("Admin History username")] = ""
+    admin_history_password: Annotated[Optional[str], Help("Admin History password"), Secret()] = ""
+
+    def __post_init__(self) -> None:
         if not self.schema:
-            raise ValueError("schema es requerido")
+            raise ValueError("schema is required")
         if self.db_engine not in ("oracle", "postgres"):
-            raise ValueError(f"db_engine inválido: {self.db_engine}")
+            raise ValueError(f"invalid db_engine: {self.db_engine}")
+        if not self.generate_script and self.action == "SOURCE_ILM" and not self.source_dsn and not self.source_username and not self.source_password:
+            raise ValueError("source_dsn, source_username and source_password are required for SOURCE_ILM action")
+        if not self.generate_script and self.action == "HISTORY_ILM" and not self.history_dsn and not self.history_username and not self.history_password:
+            raise ValueError("history_dsn, history_username and history_password are required for HISTORY_ILM action")
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Config":
+        # Strict field validation
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         unknown = set(d) - known
         if unknown:
-            raise ValueError(f"Claves desconocidas: {sorted(unknown)}")
+            raise ValueError(f"Unknown configuration keys: {sorted(unknown)}")
         return cls(**d)
-    
-    def as_dict(self) -> Dict[str, Any]:
-        return self.__dict__
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# ------------------------------------------------------------------------------
+# CLI builder from Config metadata (Annotated)
+# ------------------------------------------------------------------------------
+def _arg_type_from_default(default: Any):
+    if isinstance(default, bool):
+        return bool
+    if isinstance(default, int):
+        return int
+    if isinstance(default, float):
+        return float
+    return str
+
+
+def build_argparser_from_config() -> argparse.ArgumentParser:
+    """
+    Build an argparse.ArgumentParser from Config's Annotated metadata.
+    Also adds builder-only flags: --config-dir, --config-file, and --set.
+    CLI defaults are suppressed so they don't override values from YAML or ENV.
+    """
+    parser = argparse.ArgumentParser( description="TerminusDB CLI", formatter_class=argparse.ArgumentDefaultsHelpFormatter, )
+    hints = get_type_hints(Config, include_extras=True)
+    for name, annotated in hints.items():
+        metas = get_args(annotated)
+        cli = next((m.flag for m in metas if isinstance(m, Cli)), None)
+        is_secret = any(getattr(m, "enabled", False) for m in metas if isinstance(m, Secret))
+        if not cli or is_secret:
+            continue  # Only fields explicitly marked with Cli(...) become CLI flags; Secret fields are not exposed via CLI flags
+        help_text = next((m.text for m in metas if isinstance(m, Help)), None)
+        default = getattr(Config, name)
+        # Suppress defaults so argparse only sets values explicitly provided in CLI
+        arg_kwargs: Dict[str, Any] = {"help": help_text or "", "default": argparse.SUPPRESS}
+        # infer choices from Literal if present
+        origin = get_origin(annotated)
+        if origin is Literal:
+            arg_kwargs["choices"] = tuple(get_args(annotated))
+        # Make --schema required (empty-string default is just for template rendering)
+        if name == "schema":
+            arg_kwargs["required"] = True
+        # Booleans: use BooleanOptionalAction for --flag / --no-flag
+        if isinstance(default, bool):
+            parser.add_argument(cli, action=argparse.BooleanOptionalAction, **arg_kwargs)
+        else:
+            parser.add_argument(cli, type=_arg_type_from_default(default), **arg_kwargs)
+    # Builder-only flags (not part of Config dataclass)
+    parser.add_argument( "--config-dir", help="Configuration root (overrides autodiscovery of ~/.config/TerminusDB and /etc/terminusdb)" )
+    parser.add_argument( "--config-file", help="Additional YAML overlay (highest priority)" )
+    parser.add_argument( "--set", action="append", default=[], help="Overrides like key=value; supports dotted keys for nesting" )
+    return parser
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="TerminusDB CLI")
+    return build_argparser_from_config().parse_args()
 
-    # Nuevo modelo
-    parser.add_argument("--schema", required=True, help="Nombre del esquema/target (carpeta en schemas/)")
-    parser.add_argument("--profile", help="Perfil de configuración (p.ej. dev, prod)")
-    parser.add_argument("--config-dir", help="Raíz de configuración (sobrescribe autodetección ~/.config/TerminusDB y /etc/terminusdb)")
-    parser.add_argument("--config-file", help="Archivo YAML adicional a superponer (overlay de alta prioridad)")
-
-    # Overrides clásicos (también pueden venir por --set)
-    parser.add_argument("--tdb-config-file", type=str, help="YAML con tablas (bypass DB)")
-    parser.add_argument("--parallel-max", type=int, help="Maximum number of parallel processes")
-    parser.add_argument("--action", type=str, choices=["MANT_PROD", "MANT_HIST"], help="Action to perform")
-    parser.add_argument("--mode", type=str, choices=["ALL", "QUERY_ONLY"], help="Mode of operation")
-    parser.add_argument("--chunk-size", type=int, help="Rows per chunk")
-    parser.add_argument("--use-added-cols", action=argparse.BooleanOptionalAction, help="Add derived columns in history tables")
-    parser.add_argument("--add-tdb-columns", action=argparse.BooleanOptionalAction, help="Add TerminusDB execution date columns in history tables")
-    parser.add_argument("--print-process", action=argparse.BooleanOptionalAction, help="Dry-run to generate SQL*Plus script")
-    parser.add_argument("--log-level", type=str, choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
-
-    # Overrides genéricos k=v (admite clave.anidada)
-    parser.add_argument("--set", action="append", default=[], help="Overrides tipo key=value; admite claves anidadas con punto")
-
-    return parser.parse_args()
-
+# ------------------------------------------------------------------------------
+# CLI --set parser (k=v, dotted keys)
+# ------------------------------------------------------------------------------
 def _parse_cli_sets(pairs: Sequence[str]) -> Dict[str, Any]:
+    """
+    Parse a list of key=value strings into a dict, with simple auto-typing."""
     out: Dict[str, Any] = {}
     for p in pairs or []:
         if "=" not in p:
             continue
         k, v = p.split("=", 1)
         v = v.strip()
-        # auto-typing simple
+        # simple auto-typing
         if v.isdigit():
-            v = int(v)
-        elif v.lower() in ("true","false"):
-            v = v.lower() == "true"
-        out[k.strip()] = v
+            v_typed: Any = int(v)
+        elif v.lower() in ("true", "false"):
+            v_typed = (v.lower() == "true")
+        else:
+            # try float
+            try:
+                v_typed = float(v)
+            except ValueError:
+                v_typed = v
+        out[k.strip()] = v_typed
     return out
 
+# ------------------------------------------------------------------------------
+# Build final config dict using loader + CLI overrides
+# ------------------------------------------------------------------------------
 def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> Dict[str, Any]:
     """
-    Produce el diccionario de configuración final usando el nuevo loader (overlays + secrets).
-    CLI y ENV se aplican dentro del loader (ENV TDB_*) y aquí mapeamos flags directas a --set.
+    Produce the final configuration dictionary using the new loader (overlays + secrets).
+    Environment and CLI overrides are handled inside the loader (ENV TDB_*), and here we map
+    explicit flags to --set so they win with the highest priority.
     """
-    # Transforma flags individuales en sets (para que ganen prioridad)
+    # Map CLI flags (derived from Config metadata) into --set key=value overrides
     cli_sets: Dict[str, Any] = _parse_cli_sets(getattr(cli_args, "set", []))
-    mapping: Dict[str, Any] = {
-        "parallel_max": cli_args.parallel_max,
-        "action": cli_args.action,
-        "mode": cli_args.mode,
-        "chunk_size": cli_args.chunk_size,
-        "use_added_cols": cli_args.use_added_cols,
-        "add_tdb_columns": getattr(cli_args, "add_tdb_columns", None),
-        "print_process": cli_args.print_process,
-        "log_level": cli_args.log_level,
-        "tdb_config_file": cli_args.tdb_config_file,
-    }
-    mapping = {k: v for k, v in mapping.items() if v is not None}
-
-    for k, v in mapping.items():
-        if v is not None:
-            cli_sets[k] = v
-
+    # Pull values for every CLI-exposed field from args and push into cli_sets if not None
+    hints = get_type_hints(Config, include_extras=True)
+    for name, annotated in hints.items():
+        metas = get_args(annotated)
+        cli = next((m.flag for m in metas if isinstance(m, Cli)), None)
+        if not cli:
+            continue
+        # skip secrets even if they had Cli (we didn't add them)
+        is_secret = any(getattr(m, "enabled", False) for m in metas if isinstance(m, Secret))
+        if is_secret:
+            continue
+        # argparse stores flags as dest = field name with dashes replaced by underscores,
+        # but since we used the field name to derive flags, we can read by attribute name.
+        if hasattr(cli_args, name):
+            val = getattr(cli_args, name)
+            # Only propagate explicit values (argparse always populates defaults; let loader/defaults handle true defaults)
+            # Here we still push values to ensure CLI has top priority.
+            if val is not None:
+                cli_sets[name] = val
+    # Call the loader with overlay sources
     cfg = load_runtime_config(
         schema=cli_args.schema,
-        profile=cli_args.profile,
+        profile=getattr(cli_args, "profile", None),
         cli_sets=cli_sets,
-        explicit_config_file=cli_args.config_file,
-        explicit_config_dir=cli_args.config_dir,
+        explicit_config_file=getattr(cli_args, "config_file", None),
+        explicit_config_dir=getattr(cli_args, "config_dir", None),
     )
-    # Mezcla con defaults embebidos (solo para llaves que falten)
+    # Merge with embedded defaults (if you still keep some minimal defaults in code)
     final = dict(defaults)
     final.update(cfg)
-    # fija schema/profile para que queden en el objeto Config
+    # Ensure schema/profile land in the object (the loader also uses them but they are not part of the dict)
     final["schema"] = cli_args.schema
-    final["profile"] = cli_args.profile
-    final["tdb_config_file"] = cli_args.tdb_config_file
+    final["profile"] = getattr(cli_args, "profile", None)
+    final["ilm_config_file"] = resolve_schema_file(
+        schema=cli_args.schema,
+        profile=getattr(cli_args, "profile", None),
+        explicit_config_dir=getattr(cli_args, "config_dir", None),
+        explicit_file=getattr(cli_args, "ilm_config_file", None),
+        prefix_name="ilm",
+        extension_name="yml",
+        description="ilm configuration file",
+    )
     return final

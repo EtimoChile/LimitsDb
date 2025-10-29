@@ -1,5 +1,6 @@
 from terminusdb.core.tdb_params_config import Config
-from terminusdb.core.tdb_utils import indent_lines, join_wrapped, nvl, split_credentials
+from terminusdb.core.tdb_status import Status
+from terminusdb.core.tdb_utils import get_effective_credentials, indent_lines, join_wrapped, nvl
 from terminusdb.db.tdb_engines import DatabaseEngine
 from terminusdb.core.tdb_logger import get_logger
 from datetime import datetime
@@ -10,7 +11,7 @@ class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
 
     @staticmethod
-    def get_connection(config: Config) -> oracledb.Connection:
+    def get_connection(config: Config, *, admin: bool=False) -> oracledb.Connection:
         """Returns an Oracle connection using provided config.
         Args:
             config: Database config object.
@@ -18,8 +19,8 @@ class OracleEngine(DatabaseEngine):
             An active oracledb.Connection."""
         logger = get_logger()
         try:
-            [user, password, dsn] = split_credentials(config.prod_credentials)
-            return oracledb.connect(user, password, dsn) # type: ignore
+            user, password, dsn = get_effective_credentials(config, admin=admin)
+            return oracledb.connect(user=user, password=password, dsn=dsn) # type: ignore
         except Exception:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
             raise
@@ -57,10 +58,10 @@ class OracleEngine(DatabaseEngine):
         try:
             cursor = conn.cursor()
             cursor.execute( # type: ignore
-                """SELECT cnf_id, cnf_prod_owner, cnf_hist_owner, cnf_table_name, cnf_months_keep_prod,
-                       cnf_months_keep_hist, cnf_exec_day, cnf_frecuency, cnf_is_active, cnf_purge_limit_date_expr,
-                       cnf_additional_expr, cnf_prod_orphan_purge, cnf_orphan_chk_column, cnf_has_lob,
-                       cnf_ref_tables, cnf_join_expr, cnf_hint_expr, cnf_long_cols, null ctl_status
+                """SELECT cnf_id, cnf_source_owner, cnf_history_owner, cnf_table_name, cnf_retain_months_source,
+                       cnf_retain_months_history, cnf_exec_day, cnf_frecuency, cnf_is_active, cnf_purge_date_expr,
+                       cnf_additional_filter_expr, cnf_source_orphan_purge, cnf_orphan_check_column, cnf_has_lob_columns,
+                       cnf_referencing_tables, cnf_join_expr, cnf_hint_expr, cnf_long_columns, null ctl_status
                 FROM tdb_conf
                 WHERE cnf_is_active = 'Y'""")
             cols = [col[0].lower() for col in cursor.description] # type: ignore
@@ -103,14 +104,14 @@ class OracleEngine(DatabaseEngine):
         Returns:
             PL/SQL block as string."""
         cnd0 = table_cnf["conds"][0]
-        prod_owner, hist_owner, table_name = cnd0["cnf_prod_owner"], cnd0["cnf_hist_owner"], cnd0["cnf_table_name"]
-        hint_expr, has_lob = cnd0["cnf_hint_expr"], cnd0["cnf_has_lob"] == 'Y'
+        source_owner, history_owner, table_name = cnd0["cnf_source_owner"], cnd0["cnf_history_owner"], cnd0["cnf_table_name"]
+        hint_expr, has_lob_columns = cnd0["cnf_hint_expr"], cnd0["cnf_has_lob_columns"] == 'Y'
         other_cols_exprs, other_cols_alias, referencing_tables = table_cnf["other_cols_exprs"], table_cnf["other_cols_alias"], table_cnf["referencing_tables"]
-        query_expr, table_columns, months_keep_hist_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_hist_max"]
+        query_expr, table_columns, months_keep_history_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_history_max"]
         logger = get_logger()
-        logger.debug(f"Generating PL/SQL block for table {prod_owner}.{table_name} with process date {process_date}")
-        ref_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
-        mant_prod = config.action == "MANT_PROD"
+        logger.debug(f"Generating PL/SQL block for table {source_owner}.{table_name} with process date {process_date}")
+        referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
+        source_ilm = config.action == "SOURCE_ILM"
         if config.add_tdb_columns:
             gend_cols = ["tdb_process_date", "tdb_insert_date"]
             gend_vals = ["l_process_date", "sysdate"]
@@ -118,74 +119,74 @@ class OracleEngine(DatabaseEngine):
             gend_cols = gend_vals = []
         ins_cols = join_wrapped(", ", table_columns + other_cols_alias + gend_cols, 200)
         ins_vals = join_wrapped(", ", [f"r_rec(i).{col}" for col in table_columns + other_cols_alias] + gend_vals, 200)
-        if config.print_process: process_date = "&process_date"
+        if config.generate_script: process_date = "&process_date"
         plsql = f"""declare
-    l_prod_owner varchar2(50) := '{prod_owner}';
-    l_hist_owner varchar2(50) := '{hist_owner}';
+    l_source_owner varchar2(50) := '{source_owner}';
+    l_history_owner varchar2(50) := '{history_owner}';
     l_action varchar2(10) := '{config.action}';
     l_mode varchar2(10) := '{config.mode}';
     l_message varchar2(200) := case when l_mode = 'ALL' then null else 'QUERY ONLY' end;
     l_table_name varchar2(50) := '{table_name}';
     l_process_date date := to_date('{process_date}', 'YYYYMMDD');
-    l_referencing_tables t_referencing_tables := t_referencing_tables({ref_tables});
+    l_referencing_tables t_referencing_tables := t_referencing_tables({referencing_tables});
     l_process_start date;
     l_record_count pls_integer := 0;
-    l_plsql clob := {'null' if config.print_process else ':plsql_code'};
+    l_plsql clob := {'null' if config.generate_script else ':plsql_code'};
     l_sqlcode number := null;
     l_out_message varchar2(200) := null;"""
-        if not has_lob:
+        if not has_lob_columns:
             cols_expr = ", ".join(["A.*"] + other_cols_exprs)
             plsql += f"""
     l_chunk_size pls_integer := {config.chunk_size}; l_chunk_start date;
     cursor c_records is
-        select /*+ {hint_expr} */ A.rowid{", " + cols_expr if mant_prod else ""}
+        select /*+ {hint_expr} */ A.rowid{", " + cols_expr if source_ilm else ""}
         {indent_lines(query_expr, 8)};
     type t_records is table of c_records%rowtype index by pls_integer; r_rec t_records;"""
         plsql += f"""
 begin
     l_process_start := sysdate;
-    check_save_status{"" if mant_prod else "@PROD"}(l_prod_owner, l_table_name, l_process_date, l_action, 'TSTART', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
+    check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
     if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;"""
-        if mant_prod or not config.use_added_cols:
+        if source_ilm or not config.use_added_columns:
             plsql += f"""
-    check_referencing_tables{"" if mant_prod else "@PROD"}(l_referencing_tables, l_process_date); commit;"""
-        if not has_lob or not mant_prod:
+    check_referencing_tables{"" if source_ilm else "@SOURCE"}(l_referencing_tables, l_process_date); commit;"""
+        if not has_lob_columns or not source_ilm:
             plsql += f"""
     open c_records;
     loop
         l_chunk_start := sysdate;
-        check_save_status{"" if mant_prod else "@PROD"}(l_prod_owner, l_table_name, l_process_date, l_action, 'CSTART', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
+        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_START}', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
         fetch c_records bulk collect into r_rec limit l_chunk_size;
         if r_rec.count <= 0 then
             exit;
         end if;"""
             if (config.mode == "ALL"):
-                if mant_prod and nvl(months_keep_hist_max, 1) > 0:
+                if source_ilm and nvl(months_keep_history_max, 1) > 0:
                     plsql += f"""
         for i in 1 .. r_rec.count loop
-            insert into {hist_owner.lower()}.{table_name.lower()}@hist
+            insert into {history_owner.lower()}.{table_name.lower()}@hist
             ({indent_lines(ins_cols,12)})
             values ({indent_lines(ins_vals,12)});
         end loop;"""
                 plsql += f"""
         forall i in 1 .. r_rec.count
-            delete from {prod_owner.lower()}.{table_name.lower()} where rowid = r_rec(i).rowid;
+            delete from {source_owner.lower()}.{table_name.lower()} where rowid = r_rec(i).rowid;
         l_record_count := l_record_count + r_rec.count;"""
             plsql += f"""
-        check_save_status{"" if mant_prod else "@PROD"}(l_prod_owner, l_table_name, l_process_date, l_action, 'CEND', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
+        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_END}', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
         commit;
     end loop;
     close c_records;"""
         else:
             cols_select = ", ".join([f"a.{col}" for col in table_columns] + other_cols_exprs + gend_vals)
             if config.mode == "ALL":
-                if mant_prod and months_keep_hist_max > 0:
+                if source_ilm and nvl(months_keep_history_max,0) > 0:
                     plsql += f"""
-    insert into {hist_owner.lower()}.{table_name.lower()}@hist({indent_lines(ins_cols,4)})
+    insert into {history_owner.lower()}.{table_name.lower()}@hist({indent_lines(ins_cols,4)})
     select /*+ {hint_expr} */ {indent_lines(cols_select,4)}
     {indent_lines(query_expr, 4)};"""
                 plsql += f"""
-    delete from {prod_owner.lower()}.{table_name.lower()} where rowid in
+    delete from {source_owner.lower()}.{table_name.lower()} where rowid in
     (select /*+ {hint_expr} */ a.rowid
     {indent_lines(query_expr, 4)});
     l_record_count := sql%rowcount;"""
@@ -194,12 +195,12 @@ begin
     select /*+ {hint_expr} */ count(*) into l_record_count
     {indent_lines(query_expr, 4)};"""
         plsql += f"""
-    check_save_status{"" if mant_prod else "@PROD"}(l_prod_owner, l_table_name, l_process_date, l_action, 'TEND', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
+    check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
     commit;
 exception
     when others then
         rollback;
-        check_save_status{"" if mant_prod else "@PROD"}(l_prod_owner, l_table_name, l_process_date, l_action, 'ERROR', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
+        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.ERROR}', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
         commit;
         if l_sqlcode not in (-20003) then
             raise;
@@ -244,7 +245,7 @@ end;"""
             sqlcode = cursor.var(oracledb.NUMBER) # type: ignore
             out_message = cursor.var(oracledb.STRING) # type: ignore
             cursor.callproc('check_save_status', [owner, table_name, datetime.strptime(process_date, "%Y%m%d").date(), # type: ignore
-                config.action, 'ERROR', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message])
+                config.action, '{ERROR}', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message])
             conn.commit()
         except Exception:
             logger.critical(f"Unexpected error in process_table for {owner}.{table_name}:", exc_info=True)
@@ -268,23 +269,23 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def all_status_tend(conn: oracledb.Connection, tables_cnf: Dict[Tuple[str, str], Any], process_date: str) -> bool:
-        """Checks if all referenced tables have status 'TEND' in tdb_ctl.
+    def all_status_tend(conn: oracledb.Connection, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
+        """Checks if all referenced tables have status '{TABLE_END}' in tdb_ctl.
         Args:
             conn: Active Oracle connection.
-            tables_cnf: Dict of (owner, table_name) keys representing configured tables.
+            tables_config: Dict of (owner, table_name) keys representing configured tables.
             process_date: Processing date in 'YYYYMMDD' format.
         Returns:
-            True if all tables have status 'TEND' for the given process date, False otherwise."""
+            True if all tables have status '{TABLE_END}' for the given process date, False otherwise."""
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
-            for (owner, table_name), table_cnf in tables_cnf.items():
+            for (owner, table_name), table_cnf in tables_config.items():
                 if table_cnf["skip"]: continue
                 cursor.execute( # type: ignore
                     """SELECT ctl_status FROM tdb_ctl
                     WHERE ctl_owner = :1 AND ctl_table_name = :2
-                    AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD') AND ctl_status = 'TEND'""",
+                    AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD') AND ctl_status = '{TABLE_END}'""",
                     [owner, table_name, process_date])
                 if not cursor.fetchone():
                     return False
@@ -316,14 +317,14 @@ end;"""
             if cursor:
                 cursor.close()
     @staticmethod
-    def get_date_cond(date_expr: str, mkp: int) -> str:
+    def get_date_cond(date_expr: str, months_keep_src: int) -> str:
         """Returns a date condition for the given date expression and months to keep.
         Args:
             date_expr: Date expression to evaluate.
-            mkp: Months to keep.
+            months_keep_src: Months to keep.
         Returns:
             Date condition as string."""
-        return f"({date_expr} < add_months(l_process_date,-{mkp}))"
+        return f"({date_expr} < add_months(l_process_date,-{months_keep_src}))"
 
     @staticmethod
     def close_connection(conn: oracledb.Connection) -> None:

@@ -1,6 +1,6 @@
 tables:
-  - prod_owner: GL
-    hist_owner: GL
+  - source_owner: GL
+    history_owner: GL
     table_name: INV_HEAD
     frecuency: D
     hint_expr: full(A)
@@ -15,20 +15,20 @@ tables:
         months_keep_hist: 0
         purge_limit_date_expr: "@INVD_DATE"
         additional_expr: "@INV_STATUS='A'"
-  - prod_owner: GL
-    hist_owner: GL
+  - source_owner: GL
+    history_owner: GL
     table_name: INV_DET
     frecuency: D
     hint_expr: full(A) full(B) use_hash(A, B)
-    hist_hint_expr: full(A)
+    history_hint_expr: full(A)
     ref_tables: INV_HEAD B
     join_expr: "@ JOIN INV_HEAD B ON B.INV_ID=A.INV_ID"
-    prod_orphan_purge: true
+    source_orphan_purge: true
     orphan_chk_column: B.INV_ID
     # conds:
     #   - is_active: true
-  - prod_owner: GL
-    hist_owner: GL
+  - source_owner: GL
+    history_owner: GL
     table_name: DSP_HEAD
     frecuency: D
     hint_expr: full(A)
@@ -43,15 +43,15 @@ tables:
         months_keep_hist: 0
         purge_limit_date_expr: "@DSP_DATE"
         additional_expr: "@DSP_STATUS='A'"
-  - prod_owner: GL
-    hist_owner: GL
+  - source_owner: GL
+    history_owner: GL
     table_name: DSP_DET
     frecuency: D
     hint_expr: full(A) full(B) full(C) use_hash(A, B, C)
-    hist_hint_expr: full(A)
+    history_hint_expr: full(A)
     ref_tables: DSP_HEAD B, INV_DET C, INV_HEAD D
     join_expr: "@ JOIN DSP_HEAD B ON B.DSP_ID=A.DSP_ID @ JOIN INV_DET C ON C.IND_ID = A.IND_ID @ JOIN INV_HEAD D.INV_ID= C.INV_ID"
-    prod_orphan_purge: true
+    source_orphan_purge: true
     orphan_chk_column: B.DSP_ID, C.IND_ID
     has_lob: true
     conds:

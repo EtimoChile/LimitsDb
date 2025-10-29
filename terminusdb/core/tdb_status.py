@@ -1,0 +1,8 @@
+class Status:
+    TABLE_START = "TSTART"
+    TABLE_END = "TEND"
+    CHUNK_START = "CSTART"
+    CHUNK_END = "CEND"
+    GENERATED = "GENERATED"
+    ERROR = "ERROR"
+    SKIPPED = "SKIPPED"

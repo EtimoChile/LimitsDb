@@ -1,0 +1,58 @@
+# tables: # List of tables to apply ILM
+#   - source_owner: GL # Source owner of table
+#     history_owner: GLHST # History owner of table
+#     table_name: INV_HEAD # Table name. In this example this is a parent table
+#     frecuency: D # Frecuency of ILM application. Expected values (D: dayly, M: monthly)
+#     hint_expr: full(A) # Hint to apply in selection from source table. Use table alias A for source table and B, C, etc for referenced tables
+#     conds: # List of conditions for selection
+#       - is_active: true # if condition is active
+#         retain_months_source: 3 # Months to keep in source
+#         retain_months_history: 11 # Months to keep in history after transfered to history env. If 0 or undefined there will be no history, only source deletion
+#         purge_date_expr: "@INV_DSP_DATE" # Date expression for ILM to compare with. Columns must be marked @ preffix
+#         additional_filter_expr: "@INV_STATUS='D'" # Optional additional expression to apply in ILM selection. Must also mark columns with @
+#       - is_active: true # Another condition. Can differ in any definition of other conditions of same table
+#         retain_months_source: 1
+#         retain_months_history: 0
+#         purge_date_expr: "@INVD_DATE"
+#         additional_filter_expr: "@INV_STATUS='A'"
+#   - source_owner: GL # Child table definition. Inherit conditions from parent tables. Can have multiple parent tables
+#     history_owner: GL
+#     table_name: INV_DET
+#     frecuency: D
+#     hint_expr: full(A) full(B) use_hash(A, B)
+#     history_hint_expr: full(A)
+#     referencing_tables: INV_HEAD B # List of parent tables
+#     join_expr: "@ JOIN INV_HEAD B ON B.INV_ID=A.INV_ID" # Join expression to link to parent table
+#     source_orphan_purge: true # If there mast to apply ILM to rows without parent
+#     orphan_check_column: B.INV_ID # Column from parent to use for orphan detection
+#     # conds:
+#     #   - is_active: true # If a table with no conds but an explicit inactive one is considered inactive
+#   - source_owner: GL # Parent table
+#     history_owner: GL
+#     table_name: DSP_HEAD
+#     frecuency: D
+#     hint_expr: full(A)
+#     conds:
+#       - is_active: true
+#         retain_months_source: 3
+#         retain_months_history: 0
+#         purge_date_expr: "@DSP_DATE"
+#         additional_filter_expr: "@DSP_STATUS='D'"
+#       - is_active: true
+#         retain_months_source: 1
+#         retain_months_history: 0
+#         purge_date_expr: "@DSP_DATE"
+#         additional_filter_expr: "@DSP_STATUS='A'"
+#   - source_owner: GL # Child table with three parent tables. Inherite conditions of all parent tables
+#     history_owner: GL
+#     table_name: DSP_DET
+#     frecuency: D
+#     hint_expr: full(A) full(B) full(C) full(D) use_hash(A, B, C, D)
+#     history_hint_expr: full(A)
+#     referencing_tables: DSP_HEAD B, INV_DET C, INV_HEAD D
+#     join_expr: "@ JOIN DSP_HEAD B ON B.DSP_ID=A.DSP_ID @ JOIN INV_DET C ON C.IND_ID = A.IND_ID @ JOIN INV_HEAD D.INV_ID= C.INV_ID"
+#     source_orphan_purge: true
+#     orphan_check_column: B.DSP_ID, C.IND_ID, D.INV_ID
+#     has_lob_columns: true
+#     conds:
+#       # - is_active: true

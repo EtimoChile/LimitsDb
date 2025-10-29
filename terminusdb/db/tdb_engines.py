@@ -8,10 +8,11 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_connection(config: Config) -> Any:
+    def get_connection(config: Config, *, admin: bool=False) -> Any:
         """Establishes a connection to the database.
         Args:
             config: Configuration object.
+            admin: If True, connects with admin credentials.
         Returns:
             An open database connection."""
         pass
@@ -100,14 +101,14 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def all_status_tend(conn: Any, tables_cnf: Dict[Tuple[str, str], Any], process_date: str) -> bool:
-        """Checks if all referenced tables have status 'TEND' in the control table.
+    def all_status_tend(conn: Any, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
+        """Checks if all referenced tables have status '{TABLE_END}' in the control table.
         Args:
             conn: Active database connection.
-            tables_cnf: Dict of (owner, table_name) keys representing configured tables.
+            tables_config: Dict of (owner, table_name) keys representing configured tables.
             process_date: Processing date in 'YYYYMMDD' format.
         Returns:
-            True if all tables have status 'TEND' for the given process date, False otherwise."""
+            True if all tables have status '{TABLE_END}' for the given process date, False otherwise."""
         pass
 
     @staticmethod
@@ -124,11 +125,11 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_date_cond(date_expr: str, mkp: int) -> str:
+    def get_date_cond(date_expr: str, months_keep_src: int) -> str:
         """Returns a date condition for the given date expression and months to keep.
         Args:
             date_expr: Date expression to evaluate.
-            mkp: Months to keep.
+            months_keep_src: Months to keep.
         Returns:
             Date condition as string."""
         pass
