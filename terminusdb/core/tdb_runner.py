@@ -8,10 +8,9 @@ from terminusdb.core.tdb_ilm_config import load_rows_from_yaml
 from terminusdb.db.tdb_engine_loader import get_db_engine
 from terminusdb.db.tdb_engines import DatabaseEngine
 from terminusdb.core.tdb_status import Status
-
+logger = get_logger("runner")
 
 def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> Tuple[str, str, str, int, int, Optional[int], Optional[str]]:
-    logger = get_logger()
     conn: Any
     logger.info(f"Processing table {owner}.{table_name}...")
     prev_rows_processed = 0
@@ -27,7 +26,7 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
             prev_rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
             engine.sql_block_run(conn, plsql_code)
             rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-            return (owner, table_name, '{TABLE_END}', prev_rows_processed, rows_processed, None, None)
+            return (owner, table_name, Status.TABLE_END, prev_rows_processed, rows_processed, None, None)
         except Exception as e:
             error, = e.args
             try:
@@ -36,7 +35,7 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
             except Exception as e:
                 logger.critical(f"Error getting rows processed for {owner}.{table_name}:", exc_info=True)
                 rows_processed = 0
-            return (owner, table_name, '{ERROR}', prev_rows_processed, rows_processed, error.code, error.message)
+            return (owner, table_name, Status.ERROR, prev_rows_processed, rows_processed, error.code, error.message)
     finally:
         if conn:
             conn.close()
@@ -78,7 +77,6 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
     return 0
 
 def get_next_ready_table(tables_config: Dict[Tuple[str, str], Dict[str, Any]], active_tables: set[Tuple[str, str]]) -> Optional[Tuple[str, str, Dict[str, Any]]]: # type: ignore
-    logger = get_logger()
     for (owner, table_name), table_cnf in tables_config.items():
         if table_cnf["skip"]: continue
         cd = tables_config[(owner, table_name)]["conds"][0]
@@ -99,7 +97,6 @@ def get_next_ready_table(tables_config: Dict[Tuple[str, str], Dict[str, Any]], a
     return None  # No tables ready to process
  
 def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, Any]], process_date: str, engine: DatabaseEngine, connection: Any) -> int:
-    logger = get_logger()
     processes: List[Future[Tuple[str, str, str, int, int, Optional[int], Optional[str]]]] = []
     active_tables: set[Tuple[str, str]] = set()
     with ProcessPoolExecutor(max_workers=config.parallel_max) as executor:
@@ -110,6 +107,7 @@ def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, 
                 cycle_launched = False
                 # Search for a process to launch
                 next_ready_table = get_next_ready_table(tables_config, active_tables)
+                logger.debug(f"Next ready table: {next_ready_table}")
                 if next_ready_table:
                     owner, table_name, table_info = next_ready_table
                     logger.info(f"Launching background process for {owner}.{table_name}...")
@@ -127,6 +125,7 @@ def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, 
                 # Wait for some process to finish
                 for completed_future in as_completed(processes):
                     owner, table_name, status, prev_rows_processed, rows_processed, sqlcode, message = completed_future.result()
+                    logger.debug(f"Process for table {owner}.{table_name} completed with status {status}")
                     cdr = tables_config[(owner, table_name)]["conds"][0]
                     if status == Status.ERROR and rows_processed == prev_rows_processed:
                         status = Status.SKIPPED
@@ -153,7 +152,6 @@ def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, 
 
 
 def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, process_date: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    logger = get_logger()
     logger.info("Processing table configuration...")
     tdb_ctl_status_rows: List[Dict[str, Any]] = []
     if config.ilm_config_file:
@@ -283,7 +281,6 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
     return tables_config
 
 def tdb_run(config: Config) -> None:
-    logger = get_logger()
     connection: Any = None
     engine: Optional[DatabaseEngine] = None
     try:

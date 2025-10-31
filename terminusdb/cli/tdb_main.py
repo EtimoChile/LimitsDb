@@ -34,7 +34,7 @@ def run_cli() -> None:
     """
     logger = get_logger("run")
     args = parse_args()
-    if args.log_level:
+    if hasattr(args,"log_level"):
         reconfigure_logger(level=args.log_level)
     # Ensure encryption key exists and auto-encrypt secrets if user left cleartext
     load_or_create_key()

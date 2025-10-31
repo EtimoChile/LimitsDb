@@ -1,11 +1,12 @@
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+import oracledb
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_status import Status
 from terminusdb.core.tdb_utils import get_effective_credentials, indent_lines, join_wrapped, nvl
 from terminusdb.db.tdb_engines import DatabaseEngine
 from terminusdb.core.tdb_logger import get_logger
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
-import oracledb
+logger = get_logger("oracle.engine")
 
 class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
@@ -17,7 +18,6 @@ class OracleEngine(DatabaseEngine):
             config: Database config object.
         Returns:
             An active oracledb.Connection."""
-        logger = get_logger()
         try:
             user, password, dsn = get_effective_credentials(config, admin=admin)
             return oracledb.connect(user=user, password=password, dsn=dsn) # type: ignore
@@ -32,7 +32,6 @@ class OracleEngine(DatabaseEngine):
             conn: Active Oracle connection.
         Returns:
             Current system date as Python date."""
-        logger = get_logger()
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
@@ -53,7 +52,6 @@ class OracleEngine(DatabaseEngine):
             conn: Active Oracle connection.
         Returns:
             List of configuration rows."""
-        logger = get_logger()
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
@@ -108,7 +106,6 @@ class OracleEngine(DatabaseEngine):
         hint_expr, has_lob_columns = cnd0["cnf_hint_expr"], cnd0["cnf_has_lob_columns"] == 'Y'
         other_cols_exprs, other_cols_alias, referencing_tables = table_cnf["other_cols_exprs"], table_cnf["other_cols_alias"], table_cnf["referencing_tables"]
         query_expr, table_columns, months_keep_history_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_history_max"]
-        logger = get_logger()
         logger.debug(f"Generating PL/SQL block for table {source_owner}.{table_name} with process date {process_date}")
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
         source_ilm = config.action == "SOURCE_ILM"
@@ -218,7 +215,6 @@ end;"""
             process_date: Target process date in 'YYYYMMDD'.
         Returns:
             Number of rows processed or 0 if none found or mismatched date."""
-        logger = get_logger()
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
@@ -237,7 +233,6 @@ end;"""
 
     @staticmethod
     def save_error_status(conn: oracledb.Connection, config: Config, owner: str, table_name: str, process_date: str, process_start: datetime, message: str, plsql_code: str) -> None:
-        logger = get_logger()
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
@@ -245,7 +240,7 @@ end;"""
             sqlcode = cursor.var(oracledb.NUMBER) # type: ignore
             out_message = cursor.var(oracledb.STRING) # type: ignore
             cursor.callproc('check_save_status', [owner, table_name, datetime.strptime(process_date, "%Y%m%d").date(), # type: ignore
-                config.action, '{ERROR}', process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message])
+                config.action, Status.ERROR, process_start, None, process_end, message, 0, plsql_code, sqlcode, out_message])
             conn.commit()
         except Exception:
             logger.critical(f"Unexpected error in process_table for {owner}.{table_name}:", exc_info=True)
@@ -270,22 +265,22 @@ end;"""
 
     @staticmethod
     def all_status_tend(conn: oracledb.Connection, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
-        """Checks if all referenced tables have status '{TABLE_END}' in tdb_ctl.
+        """Checks if all referenced tables have status "Status.TABLE_END" in tdb_ctl.
         Args:
             conn: Active Oracle connection.
             tables_config: Dict of (owner, table_name) keys representing configured tables.
             process_date: Processing date in 'YYYYMMDD' format.
         Returns:
-            True if all tables have status '{TABLE_END}' for the given process date, False otherwise."""
+            True if all tables have status "Status.TABLE_END" for the given process date, False otherwise."""
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
             for (owner, table_name), table_cnf in tables_config.items():
                 if table_cnf["skip"]: continue
                 cursor.execute( # type: ignore
-                    """SELECT ctl_status FROM tdb_ctl
+                    f"""SELECT ctl_status FROM tdb_ctl
                     WHERE ctl_owner = :1 AND ctl_table_name = :2
-                    AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD') AND ctl_status = '{TABLE_END}'""",
+                    AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD') AND ctl_status = '{Status.TABLE_END}'""",
                     [owner, table_name, process_date])
                 if not cursor.fetchone():
                     return False
@@ -335,6 +330,5 @@ end;"""
             if conn:
                 conn.close()
         except Exception:
-            logger = get_logger()
             logger.critical("Failed to close Oracle DB connection.", exc_info=True)
 

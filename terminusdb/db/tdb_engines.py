@@ -102,13 +102,13 @@ class DatabaseEngine(ABC):
     @staticmethod
     @abstractmethod
     def all_status_tend(conn: Any, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
-        """Checks if all referenced tables have status '{TABLE_END}' in the control table.
+        """Checks if all referenced tables have status "Status.TABLE_END" in the control table.
         Args:
             conn: Active database connection.
             tables_config: Dict of (owner, table_name) keys representing configured tables.
             process_date: Processing date in 'YYYYMMDD' format.
         Returns:
-            True if all tables have status '{TABLE_END}' for the given process date, False otherwise."""
+            True if all tables have status "Status.TABLE_END" for the given process date, False otherwise."""
         pass
 
     @staticmethod

@@ -160,61 +160,61 @@ poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chu
 
 ### Configuration parameters reference
 
-| Parameter | Purpose | Default / values |
-| --- | --- | --- |
-| `action` | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history). | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`. |
-| `mode` | Run everything or only generate queries (dry-run). | Default `ALL`; choices `ALL`, `QUERY_ONLY`. |
-| `chunk_size` | Rows per chunk when processing large tables. | Default `100000`. |
-| `use_added_columns` | Populate derived columns in history tables. | Default `True` (boolean toggle). |
-| `add_tdb_columns` | Add TerminusDB execution-date columns in history tables. | Default `True` (boolean toggle). |
-| `generate_script` | Dry-run: generate SQL script without executing. | Default `False` (boolean toggle). |
-| `parallel_max` | Maximum number of parallel processes. | Default `10`. |
-| `db_engine` | Database engine. | Default `"oracle"`; choices `"oracle"`, `"postgres"`. |
-| `log_level` | Logging level. | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
-| `schema` | Schema name (folder under `schemas/`). | Required on CLI; no persisted default. |
-| `profile` | Profile name (e.g., `dev`, `prod`). | Optional; default `null`. |
-| `ilm_config_file` | YAML file with tables (bypass DB discovery). | Optional; default `null`. |
-| `source_dsn` | Source DSN / connection descriptor. | Default empty string. |
-| `source_username` | Source username. | Default empty string. |
-| `source_password` | Source password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
-| `history_dsn` | History DSN / connection descriptor. | Default empty string. |
-| `history_username` | History username. | Default empty string. |
-| `history_password` | History password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
-| `admin_source_dsn` | Admin source DSN / connection descriptor. | Default empty string. |
-| `admin_source_username` | Admin source username. | Default empty string. |
-| `admin_source_password` | Admin source password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
-| `admin_history_dsn` | Admin history DSN / connection descriptor. | Default empty string. |
-| `admin_history_username` | Admin history username. | Default empty string. |
-| `admin_history_password` | Admin history password stored in secrets. | Default empty string; encrypted in `secrets.<PROFILE>.json`. |
+| Parameter                | Purpose                                                                                 | Default / values                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history). | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
+| `mode`                   | Run everything or only generate queries (dry-run).                                      | Default `ALL`; choices `ALL`, `QUERY_ONLY`.                                          |
+| `chunk_size`             | Rows per chunk when processing large tables.                                            | Default `100000`.                                                                    |
+| `use_added_columns`      | Populate derived columns in history tables.                                             | Default `True` (boolean toggle).                                                     |
+| `add_tdb_columns`        | Add TerminusDB execution-date columns in history tables.                                | Default `True` (boolean toggle).                                                     |
+| `generate_script`        | Dry-run: generate SQL script without executing.                                         | Default `False` (boolean toggle).                                                    |
+| `parallel_max`           | Maximum number of parallel processes.                                                   | Default `10`.                                                                        |
+| `db_engine`              | Database engine.                                                                        | Default `"oracle"`; choices `"oracle"`, `"postgres"`.                                |
+| `log_level`              | Logging level.                                                                          | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
+| `schema`                 | Schema name (folder under `schemas/`).                                                  | Required on CLI; no persisted default.                                               |
+| `profile`                | Profile name (e.g., `dev`, `prod`).                                                     | Optional; default `null`.                                                            |
+| `ilm_config_file`        | YAML file with tables (bypass DB discovery).                                            | Optional; default `null`.                                                            |
+| `source_dsn`             | Source DSN / connection descriptor.                                                     | Default empty string.                                                                |
+| `source_username`        | Source username.                                                                        | Default empty string.                                                                |
+| `source_password`        | Source password stored in secrets.                                                      | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
+| `history_dsn`            | History DSN / connection descriptor.                                                    | Default empty string.                                                                |
+| `history_username`       | History username.                                                                       | Default empty string.                                                                |
+| `history_password`       | History password stored in secrets.                                                     | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
+| `admin_source_dsn`       | Admin source DSN / connection descriptor.                                               | Default empty string.                                                                |
+| `admin_source_username`  | Admin source username.                                                                  | Default empty string.                                                                |
+| `admin_source_password`  | Admin source password stored in secrets.                                                | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
+| `admin_history_dsn`      | Admin history DSN / connection descriptor.                                              | Default empty string.                                                                |
+| `admin_history_username` | Admin history username.                                                                 | Default empty string.                                                                |
+| `admin_history_password` | Admin history password stored in secrets.                                               | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
 
 #### Overrides matrix (CLI, env, YAML)
 
-| Parameter | CLI flag | Environment variable | YAML key |
-| --- | --- | --- | --- |
-| `action` | `--action` | `TDB_ACTION` | `config.<PROFILE>.yml: action` |
-| `mode` | `--mode` | `TDB_MODE` | `config.<PROFILE>.yml: mode` |
-| `chunk_size` | `--chunk-size` | `TDB_CHUNK_SIZE` | `config.<PROFILE>.yml: chunk_size` |
-| `use_added_columns` | `--use-added-columns` | `TDB_USE_ADDED_COLS` | `config.<PROFILE>.yml: use_added_columns` |
-| `add_tdb_columns` | `--add-tdb-columns` | `TDB_ADD_TDB_COLUMNS` | `config.<PROFILE>.yml: add_tdb_columns` |
-| `generate_script` | `--generate-script` | `TDB_GENERATE_SCRIPT` | `config.<PROFILE>.yml: generate_script` |
-| `parallel_max` | `--parallel-max` | `TDB_PARALLEL_MAX` | `config.<PROFILE>.yml: parallel_max` |
-| `db_engine` | `--db-engine` | `TDB_DB_ENGINE` | `config.<PROFILE>.yml: db_engine` |
-| `log_level` | `--log-level` | `TDB_LOG_LEVEL` | `config.<PROFILE>.yml: log_level` |
-| `schema` | `--schema` | `TDB_SCHEMA` | CLI only (not stored). |
-| `profile` | `--profile` | `TDB_PROFILE` | CLI only (not stored). |
-| `ilm_config_file` | `--ilm-config-file` | `ILM_CONFIG_FILE` | CLI only (not stored). |
-| `source_dsn` | `--source-dsn` | `TDB_SOURCE_DSN` | `config.<PROFILE>.yml: source_dsn` |
-| `source_username` | `--source-username` | `TDB_SOURCE_USERNAME` | `config.<PROFILE>.yml: source_username` |
-| `source_password` | — | — | `secrets.<PROFILE>.json: source_password` |
-| `history_dsn` | `--history-dsn` | `TDB_HISTORY_DSN` | `config.<PROFILE>.yml: history_dsn` |
-| `history_username` | `--history-username` | `TDB_HISTORY_USERNAME` | `config.<PROFILE>.yml: history_username` |
-| `history_password` | — | — | `secrets.<PROFILE>.json: history_password` |
-| `admin_source_dsn` | `--admin-source-dsn` | `TDB_ADMIN_SOURCE_DSN` | `config.<PROFILE>.yml: admin_source_dsn` |
-| `admin_source_username` | `--admin-source-username` | `TDB_ADMIN_SOURCE_USERNAME` | `config.<PROFILE>.yml: admin_source_username` |
-| `admin_source_password` | — | — | `secrets.<PROFILE>.json: admin_source_password` |
-| `admin_history_dsn` | `--admin-history-dsn` | `TDB_ADMIN_HISTORY_DSN` | `config.<PROFILE>.yml: admin_history_dsn` |
-| `admin_history_username` | `--admin-history-username` | `TDB_ADMIN_HISTORY_USERNAME` | `config.<PROFILE>.yml: admin_history_username` |
-| `admin_history_password` | — | — | `secrets.<PROFILE>.json: admin_history_password` |
+| Parameter                | CLI flag                   | Environment variable         | YAML key                                         |
+| ------------------------ | -------------------------- | ---------------------------- | ------------------------------------------------ |
+| `action`                 | `--action`                 | `TDB_ACTION`                 | `config.<PROFILE>.yml: action`                   |
+| `mode`                   | `--mode`                   | `TDB_MODE`                   | `config.<PROFILE>.yml: mode`                     |
+| `chunk_size`             | `--chunk-size`             | `TDB_CHUNK_SIZE`             | `config.<PROFILE>.yml: chunk_size`               |
+| `use_added_columns`      | `--use-added-columns`      | `TDB_USE_ADDED_COLS`         | `config.<PROFILE>.yml: use_added_columns`        |
+| `add_tdb_columns`        | `--add-tdb-columns`        | `TDB_ADD_TDB_COLUMNS`        | `config.<PROFILE>.yml: add_tdb_columns`          |
+| `generate_script`        | `--generate-script`        | `TDB_GENERATE_SCRIPT`        | `config.<PROFILE>.yml: generate_script`          |
+| `parallel_max`           | `--parallel-max`           | `TDB_PARALLEL_MAX`           | `config.<PROFILE>.yml: parallel_max`             |
+| `db_engine`              | `--db-engine`              | `TDB_DB_ENGINE`              | `config.<PROFILE>.yml: db_engine`                |
+| `log_level`              | `--log-level`              | `TDB_LOG_LEVEL`              | `config.<PROFILE>.yml: log_level`                |
+| `schema`                 | `--schema`                 | `TDB_SCHEMA`                 | CLI only (not stored).                           |
+| `profile`                | `--profile`                | `TDB_PROFILE`                | CLI only (not stored).                           |
+| `ilm_config_file`        | `--ilm-config-file`        | `ILM_CONFIG_FILE`            | CLI only (not stored).                           |
+| `source_dsn`             | `--source-dsn`             | `TDB_SOURCE_DSN`             | `config.<PROFILE>.yml: source_dsn`               |
+| `source_username`        | `--source-username`        | `TDB_SOURCE_USERNAME`        | `config.<PROFILE>.yml: source_username`          |
+| `source_password`        | —                          | —                            | `secrets.<PROFILE>.json: source_password`        |
+| `history_dsn`            | `--history-dsn`            | `TDB_HISTORY_DSN`            | `config.<PROFILE>.yml: history_dsn`              |
+| `history_username`       | `--history-username`       | `TDB_HISTORY_USERNAME`       | `config.<PROFILE>.yml: history_username`         |
+| `history_password`       | —                          | —                            | `secrets.<PROFILE>.json: history_password`       |
+| `admin_source_dsn`       | `--admin-source-dsn`       | `TDB_ADMIN_SOURCE_DSN`       | `config.<PROFILE>.yml: admin_source_dsn`         |
+| `admin_source_username`  | `--admin-source-username`  | `TDB_ADMIN_SOURCE_USERNAME`  | `config.<PROFILE>.yml: admin_source_username`    |
+| `admin_source_password`  | —                          | —                            | `secrets.<PROFILE>.json: admin_source_password`  |
+| `admin_history_dsn`      | `--admin-history-dsn`      | `TDB_ADMIN_HISTORY_DSN`      | `config.<PROFILE>.yml: admin_history_dsn`        |
+| `admin_history_username` | `--admin-history-username` | `TDB_ADMIN_HISTORY_USERNAME` | `config.<PROFILE>.yml: admin_history_username`   |
+| `admin_history_password` | —                          | —                            | `secrets.<PROFILE>.json: admin_history_password` |
 
 Builder-only flags (`--config-dir`, `--config-file`, `--set`) control how overlays are discovered and do not map to configuration keys.
 
@@ -323,4 +323,34 @@ poetry update
 
 ## License
 
-Proprietary. All rights reserved.
+TerminusDB is released under the **Apache License 2.0**.  
+You are free to use, modify, and redistribute the software — including for commercial purposes — provided that you comply with the terms of that license.
+
+All open-source source code of TerminusDB remains free and community-driven.  
+However, **Inversiones Etimo SpA** retains the exclusive right to produce, brand, and distribute proprietary or commercial editions of TerminusDB that may include additional features, services, or licensing terms.
+
+📄 See [LICENSE](LICENSE), [LICENSE-DUAL.md](LICENSE-DUAL.md), and [NOTICE](NOTICE) for details.
+
+---
+
+## Governance and Ownership
+
+TerminusDB is maintained by **Inversiones Etimo SpA**  
+📧 contacto@etimo.cl  
+🌐 [https://www.etimo.cl](https://www.etimo.cl)
+
+### Project Governance
+
+- **Maintainer:** Inversiones Etimo SpA (core architecture, releases, roadmap).
+- **Community contributions:** welcomed via pull requests under the [CONTRIBUTING.md](CONTRIBUTING.md) guidelines.
+- **Issue tracking & discussions:** handled publicly through GitHub Issues and Discussions.
+- **Release model:**
+  - `development` → integration branch for new work.
+  - `main` → stable, production-ready releases.
+  - Periodic tags and changelogs define official versions.
+
+### Ownership
+
+All intellectual property and trademarks for TerminusDB are owned by **Inversiones Etimo SpA**.  
+Open-source distribution under the Apache 2.0 license does **not** transfer ownership of the software or brand.  
+Any proprietary extensions, hosted services, or commercial editions may be offered solely by Inversiones Etimo SpA.
