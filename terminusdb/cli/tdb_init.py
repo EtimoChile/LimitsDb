@@ -26,7 +26,7 @@ def _parse_init_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main_init() -> None:
+def run_cli() -> None:
     """Create schema/profile structure with configuration and secret templates."""
     logger = get_logger("init")
     args = _parse_init_args()
@@ -50,4 +50,4 @@ def main_init() -> None:
 
 
 if __name__ == "__main__":
-    main_init()
+    run_cli()

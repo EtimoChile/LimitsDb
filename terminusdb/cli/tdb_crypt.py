@@ -18,7 +18,7 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main_crypt() -> None:
+def run_cli() -> None:
     """Encrypt cleartext secrets in-place inside `secrets.json`."""
     logger = get_logger("crypt")
     args = _parse_args()
@@ -36,4 +36,4 @@ def main_crypt() -> None:
 
 
 if __name__ == "__main__":
-    main_crypt()
+    run_cli()

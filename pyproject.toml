@@ -28,8 +28,8 @@ dev = [
 
 [project.scripts]
 tdb-run = "terminusdb.cli.tdb_run:run_cli"
-tdb-init = "terminusdb.cli.tdb_init:main_init"
-tdb-crypt = "terminusdb.cli.tdb_crypt:main_crypt"
+tdb-init = "terminusdb.cli.tdb_init:run_cli"
+tdb-crypt = "terminusdb.cli.tdb_crypt:run_cli"
 tdb-impl = "terminusdb.cli.tdb_impl:run_cli"
 
 [build-system]
