@@ -252,7 +252,7 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                 if al != "A":
                     # Add the cnf_purge_date_expr to other_cols_exprs and other_cols_alias for referencing tables
                     if f"tdb_date_{al}" not in table_cnf["other_cols_alias"] and cd["cnf_purge_date_expr"]:
-                        table_cnf["other_cols_exprs"].append(f"{nvl(cd["cnf_purge_date_expr"], "").replace('@', f'{al}.')} tdb_date_{al}") # type: ignore
+                        table_cnf["other_cols_exprs"].append(nvl(cd["cnf_purge_date_expr"], "").replace('@', al+".")+f" tdb_date_{al}") # type: ignore
                         table_cnf["other_cols_alias"].append(f"tdb_date_{al}") # type: ignore
                     # Add columns in cnf_history_addtl_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
                     for col in [match[0] for match in re.findall(r'@("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)', cd["addtl_history_expr"])]:

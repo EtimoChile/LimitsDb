@@ -50,7 +50,7 @@ def indent_lines(text: str, spaces: int) -> str:
     :param spaces: Number of spaces to prepend to each line after the first.
     :return: Modified string with indentation applied.
     """
-    return f"\n{" " * spaces}".join(text.splitlines())
+    return ("\n"+(" " * spaces)).join(text.splitlines())
 
 def join_wrapped(connector: str, items: Iterable[str], max_line_length: int) -> str:
     """
