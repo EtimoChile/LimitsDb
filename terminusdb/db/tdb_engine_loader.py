@@ -9,6 +9,6 @@ def get_db_engine(engine_name: str) -> DatabaseEngine:
     Returns:
         type: DatabaseEngine interface"""
     if engine_name == "oracle":
-        from terminusdb.db.oracle.tdb_engine import OracleEngine
+        from terminusdb.db.oracle.tdb_engine_impl import OracleEngine
         return cast(DatabaseEngine, OracleEngine)
     raise ValueError(f"Unknown engine: {engine_name}")
