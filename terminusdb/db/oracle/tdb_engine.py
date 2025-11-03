@@ -105,13 +105,19 @@ class OracleEngine(DatabaseEngine):
             PL/SQL block as string."""
         cnd0 = table_cnf["conds"][0]
         source_owner, history_owner, table_name = cnd0["cnf_source_owner"], cnd0["cnf_history_owner"], cnd0["cnf_table_name"]
+        source_ilm = config.action == "SOURCE_ILM"
+        history_dblink = config.history_dblink_name.lower()
+        history_dblink_suffix = f"@{history_dblink}" if history_dblink else ""
+        source_dblink = config.source_dblink_name.upper()
+        source_dblink_suffix = f"@{source_dblink}" if source_dblink else ""
+        save_status_proc = f"check_save_status{'' if source_ilm else source_dblink_suffix}"
+        check_refs_proc = f"check_referencing_tables{'' if source_ilm else source_dblink_suffix}"
         hint_expr, has_lob_columns = cnd0["cnf_hint_expr"], cnd0["cnf_has_lob_columns"] == 'Y'
         other_cols_exprs, other_cols_alias, referencing_tables = table_cnf["other_cols_exprs"], table_cnf["other_cols_alias"], table_cnf["referencing_tables"]
         query_expr, table_columns, months_keep_history_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_history_max"]
         logger = get_logger()
         logger.debug(f"Generating PL/SQL block for table {source_owner}.{table_name} with process date {process_date}")
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
-        source_ilm = config.action == "SOURCE_ILM"
         if config.add_tdb_columns:
             gend_cols = ["tdb_process_date", "tdb_insert_date"]
             gend_vals = ["l_process_date", "sysdate"]
@@ -145,17 +151,17 @@ class OracleEngine(DatabaseEngine):
         plsql += f"""
 begin
     l_process_start := sysdate;
-    check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
+    {save_status_proc}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
     if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;"""
         if source_ilm or not config.use_added_columns:
             plsql += f"""
-    check_referencing_tables{"" if source_ilm else "@SOURCE"}(l_referencing_tables, l_process_date); commit;"""
+    {check_refs_proc}(l_referencing_tables, l_process_date); commit;"""
         if not has_lob_columns or not source_ilm:
             plsql += f"""
     open c_records;
     loop
         l_chunk_start := sysdate;
-        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_START}', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
+        {save_status_proc}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_START}', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
         fetch c_records bulk collect into r_rec limit l_chunk_size;
         if r_rec.count <= 0 then
             exit;
@@ -164,7 +170,7 @@ begin
                 if source_ilm and nvl(months_keep_history_max, 1) > 0:
                     plsql += f"""
         for i in 1 .. r_rec.count loop
-            insert into {history_owner.lower()}.{table_name.lower()}@hist
+            insert into {history_owner.lower()}.{table_name.lower()}{history_dblink_suffix}
             ({indent_lines(ins_cols,12)})
             values ({indent_lines(ins_vals,12)});
         end loop;"""
@@ -173,7 +179,7 @@ begin
             delete from {source_owner.lower()}.{table_name.lower()} where rowid = r_rec(i).rowid;
         l_record_count := l_record_count + r_rec.count;"""
             plsql += f"""
-        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_END}', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
+        {save_status_proc}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_END}', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
         commit;
     end loop;
     close c_records;"""
@@ -182,7 +188,7 @@ begin
             if config.mode == "ALL":
                 if source_ilm and nvl(months_keep_history_max,0) > 0:
                     plsql += f"""
-    insert into {history_owner.lower()}.{table_name.lower()}@hist({indent_lines(ins_cols,4)})
+    insert into {history_owner.lower()}.{table_name.lower()}{history_dblink_suffix}({indent_lines(ins_cols,4)})
     select /*+ {hint_expr} */ {indent_lines(cols_select,4)}
     {indent_lines(query_expr, 4)};"""
                 plsql += f"""
@@ -195,12 +201,12 @@ begin
     select /*+ {hint_expr} */ count(*) into l_record_count
     {indent_lines(query_expr, 4)};"""
         plsql += f"""
-    check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
+    {save_status_proc}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
     commit;
 exception
     when others then
         rollback;
-        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.ERROR}', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
+        {save_status_proc}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.ERROR}', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
         commit;
         if l_sqlcode not in (-20003) then
             raise;

@@ -27,6 +27,12 @@ class Config:
     db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine"), Cli("--db-engine"), Env("TDB_DB_ENGINE")] = "oracle"
     log_level: Annotated[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], Help("Logging level"), Cli("--log-level"), Env("TDB_LOG_LEVEL")] = "INFO"
 
+    # cross-database integration helpers
+    source_dblink_name: Annotated[str, Help("Database link name pointing to SOURCE"), Cli("--source-dblink-name"), Env("TDB_SOURCE_DBLINK_NAME")] = "source"
+    history_dblink_name: Annotated[str, Help("Database link name pointing to HISTORY"), Cli("--history-dblink-name"), Env("TDB_HISTORY_DBLINK_NAME")] = "history"
+    source_role_name: Annotated[str, Help("Role granted access to SOURCE tables"), Cli("--source-role-name"), Env("TDB_SOURCE_ROLE_NAME")] = "tdb_source_role"
+    history_role_name: Annotated[str, Help("Role granted access to HISTORY tables"), Cli("--history-role-name"), Env("TDB_HISTORY_ROLE_NAME")] = "tdb_history_role"
+
     # schema/profile + optional tables override file
     schema: Annotated[str, Help("Schema name (folder under schemas/)"), Cli("--schema"), Env("TDB_SCHEMA"), CliOnly()] = ""
     profile: Annotated[Optional[str], Help("Profile name (e.g., dev, prod)"), Cli("--profile"), Env("TDB_PROFILE"), CliOnly()] = None
