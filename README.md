@@ -180,10 +180,8 @@ poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chu
 | `history_dsn`            | History DSN / connection descriptor.                                                    | Default empty string.                                                                |
 | `history_username`       | History username.                                                                       | Default empty string.                                                                |
 | `history_password`       | History password stored in secrets.                                                     | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
-| `admin_source_dsn`       | Admin source DSN / connection descriptor.                                               | Default empty string.                                                                |
 | `admin_source_username`  | Admin source username.                                                                  | Default empty string.                                                                |
 | `admin_source_password`  | Admin source password stored in secrets.                                                | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
-| `admin_history_dsn`      | Admin history DSN / connection descriptor.                                              | Default empty string.                                                                |
 | `admin_history_username` | Admin history username.                                                                 | Default empty string.                                                                |
 | `admin_history_password` | Admin history password stored in secrets.                                               | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
 
@@ -209,10 +207,8 @@ poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chu
 | `history_dsn`            | `--history-dsn`            | `TDB_HISTORY_DSN`            | `config.<PROFILE>.yml: history_dsn`              |
 | `history_username`       | `--history-username`       | `TDB_HISTORY_USERNAME`       | `config.<PROFILE>.yml: history_username`         |
 | `history_password`       | —                          | —                            | `secrets.<PROFILE>.json: history_password`       |
-| `admin_source_dsn`       | `--admin-source-dsn`       | `TDB_ADMIN_SOURCE_DSN`       | `config.<PROFILE>.yml: admin_source_dsn`         |
 | `admin_source_username`  | `--admin-source-username`  | `TDB_ADMIN_SOURCE_USERNAME`  | `config.<PROFILE>.yml: admin_source_username`    |
 | `admin_source_password`  | —                          | —                            | `secrets.<PROFILE>.json: admin_source_password`  |
-| `admin_history_dsn`      | `--admin-history-dsn`      | `TDB_ADMIN_HISTORY_DSN`      | `config.<PROFILE>.yml: admin_history_dsn`        |
 | `admin_history_username` | `--admin-history-username` | `TDB_ADMIN_HISTORY_USERNAME` | `config.<PROFILE>.yml: admin_history_username`   |
 | `admin_history_password` | —                          | —                            | `secrets.<PROFILE>.json: admin_history_password` |
 

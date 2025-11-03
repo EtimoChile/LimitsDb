@@ -80,11 +80,15 @@ def get_effective_credentials(cfg: Config, *, admin: bool = False):
     is_source = cfg.action == "SOURCE_ILM"
     prefix = "source" if is_source else "history"
     role = "admin_" if admin else ""
-    user = getattr(cfg, f"{prefix}_{role}username", None)
-    pwd  = getattr(cfg, f"{prefix}_{role}password", None)
-    dsn  = getattr(cfg, f"{prefix}_{role}dsn", None)
-    if not all([user, pwd, dsn]):
-        raise ValueError(f"Missing {prefix}_{role}username/password/dsn for action={cfg.action}")
+    user_key = f"{prefix}_{role}username"
+    pwd_key = f"{prefix}_{role}password"
+    dsn_key = f"{prefix}_dsn"
+    user = getattr(cfg, user_key, None)
+    pwd = getattr(cfg, pwd_key, None)
+    dsn = getattr(cfg, dsn_key, None)
+    missing = [key for key, value in ((user_key, user), (pwd_key, pwd), (dsn_key, dsn)) if not value]
+    if missing:
+        raise ValueError(f"Missing {'/'.join(missing)} for action={cfg.action}")
     return user, pwd, dsn
 
 APPNAME = "TerminusDB"

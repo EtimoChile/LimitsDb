@@ -39,10 +39,8 @@ class Config:
     history_dsn: Annotated[Optional[str], Cli("--history-dsn"), Env("TDB_HISTORY_DSN"), Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
     history_username: Annotated[Optional[str], Cli("--history-username"), Env("TDB_HISTORY_USERNAME"), Help("Username")] = ""
     history_password: Annotated[Optional[str], Help("Password"), Secret()] = ""
-    admin_source_dsn: Annotated[Optional[str], Cli("--admin-source-dsn"), Env("TDB_ADMIN_SOURCE_DSN"), Help("Admin DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
     admin_source_username: Annotated[Optional[str], Cli("--admin-source-username"), Env("TDB_ADMIN_SOURCE_USERNAME"), Help("Admin username")] = ""
     admin_source_password: Annotated[Optional[str], Help("Admin Source password"), Secret()] = ""
-    admin_history_dsn: Annotated[Optional[str], Cli("--admin-history-dsn"), Env("TDB_ADMIN_HISTORY_DSN"), Help("Admin History DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
     admin_history_username: Annotated[Optional[str], Cli("--admin-history-username"), Env("TDB_ADMIN_HISTORY_USERNAME"), Help("Admin History username")] = ""
     admin_history_password: Annotated[Optional[str], Help("Admin History password"), Secret()] = ""
 
