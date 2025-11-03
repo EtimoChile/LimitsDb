@@ -6,7 +6,6 @@ from terminusdb.core.tdb_status import Status
 from terminusdb.core.tdb_utils import get_effective_credentials, indent_lines, join_wrapped, nvl
 from terminusdb.db.tdb_engines import DatabaseEngine
 from terminusdb.core.tdb_logger import get_logger
-logger = get_logger("oracle.engine")
 
 class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
@@ -18,6 +17,7 @@ class OracleEngine(DatabaseEngine):
             config: Database config object.
         Returns:
             An active oracledb.Connection."""
+        logger = get_logger("oracle.engine")
         try:
             user, password, dsn = get_effective_credentials(config, admin=admin)
             return oracledb.connect(user=user, password=password, dsn=dsn) # type: ignore
@@ -32,6 +32,7 @@ class OracleEngine(DatabaseEngine):
             conn: Active Oracle connection.
         Returns:
             Current system date as Python date."""
+        logger = get_logger("oracle.engine")
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
@@ -52,6 +53,7 @@ class OracleEngine(DatabaseEngine):
             conn: Active Oracle connection.
         Returns:
             List of configuration rows."""
+        logger = get_logger("oracle.engine")
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
@@ -101,6 +103,7 @@ class OracleEngine(DatabaseEngine):
             process_date: Process date in 'YYYYMMDD' format.
         Returns:
             PL/SQL block as string."""
+        logger = get_logger("oracle.engine")
         cnd0 = table_cnf["conds"][0]
         source_owner, history_owner, table_name = cnd0["cnf_source_owner"], cnd0["cnf_history_owner"], cnd0["cnf_table_name"]
         source_ilm = config.action == "SOURCE_ILM"
@@ -239,6 +242,7 @@ end;"""
 
     @staticmethod
     def save_error_status(conn: oracledb.Connection, config: Config, owner: str, table_name: str, process_date: str, process_start: datetime, message: str, plsql_code: str) -> None:
+        logger = get_logger("oracle.engine")
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
@@ -332,6 +336,7 @@ end;"""
         """Closes the Oracle connection.
         Args:
             conn: Active Oracle connection."""
+        logger = get_logger("oracle.engine")
         try:
             if conn:
                 conn.close()

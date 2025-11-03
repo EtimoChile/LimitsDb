@@ -37,11 +37,7 @@ def run_cli() -> None:
     reconfigure_logger(level=config.log_level)
     logger.debug("Effective config: %s", _mask_secrets(config.to_dict()))
 
-    ilm_rows = resolve_and_load_ilm_rows(
-        schema=config.schema,
-        profile=config.profile,
-        config_dir=getattr(args, "config_dir", None),
-    )
+    ilm_rows = resolve_and_load_ilm_rows(schema=config.schema, profile=config.profile, config_dir=getattr(args, "config_dir", None))
     source_tables: Sequence[Tuple[str, str]] = sorted(
         {
             (row["cnf_source_owner"], row["cnf_table_name"])
@@ -56,10 +52,8 @@ def run_cli() -> None:
             if row.get("cnf_history_owner") and row.get("cnf_table_name")
         }
     )
-
     implementer = get_engine_implementer(config)
     implementer.provision(source_tables, history_tables)
-
 
 if __name__ == "__main__":
     run_cli()
