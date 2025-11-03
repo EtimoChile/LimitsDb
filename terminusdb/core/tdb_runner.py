@@ -8,9 +8,9 @@ from terminusdb.core.tdb_ilm_config import load_rows_from_yaml
 from terminusdb.db.tdb_engine_loader import get_db_engine
 from terminusdb.db.tdb_engines import DatabaseEngine
 from terminusdb.core.tdb_status import Status
-logger = get_logger("runner")
 
 def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> Tuple[str, str, str, int, int, Optional[int], Optional[str]]:
+    logger = get_logger("runner")
     conn: Any
     logger.info(f"Processing table {owner}.{table_name}...")
     prev_rows_processed = 0
@@ -77,6 +77,7 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
     return 0
 
 def get_next_ready_table(tables_config: Dict[Tuple[str, str], Dict[str, Any]], active_tables: set[Tuple[str, str]]) -> Optional[Tuple[str, str, Dict[str, Any]]]: # type: ignore
+    logger = get_logger("runner")
     for (owner, table_name), table_cnf in tables_config.items():
         if table_cnf["skip"]: continue
         cd = tables_config[(owner, table_name)]["conds"][0]
@@ -97,6 +98,7 @@ def get_next_ready_table(tables_config: Dict[Tuple[str, str], Dict[str, Any]], a
     return None  # No tables ready to process
  
 def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, Any]], process_date: str, engine: DatabaseEngine, connection: Any) -> int:
+    logger = get_logger("runner")
     processes: List[Future[Tuple[str, str, str, int, int, Optional[int], Optional[str]]]] = []
     active_tables: set[Tuple[str, str]] = set()
     with ProcessPoolExecutor(max_workers=config.parallel_max) as executor:
@@ -152,6 +154,7 @@ def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, 
 
 
 def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, process_date: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    logger = get_logger("runner")
     logger.info("Processing table configuration...")
     tdb_ctl_status_rows: List[Dict[str, Any]] = []
     if config.ilm_config_file:
@@ -281,6 +284,7 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
     return tables_config
 
 def tdb_run(config: Config) -> None:
+    logger = get_logger("runner")
     connection: Any = None
     engine: Optional[DatabaseEngine] = None
     try:
