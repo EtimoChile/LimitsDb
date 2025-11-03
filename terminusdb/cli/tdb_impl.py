@@ -50,7 +50,7 @@ def _make_config(base: Dict[str, Any], action: str) -> Config:
     return Config.from_dict(cfg)
 
 
-def _build_source_tables(owner: str) -> List[TableDefinition]:
+def _build_control_tables(owner: str) -> List[TableDefinition]:
     return [
         TableDefinition(
             owner=owner,
@@ -163,8 +163,10 @@ def run_cli() -> None:
         roles=(HISTORY_ROLE,),
         system_privileges=("CREATE SESSION",),
     )
-    tables = _build_source_tables(source_config.source_username)
-    sequences = _build_sequences(source_config.source_username)
+    source_tables = _build_control_tables(source_config.source_username)
+    source_sequences = _build_sequences(source_config.source_username)
+    history_tables = _build_control_tables(history_config.history_username)
+    history_sequences = _build_sequences(history_config.history_username)
     db_link = DatabaseLinkDefinition(
         name=DB_LINK_NAME,
         username=history_config.history_username,
@@ -178,8 +180,8 @@ def run_cli() -> None:
     try:
         summary["source_roles"] = engine.ensure_roles(source_admin_conn, source_roles)
         summary["source_users"] = engine.ensure_users(source_admin_conn, [source_user])
-        summary["tables"] = engine.ensure_tables(source_admin_conn, tables)
-        summary["sequences"] = engine.ensure_sequences(source_admin_conn, sequences)
+        summary["source_tables"] = engine.ensure_tables(source_admin_conn, source_tables)
+        summary["source_sequences"] = engine.ensure_sequences(source_admin_conn, source_sequences)
     finally:
         engine.close_connection(source_admin_conn)
 
@@ -187,6 +189,8 @@ def run_cli() -> None:
     try:
         summary["history_roles"] = engine.ensure_roles(history_admin_conn, history_roles)
         summary["history_users"] = engine.ensure_users(history_admin_conn, [history_user])
+        summary["history_tables"] = engine.ensure_tables(history_admin_conn, history_tables)
+        summary["history_sequences"] = engine.ensure_sequences(history_admin_conn, history_sequences)
     finally:
         engine.close_connection(history_admin_conn)
 
