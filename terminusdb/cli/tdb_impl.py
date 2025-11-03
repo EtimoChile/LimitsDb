@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from terminusdb.core.tdb_logger import configure_logger, get_logger, reconfigure_logger
 from terminusdb.core.tdb_crypto import load_or_create_key
@@ -150,18 +150,21 @@ def run_cli() -> None:
     engine = get_db_engine(source_config.db_engine)
 
     source_roles = [RoleDefinition(name=SOURCE_ROLE)]
+    source_privileges = getattr(engine, "SOURCE_SYSTEM_PRIVILEGES", ())
+    history_privileges = getattr(engine, "HISTORY_SYSTEM_PRIVILEGES", ())
+
     source_user = UserDefinition(
         name=source_config.source_username,
         password=source_config.source_password,
         roles=(SOURCE_ROLE,),
-        system_privileges=("CREATE SESSION", "CREATE DATABASE LINK"),
+        system_privileges=source_privileges,
     )
     history_roles = [RoleDefinition(name=HISTORY_ROLE)]
     history_user = UserDefinition(
         name=history_config.history_username,
         password=history_config.history_password,
         roles=(HISTORY_ROLE,),
-        system_privileges=("CREATE SESSION",),
+        system_privileges=history_privileges,
     )
     source_tables = _build_control_tables(source_config.source_username)
     source_sequences = _build_sequences(source_config.source_username)
@@ -182,6 +185,7 @@ def run_cli() -> None:
         summary["source_users"] = engine.ensure_users(source_admin_conn, [source_user])
         summary["source_tables"] = engine.ensure_tables(source_admin_conn, source_tables)
         summary["source_sequences"] = engine.ensure_sequences(source_admin_conn, source_sequences)
+        engine.ensure_supporting_plsql(source_admin_conn, source_config.source_username)
     finally:
         engine.close_connection(source_admin_conn)
 
@@ -191,6 +195,7 @@ def run_cli() -> None:
         summary["history_users"] = engine.ensure_users(history_admin_conn, [history_user])
         summary["history_tables"] = engine.ensure_tables(history_admin_conn, history_tables)
         summary["history_sequences"] = engine.ensure_sequences(history_admin_conn, history_sequences)
+        engine.ensure_supporting_plsql(history_admin_conn, history_config.history_username)
     finally:
         engine.close_connection(history_admin_conn)
 

@@ -256,3 +256,9 @@ class DatabaseEngine(ABC):
         """Ensure that the provided database links exist, returning newly created ones."""
         pass
 
+    @staticmethod
+    @abstractmethod
+    def ensure_supporting_plsql(conn: Any, owner: str) -> None:
+        """Ensure auxiliary PL/SQL objects required by TerminusDB exist in the schema."""
+        pass
+

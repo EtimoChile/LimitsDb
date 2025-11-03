@@ -177,10 +177,13 @@ END check_referencing_tables;
 """
 logger = get_logger("oracle.engine")
 
+
 class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
 
     _supporting_objects_created: bool = False
+    SOURCE_SYSTEM_PRIVILEGES: Tuple[str, ...] = ("CREATE SESSION", "CREATE DATABASE LINK")
+    HISTORY_SYSTEM_PRIVILEGES: Tuple[str, ...] = ("CREATE SESSION",)
 
     @staticmethod
     def _format_identifier(name: str) -> str:
@@ -523,7 +526,6 @@ end;"""
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
-            OracleEngine._ensure_supporting_plsql(cursor)
             process_end = OracleEngine.get_system_date(conn)
             sqlcode = cursor.var(oracledb.NUMBER) # type: ignore
             out_message = cursor.var(oracledb.STRING) # type: ignore
@@ -545,26 +547,11 @@ end;"""
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
-            OracleEngine._ensure_supporting_plsql(cursor)
             cursor.setinputsizes(plsql_code=oracledb.CLOB)  # type: ignore
             cursor.execute(plsql_code, {"plsql_code": plsql_code})  # type: ignore
         finally:
             if cursor:
                 cursor.close()
-
-    @staticmethod
-    def _ensure_supporting_plsql(cursor: oracledb.Cursor) -> None:  # type: ignore[valid-type]
-        if OracleEngine._supporting_objects_created:
-            return
-
-        for statement in (
-            T_REFERENCING_TABLES_TYPE,
-            CHECK_SAVE_STATUS_PROC,
-            CHECK_REFERENCING_TABLES_PROC,
-        ):
-            cursor.execute(statement)  # type: ignore[arg-type]
-
-        OracleEngine._supporting_objects_created = True
 
     @staticmethod
     def all_status_tend(conn: oracledb.Connection, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
@@ -827,4 +814,34 @@ end;"""
             if cursor:
                 cursor.close()
         return created
+
+    @staticmethod
+    def ensure_supporting_plsql(conn: oracledb.Connection, owner: str) -> None:
+        cursor: Optional[oracledb.Cursor] = None
+        previous_schema: Optional[str] = None
+        owner_name = OracleEngine._format_identifier(owner)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual")  # type: ignore[arg-type]
+            row = cursor.fetchone()
+            previous_schema = row[0] if row else None
+            cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {owner_name}")  # type: ignore[arg-type]
+            for statement in (
+                T_REFERENCING_TABLES_TYPE,
+                CHECK_SAVE_STATUS_PROC,
+                CHECK_REFERENCING_TABLES_PROC,
+            ):
+                cursor.execute(statement)  # type: ignore[arg-type]
+        except Exception:
+            logger.critical("Failed to ensure supporting PL/SQL objects.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                try:
+                    if previous_schema and previous_schema.upper() != owner_name:
+                        cursor.execute(
+                            f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(previous_schema)}"
+                        )  # type: ignore[arg-type]
+                finally:
+                    cursor.close()
 
