@@ -15,10 +15,172 @@ from terminusdb.db.tdb_engines import (
     UserDefinition,
 )
 from terminusdb.core.tdb_logger import get_logger
+
+CHECK_SAVE_STATUS_PROC = """
+CREATE OR REPLACE PROCEDURE check_save_status(
+    p_owner            IN VARCHAR2,
+    p_table_name       IN VARCHAR2,
+    p_process_date     IN DATE,
+    p_action           IN VARCHAR2,
+    p_status           IN VARCHAR2,
+    p_process_start    IN DATE,
+    p_chunk_start      IN DATE,
+    p_process_end      IN DATE,
+    p_message          IN VARCHAR2,
+    p_rows_processed   IN VARCHAR2,
+    p_plsql            IN VARCHAR2,
+    p_sqlcode       IN OUT NUMBER,
+    p_out_message   OUT VARCHAR2
+)
+IS
+    l_status         VARCHAR2(10);
+    l_process_start  DATE;
+    l_process_date   DATE;
+    l_rowid          ROWID;
+    in_use           EXCEPTION;
+    PRAGMA EXCEPTION_INIT(in_use, -54);
+BEGIN
+    IF NVL(p_sqlcode, 0) NOT IN (-20001, -20002, -20003) THEN
+        BEGIN
+            SELECT ctl_status, ctl_process_date, ctl_process_start, ROWID
+              INTO l_status, l_process_date, l_process_start, l_rowid
+              FROM tdb_ctl
+             WHERE ctl_owner = p_owner
+               AND ctl_table_name = p_table_name
+             FOR UPDATE NOWAIT;
+
+            IF p_status = 'TSTART'
+               AND l_status != 'TEND'
+               AND (SYSDATE - l_process_start) * 3600 * 24 < 5 THEN
+                p_sqlcode := -20002;
+                p_out_message := 'Table ' || p_table_name || ' is currently in process without lock';
+                RETURN;
+            ELSIF p_status = 'TSTART'
+                  AND l_status = 'TEND'
+                  AND l_process_date = p_process_date THEN
+                ROLLBACK;
+                p_sqlcode := -20003;
+                p_out_message := 'Table ' || p_table_name ||
+                                 ' is already processed for date ' ||
+                                 TO_CHAR(p_process_date, 'YYYYMMDD');
+                RETURN;
+            END IF;
+
+            UPDATE tdb_ctl
+               SET ctl_process_date   = p_process_date,
+                   ctl_action         = p_action,
+                   ctl_status         = p_status,
+                   ctl_process_start  = NVL(p_process_start, ctl_process_start),
+                   ctl_process_end    = p_process_end,
+                   ctl_rows_processed = DECODE(p_status, 'TSTART', 0, ctl_rows_processed) +
+                                         p_rows_processed,
+                   ctl_plsql          = NVL(p_plsql, ctl_plsql)
+             WHERE ROWID = l_rowid;
+        EXCEPTION
+            WHEN in_use THEN
+                p_sqlcode := -20001;
+                p_out_message := 'Table ' || p_table_name || ' is currently in process';
+                RETURN;
+            WHEN NO_DATA_FOUND THEN
+                INSERT INTO tdb_ctl (
+                    ctl_owner,
+                    ctl_table_name,
+                    ctl_process_date,
+                    ctl_action,
+                    ctl_status,
+                    ctl_process_start,
+                    ctl_process_end,
+                    ctl_rows_processed,
+                    ctl_plsql
+                )
+                VALUES (
+                    p_owner,
+                    p_table_name,
+                    p_process_date,
+                    p_action,
+                    p_status,
+                    l_process_start,
+                    NULL,
+                    0,
+                    p_plsql
+                );
+        END;
+    END IF;
+
+    INSERT INTO tdb_log (
+        log_id,
+        log_owner,
+        log_table_name,
+        log_process_date,
+        log_action,
+        log_status,
+        log_process_start,
+        log_process_end,
+        log_message,
+        log_rows_processed,
+        log_plsql
+    )
+    VALUES (
+        tdb_log_id.NEXTVAL,
+        p_owner,
+        p_table_name,
+        p_process_date,
+        p_action,
+        p_status,
+        NVL(p_chunk_start, p_process_start),
+        p_process_end,
+        p_message,
+        p_rows_processed,
+        p_plsql
+    );
+END check_save_status;
+"""
+
+T_REFERENCING_TABLES_TYPE = """
+CREATE OR REPLACE TYPE t_referencing_tables AS TABLE OF VARCHAR2(100);
+"""
+
+CHECK_REFERENCING_TABLES_PROC = """
+CREATE OR REPLACE PROCEDURE check_referencing_tables(
+    p_referencing_tables IN t_referencing_tables,
+    p_process_date       IN DATE
+)
+IS
+    l_ref_table      VARCHAR2(100);
+    l_ref_owner      VARCHAR2(100);
+    l_ref_table_name VARCHAR2(100);
+    l_dummy          NUMBER;
+BEGIN
+    FOR i IN 1 .. p_referencing_tables.COUNT LOOP
+        l_ref_table := p_referencing_tables(i);
+        l_ref_owner := SUBSTR(l_ref_table, 1, INSTR(l_ref_table, '.') - 1);
+        l_ref_table_name := SUBSTR(l_ref_table, INSTR(l_ref_table, '.') + 1);
+        BEGIN
+            SELECT 1
+              INTO l_dummy
+              FROM tdb_ctl
+             WHERE ctl_owner = l_ref_owner
+               AND ctl_table_name = l_ref_table_name
+               AND ctl_process_date = p_process_date
+               AND ctl_status = 'TEND';
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RAISE_APPLICATION_ERROR(
+                    -20004,
+                    'Referencing table ' || l_ref_table ||
+                    ' was not fully processed for date ' ||
+                    TO_CHAR(p_process_date, 'YYYYMMDD')
+                );
+        END;
+    END LOOP;
+END check_referencing_tables;
+"""
 logger = get_logger("oracle.engine")
 
 class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
+
+    _supporting_objects_created: bool = False
 
     @staticmethod
     def _format_identifier(name: str) -> str:
@@ -361,6 +523,7 @@ end;"""
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
+            OracleEngine._ensure_supporting_plsql(cursor)
             process_end = OracleEngine.get_system_date(conn)
             sqlcode = cursor.var(oracledb.NUMBER) # type: ignore
             out_message = cursor.var(oracledb.STRING) # type: ignore
@@ -382,11 +545,26 @@ end;"""
         cursor: Optional[oracledb.Cursor] = None
         try:
             cursor = conn.cursor()
+            OracleEngine._ensure_supporting_plsql(cursor)
             cursor.setinputsizes(plsql_code=oracledb.CLOB)  # type: ignore
             cursor.execute(plsql_code, {"plsql_code": plsql_code})  # type: ignore
         finally:
             if cursor:
                 cursor.close()
+
+    @staticmethod
+    def _ensure_supporting_plsql(cursor: oracledb.Cursor) -> None:  # type: ignore[valid-type]
+        if OracleEngine._supporting_objects_created:
+            return
+
+        for statement in (
+            T_REFERENCING_TABLES_TYPE,
+            CHECK_SAVE_STATUS_PROC,
+            CHECK_REFERENCING_TABLES_PROC,
+        ):
+            cursor.execute(statement)  # type: ignore[arg-type]
+
+        OracleEngine._supporting_objects_created = True
 
     @staticmethod
     def all_status_tend(conn: oracledb.Connection, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
