@@ -27,9 +27,9 @@ dev = [
 ]
 
 [project.scripts]
-tdb-run = "terminusdb.cli.tdb_main:run_cli"
-tdb-init = "terminusdb.cli.tdb_main:main_init"
-tdb-crypt = "terminusdb.cli.tdb_main:main_crypt"
+tdb-run = "terminusdb.cli.td_run:run_cli"
+tdb-init = "terminusdb.cli.tdb_init:run_cli"
+tdb-crypt = "terminusdb.cli.tdb_crypt:run_cli"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
