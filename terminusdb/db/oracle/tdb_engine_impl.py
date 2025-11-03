@@ -1,15 +1,140 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import oracledb
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_status import Status
 from terminusdb.core.tdb_utils import get_effective_credentials, indent_lines, join_wrapped, nvl
-from terminusdb.db.tdb_engines import DatabaseEngine
+from terminusdb.db.tdb_engines import (
+    ColumnDefinition,
+    DatabaseEngine,
+    DatabaseLinkDefinition,
+    IndexDefinition,
+    RoleDefinition,
+    SequenceDefinition,
+    TableDefinition,
+    UserDefinition,
+)
 from terminusdb.core.tdb_logger import get_logger
 logger = get_logger("oracle.engine")
 
 class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
+
+    @staticmethod
+    def _format_identifier(name: str) -> str:
+        if not name:
+            raise ValueError("Identifier cannot be empty")
+        return name.strip().upper()
+
+    @staticmethod
+    def _quote_password(password: str) -> str:
+        escaped = password.replace('"', '""')
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _quote_literal(value: str) -> str:
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+
+    @staticmethod
+    def _column_type_sql(column: ColumnDefinition) -> str:
+        dtype = column.data_type.lower()
+        if dtype in ("string", "varchar", "varchar2"):
+            length = column.length or 255
+            return f"VARCHAR2({length})"
+        if dtype == "char":
+            length = column.length or 1
+            return f"CHAR({length})"
+        if dtype in ("number", "numeric", "decimal"):
+            if column.precision is not None and column.scale is not None:
+                return f"NUMBER({column.precision},{column.scale})"
+            if column.precision is not None:
+                return f"NUMBER({column.precision})"
+            return "NUMBER"
+        if dtype in ("integer", "int"):
+            return "NUMBER(10)"
+        if dtype == "date":
+            return "DATE"
+        if dtype == "clob":
+            return "CLOB"
+        raise ValueError(f"Unsupported column data type: {column.data_type}")
+
+    @staticmethod
+    def _column_sql(column: ColumnDefinition) -> str:
+        col_name = OracleEngine._format_identifier(column.name)
+        col_type = OracleEngine._column_type_sql(column)
+        default_clause = f" DEFAULT {column.default}" if column.default is not None else ""
+        nullable_clause = "" if column.nullable else " NOT NULL"
+        return f"{col_name} {col_type}{default_clause}{nullable_clause}"
+
+    @staticmethod
+    def _object_exists(cursor: oracledb.Cursor, query: str, params: Sequence[Any]) -> bool:  # type: ignore[valid-type]
+        cursor.execute(query, params)  # type: ignore[arg-type]
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _user_has_role(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2",
+            [username, role],
+        )
+
+    @staticmethod
+    def _user_has_sys_priv(cursor: oracledb.Cursor, username: str, privilege: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_sys_privs WHERE grantee = :1 AND privilege = :2",
+            [username, privilege],
+        )
+
+    @staticmethod
+    def _role_exists(cursor: oracledb.Cursor, role: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_roles WHERE role = :1", [role])
+
+    @staticmethod
+    def _user_exists(cursor: oracledb.Cursor, username: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_users WHERE username = :1", [username])
+
+    @staticmethod
+    def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_tables WHERE owner = :1 AND table_name = :2",
+            [owner, table_name],
+        )
+
+    @staticmethod
+    def _index_exists(cursor: oracledb.Cursor, owner: str, index_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_indexes WHERE owner = :1 AND index_name = :2",
+            [owner, index_name],
+        )
+
+    @staticmethod
+    def _constraint_exists(cursor: oracledb.Cursor, owner: str, constraint_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_constraints WHERE owner = :1 AND constraint_name = :2",
+            [owner, constraint_name],
+        )
+
+    @staticmethod
+    def _sequence_exists(cursor: oracledb.Cursor, owner: str, sequence_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = :2",
+            [owner, sequence_name],
+        )
+
+    @staticmethod
+    def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM user_db_links WHERE db_link = :1",
+            [name],
+        )
 
     @staticmethod
     def get_connection(config: Config, *, admin: bool=False) -> oracledb.Connection:
@@ -331,4 +456,197 @@ end;"""
                 conn.close()
         except Exception:
             logger.critical("Failed to close Oracle DB connection.", exc_info=True)
+
+    @staticmethod
+    def ensure_roles(conn: oracledb.Connection, roles: Sequence[RoleDefinition]) -> List[str]:
+        created: List[str] = []
+        if not roles:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for role in roles:
+                role_name = OracleEngine._format_identifier(role.name)
+                if OracleEngine._role_exists(cursor, role_name):
+                    continue
+                cursor.execute(f"CREATE ROLE {role_name}")  # type: ignore[arg-type]
+                created.append(role_name)
+                changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure roles.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_users(conn: oracledb.Connection, users: Sequence[UserDefinition]) -> List[str]:
+        created: List[str] = []
+        if not users:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for user in users:
+                username = OracleEngine._format_identifier(user.name)
+                if not OracleEngine._user_exists(cursor, username):
+                    sql = f"CREATE USER {username} IDENTIFIED BY {OracleEngine._quote_password(user.password)}"
+                    if user.default_tablespace:
+                        sql += f" DEFAULT TABLESPACE {OracleEngine._format_identifier(user.default_tablespace)}"
+                    if user.temporary_tablespace:
+                        sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
+                    cursor.execute(sql)  # type: ignore[arg-type]
+                    created.append(username)
+                    changed = True
+                for role in user.roles:
+                    role_name = OracleEngine._format_identifier(role)
+                    if not OracleEngine._user_has_role(cursor, username, role_name):
+                        cursor.execute(f"GRANT {role_name} TO {username}")  # type: ignore[arg-type]
+                        changed = True
+                for privilege in user.system_privileges:
+                    privilege_name = privilege.upper()
+                    if not OracleEngine._user_has_sys_priv(cursor, username, privilege_name):
+                        cursor.execute(f"GRANT {privilege_name} TO {username}")  # type: ignore[arg-type]
+                        changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure users.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_tables(conn: oracledb.Connection, tables: Sequence[TableDefinition]) -> List[str]:
+        created: List[str] = []
+        if not tables:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for table in tables:
+                owner = OracleEngine._format_identifier(table.owner)
+                table_name = OracleEngine._format_identifier(table.name)
+                if not OracleEngine._table_exists(cursor, owner, table_name):
+                    columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+                    cursor.execute(
+                        f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
+                    )  # type: ignore[arg-type]
+                    created.append(f"{owner}.{table_name}")
+                    changed = True
+                if table.primary_key:
+                    pk_name = OracleEngine._format_identifier(f"{table.name}_pk")
+                    if not OracleEngine._constraint_exists(cursor, owner, pk_name):
+                        cols = ", ".join(OracleEngine._format_identifier(col) for col in table.primary_key)
+                        cursor.execute(
+                            f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({cols})"
+                        )  # type: ignore[arg-type]
+                        changed = True
+                for index in table.indexes:
+                    idx_name = OracleEngine._format_identifier(index.name)
+                    if OracleEngine._index_exists(cursor, owner, idx_name):
+                        continue
+                    cols = ", ".join(OracleEngine._format_identifier(col) for col in index.columns)
+                    unique_kw = "UNIQUE " if index.unique else ""
+                    cursor.execute(
+                        f"CREATE {unique_kw}INDEX {owner}.{idx_name} ON {owner}.{table_name} ({cols})"
+                    )  # type: ignore[arg-type]
+                    changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure tables.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_sequences(conn: oracledb.Connection, sequences: Sequence[SequenceDefinition]) -> List[str]:
+        created: List[str] = []
+        if not sequences:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for sequence in sequences:
+                owner = OracleEngine._format_identifier(sequence.owner)
+                sequence_name = OracleEngine._format_identifier(sequence.name)
+                if OracleEngine._sequence_exists(cursor, owner, sequence_name):
+                    continue
+                sql = (
+                    f"CREATE SEQUENCE {owner}.{sequence_name} "
+                    f"START WITH {sequence.start_with} INCREMENT BY {sequence.increment_by}"
+                )
+                if sequence.minvalue is not None:
+                    sql += f" MINVALUE {sequence.minvalue}"
+                else:
+                    sql += " NOMINVALUE"
+                if sequence.maxvalue is not None:
+                    sql += f" MAXVALUE {sequence.maxvalue}"
+                else:
+                    sql += " NOMAXVALUE"
+                sql += " CYCLE" if sequence.cycle else " NOCYCLE"
+                if sequence.cache is not None:
+                    sql += f" CACHE {sequence.cache}"
+                else:
+                    sql += " NOCACHE"
+                cursor.execute(sql)  # type: ignore[arg-type]
+                created.append(f"{owner}.{sequence_name}")
+                changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure sequences.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_database_links(conn: oracledb.Connection, links: Sequence[DatabaseLinkDefinition]) -> List[str]:
+        created: List[str] = []
+        if not links:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for link in links:
+                link_name = OracleEngine._format_identifier(link.name)
+                if OracleEngine._db_link_exists(cursor, link_name):
+                    continue
+                username = OracleEngine._format_identifier(link.username)
+                password = OracleEngine._quote_password(link.password)
+                dsn_literal = OracleEngine._quote_literal(link.dsn)
+                cursor.execute(
+                    f"CREATE DATABASE LINK {link_name} CONNECT TO {username} IDENTIFIED BY {password} USING {dsn_literal}"
+                )  # type: ignore[arg-type]
+                created.append(link_name)
+                changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure database links.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
 

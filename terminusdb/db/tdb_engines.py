@@ -1,7 +1,86 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from terminusdb.core.tdb_params_config import Config
-from typing import Any, List, Dict, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from datetime import datetime
+
+
+@dataclass(frozen=True)
+class ColumnDefinition:
+    """Generic column definition independent from a specific engine."""
+
+    name: str
+    data_type: str
+    length: Optional[int] = None
+    precision: Optional[int] = None
+    scale: Optional[int] = None
+    nullable: bool = True
+    default: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class IndexDefinition:
+    """Generic index definition."""
+
+    name: str
+    columns: Tuple[str, ...]
+    unique: bool = False
+
+
+@dataclass(frozen=True)
+class TableDefinition:
+    """Generic table definition."""
+
+    owner: str
+    name: str
+    columns: Tuple[ColumnDefinition, ...]
+    primary_key: Optional[Tuple[str, ...]] = None
+    indexes: Tuple[IndexDefinition, ...] = ()
+
+
+@dataclass(frozen=True)
+class SequenceDefinition:
+    """Generic sequence definition."""
+
+    owner: str
+    name: str
+    start_with: int = 1
+    increment_by: int = 1
+    minvalue: Optional[int] = None
+    maxvalue: Optional[int] = None
+    cycle: bool = False
+    cache: Optional[int] = 20
+
+
+@dataclass(frozen=True)
+class RoleDefinition:
+    """Generic role definition."""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class UserDefinition:
+    """Generic user definition."""
+
+    name: str
+    password: str
+    default_tablespace: Optional[str] = None
+    temporary_tablespace: Optional[str] = None
+    roles: Tuple[str, ...] = ()
+    system_privileges: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DatabaseLinkDefinition:
+    """Generic database link definition."""
+
+    name: str
+    username: str
+    password: str
+    dsn: str
 
 class DatabaseEngine(ABC):
     """Static interface for database engine operations."""
@@ -141,5 +220,39 @@ class DatabaseEngine(ABC):
         """Closes the Oracle connection.
         Args:
             conn: Active Oracle connection."""
+        pass
+
+    # ------------------------------------------------------------------
+    # Schema / security bootstrap helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    @abstractmethod
+    def ensure_roles(conn: Any, roles: Sequence[RoleDefinition]) -> List[str]:
+        """Ensure that the provided roles exist, returning newly created ones."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_users(conn: Any, users: Sequence[UserDefinition]) -> List[str]:
+        """Ensure that the provided users exist, returning newly created ones."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_tables(conn: Any, tables: Sequence[TableDefinition]) -> List[str]:
+        """Ensure that the provided tables exist, returning newly created ones."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_sequences(conn: Any, sequences: Sequence[SequenceDefinition]) -> List[str]:
+        """Ensure that the provided sequences exist, returning newly created ones."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_database_links(conn: Any, links: Sequence[DatabaseLinkDefinition]) -> List[str]:
+        """Ensure that the provided database links exist, returning newly created ones."""
         pass
 
