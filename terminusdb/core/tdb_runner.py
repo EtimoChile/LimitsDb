@@ -2,13 +2,21 @@ from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from terminusdb.core.tdb_params_config import Config
-from terminusdb.core.tdb_logger import get_logger
+from terminusdb.core.tdb_logger import get_logger, configure_logger, reconfigure_logger
 from terminusdb.core.tdb_utils import get_effective_credentials, max_ignore_none, nvl
 from terminusdb.core.tdb_ilm_config import load_rows_from_yaml
 from terminusdb.db.tdb_engine_loader import get_db_engine
 from terminusdb.db.tdb_engines import DatabaseEngine
 from terminusdb.core.tdb_status import Status
 logger = get_logger("runner")
+
+
+def _initialize_worker_logger(log_level: str) -> None:
+    """Ensure background processes emit logs using the configured level."""
+    # ``ProcessPoolExecutor`` uses ``spawn`` on Windows, which re-imports the entry module and
+    # resets the logger configuration. Re-apply the desired level so worker logs reach stdout.
+    configure_logger(level=log_level)
+    reconfigure_logger(level=log_level)
 
 def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> Tuple[str, str, str, int, int, Optional[int], Optional[str]]:
     conn: Any
@@ -99,7 +107,11 @@ def get_next_ready_table(tables_config: Dict[Tuple[str, str], Dict[str, Any]], a
 def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, Any]], process_date: str, engine: DatabaseEngine, connection: Any) -> int:
     processes: List[Future[Tuple[str, str, str, int, int, Optional[int], Optional[str]]]] = []
     active_tables: set[Tuple[str, str]] = set()
-    with ProcessPoolExecutor(max_workers=config.parallel_max) as executor:
+    with ProcessPoolExecutor(
+        max_workers=config.parallel_max,
+        initializer=_initialize_worker_logger,
+        initargs=(config.log_level,),
+    ) as executor:
         process_launched = False
         while True:
             # While there is space in the pool, try to launch new processes
