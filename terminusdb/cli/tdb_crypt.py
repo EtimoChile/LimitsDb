@@ -25,18 +25,22 @@ def run_cli() -> None:
     """Entry point for the ``tdb-crypt`` command."""
 
     logger = get_logger("crypt")
-    args = _parse_args()
+    try:
+        args = _parse_args()
 
-    load_or_create_key()
-    updated = encrypt_secrets_in_place(
-        schema=args.schema,
-        profile=getattr(args, "profile", None),
-        config_root=getattr(args, "config_dir", None),
-    )
-    if updated:
-        logger.info("Secrets updated: %s", updated)
-    else:
-        logger.info("No secrets to update (file missing or already encrypted).")
+        load_or_create_key()
+        updated = encrypt_secrets_in_place(
+            schema=args.schema,
+            profile=getattr(args, "profile", None),
+            config_root=getattr(args, "config_dir", None),
+        )
+        if updated:
+            logger.info("Secrets updated: %s", updated)
+        else:
+            logger.info("No secrets to update (file missing or already encrypted).")
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":  # pragma: no cover

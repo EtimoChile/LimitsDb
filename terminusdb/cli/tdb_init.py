@@ -33,26 +33,30 @@ def run_cli() -> None:
     """Entry point for the ``tdb-init`` command."""
 
     logger = get_logger("init")
-    args = _parse_args()
-    reconfigure_logger(level=args.log_level)
+    try:
+        args = _parse_args()
+        reconfigure_logger(level=args.log_level)
 
-    # Ensure key exists (idempotent); secrets will be auto-encrypted if present.
-    load_or_create_key()
+        # Ensure key exists (idempotent); secrets will be auto-encrypted if present.
+        load_or_create_key()
 
-    logger.info("Creating configuration files with defaults and help")
-    cfg_path, ilm_path, secrets_path, ilm_examples_path = init_schema(
-        schema=args.schema,
-        profile=getattr(args, "profile", None),
-        config_root=getattr(args, "config_dir", None),
-        overwrite=bool(args.overwrite),
-        with_examples=not bool(args.no_examples),
-        auto_encrypt=True,
-    )
-    logger.info("Initialized: %s", cfg_path)
-    logger.info("Initialized: %s", ilm_path)
-    logger.info("Initialized: %s", secrets_path)
-    if ilm_examples_path:
-        logger.info("Initialized: %s", ilm_examples_path)
+        logger.info("Creating configuration files with defaults and help")
+        cfg_path, ilm_path, secrets_path, ilm_examples_path = init_schema(
+            schema=args.schema,
+            profile=getattr(args, "profile", None),
+            config_root=getattr(args, "config_dir", None),
+            overwrite=bool(args.overwrite),
+            with_examples=not bool(args.no_examples),
+            auto_encrypt=True,
+        )
+        logger.info("Initialized: %s", cfg_path)
+        logger.info("Initialized: %s", ilm_path)
+        logger.info("Initialized: %s", secrets_path)
+        if ilm_examples_path:
+            logger.info("Initialized: %s", ilm_examples_path)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":  # pragma: no cover

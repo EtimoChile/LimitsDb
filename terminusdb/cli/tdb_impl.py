@@ -118,38 +118,42 @@ def _build_sequences(owner: str) -> List[SequenceDefinition]:
 
 def run_cli() -> None:
     logger = get_logger("impl")
-    args = _parse_args()
-    reconfigure_logger(level=args.log_level)
-
-    load_or_create_key()
     try:
-        encrypt_secrets_in_place(
-            schema=args.schema,
-            profile=getattr(args, "profile", None),
-            config_root=getattr(args, "config_dir", None),
-        )
-    except Exception:  # pragma: no cover - log and continue
-        logger.warning(
-            "Auto-encrypt failed; continuing. Loader will enforce encrypted secrets.",
-            exc_info=True,
-        )
-    cfg_dict = build_config({}, args)
-    config = Config.from_dict(cfg_dict)
+        args = _parse_args()
+        reconfigure_logger(level=args.log_level)
 
-    if not config.admin_source_username or not config.admin_source_password:
-        raise ValueError("admin_source_username and admin_source_password are required")
-    if not config.admin_history_username or not config.admin_history_password:
-        raise ValueError("admin_history_username and admin_history_password are required")
-    if not config.source_username or not config.source_password:
-        raise ValueError("source_username and source_password are required")
-    if not config.history_username or not config.history_password:
-        raise ValueError("history_username and history_password are required")
-    if not config.history_dsn:
-        raise ValueError("history_dsn is required to create the database link")
-    if not config.source_dsn:
-        raise ValueError("source_dsn is required to create the database link")
+        load_or_create_key()
+        try:
+            encrypt_secrets_in_place(
+                schema=args.schema,
+                profile=getattr(args, "profile", None),
+                config_root=getattr(args, "config_dir", None),
+            )
+        except Exception:  # pragma: no cover - log and continue
+            logger.warning(
+                "Auto-encrypt failed; continuing. Loader will enforce encrypted secrets.",
+                exc_info=True,
+            )
+        cfg_dict = build_config({}, args)
+        config = Config.from_dict(cfg_dict)
 
-    engine = get_db_engine(config.db_engine)
+        if not config.admin_source_username or not config.admin_source_password:
+            raise ValueError("admin_source_username and admin_source_password are required")
+        if not config.admin_history_username or not config.admin_history_password:
+            raise ValueError("admin_history_username and admin_history_password are required")
+        if not config.source_username or not config.source_password:
+            raise ValueError("source_username and source_password are required")
+        if not config.history_username or not config.history_password:
+            raise ValueError("history_username and history_password are required")
+        if not config.history_dsn:
+            raise ValueError("history_dsn is required to create the database link")
+        if not config.source_dsn:
+            raise ValueError("source_dsn is required to create the database link")
+
+        engine = get_db_engine(config.db_engine)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        raise SystemExit(1)
 
     source_roles = [RoleDefinition(name=config.source_role_name)]
     source_privileges = getattr(engine, "REQUIRED_SYSTEM_PRIVILEGES", ())
