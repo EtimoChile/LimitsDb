@@ -436,7 +436,6 @@ class OracleEngine(DatabaseEngine):
         hint_expr, has_lob_columns = cnd0["cnf_hint_expr"], cnd0["cnf_has_lob_columns"] == 'Y'
         other_cols_exprs, other_cols_alias, referencing_tables = table_cnf["other_cols_exprs"], table_cnf["other_cols_alias"], table_cnf["referencing_tables"]
         query_expr, table_columns, months_keep_history_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_history_max"]
-        logger.debug(f"Generating PL/SQL block for table {source_owner}.{table_name} with process date {process_date}")
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
         source_ilm = config.action == "SOURCE_ILM"
         if config.add_tdb_columns:
