@@ -262,6 +262,52 @@ class OracleEngine(DatabaseEngine):
         return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_users WHERE username = :1", [username])
 
     @staticmethod
+    def _get_database_default_tablespace(cursor: oracledb.Cursor) -> Optional[str]:  # type: ignore[valid-type]
+        cursor.execute(
+            "SELECT property_value FROM database_properties WHERE property_name = 'DEFAULT_PERMANENT_TABLESPACE'"
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return OracleEngine._format_identifier(str(row[0]))
+        return None
+
+    @staticmethod
+    def _get_user_default_tablespace(cursor: oracledb.Cursor, username: str) -> Optional[str]:  # type: ignore[valid-type]
+        cursor.execute(
+            "SELECT default_tablespace FROM dba_users WHERE username = :username",
+            username=username,
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return OracleEngine._format_identifier(str(row[0]))
+        return None
+
+    @staticmethod
+    def _ensure_unlimited_quota(
+        cursor: oracledb.Cursor, username: str, tablespace: Optional[str]
+    ) -> bool:  # type: ignore[valid-type]
+        if not tablespace:
+            return False
+        tablespace_name = OracleEngine._format_identifier(tablespace)
+        cursor.execute(
+            """
+            SELECT max_bytes
+              FROM dba_ts_quotas
+             WHERE username = :username
+               AND tablespace_name = :tablespace
+            """,
+            username=username,
+            tablespace=tablespace_name,
+        )
+        row = cursor.fetchone()
+        if row and row[0] == -1:
+            return False
+        cursor.execute(
+            f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}"
+        )  # type: ignore[arg-type]
+        return True
+
+    @staticmethod
     def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:  # type: ignore[valid-type]
         return OracleEngine._object_exists(
             cursor,
@@ -658,17 +704,35 @@ end;"""
         changed = False
         try:
             cursor = conn.cursor()
+            database_default_tablespace = OracleEngine._get_database_default_tablespace(cursor)
             for user in users:
                 username = OracleEngine._format_identifier(user.name)
+                default_tablespace = (
+                    OracleEngine._format_identifier(user.default_tablespace)
+                    if user.default_tablespace
+                    else None
+                )
+                tablespace_for_quota: Optional[str] = default_tablespace
                 if not OracleEngine._user_exists(cursor, username):
                     sql = f"CREATE USER {username} IDENTIFIED BY {OracleEngine._quote_password(user.password)}"
-                    if user.default_tablespace:
-                        sql += f" DEFAULT TABLESPACE {OracleEngine._format_identifier(user.default_tablespace)}"
+                    if default_tablespace:
+                        sql += f" DEFAULT TABLESPACE {default_tablespace}"
                     if user.temporary_tablespace:
                         sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
                     cursor.execute(sql)  # type: ignore[arg-type]
                     created.append(username)
                     changed = True
+                    if not tablespace_for_quota:
+                        tablespace_for_quota = (
+                            OracleEngine._get_user_default_tablespace(cursor, username)
+                            or database_default_tablespace
+                        )
+                else:
+                    if not tablespace_for_quota:
+                        tablespace_for_quota = (
+                            OracleEngine._get_user_default_tablespace(cursor, username)
+                            or database_default_tablespace
+                        )
                 for role in user.roles:
                     role_name = OracleEngine._format_identifier(role)
                     if not OracleEngine._user_has_role(cursor, username, role_name):
@@ -679,6 +743,8 @@ end;"""
                     if not OracleEngine._user_has_sys_priv(cursor, username, privilege_name):
                         cursor.execute(f"GRANT {privilege_name} TO {username}")  # type: ignore[arg-type]
                         changed = True
+                if OracleEngine._ensure_unlimited_quota(cursor, username, tablespace_for_quota):
+                    changed = True
             if changed:
                 conn.commit()
         except Exception:

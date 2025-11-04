@@ -156,6 +156,7 @@ def run_cli() -> None:
     source_user = UserDefinition(
         name=source_config.source_username,
         password=source_config.source_password,
+        default_tablespace=source_config.source_default_tablespace or None,
         roles=(SOURCE_ROLE,),
         system_privileges=source_privileges,
     )
@@ -163,6 +164,7 @@ def run_cli() -> None:
     history_user = UserDefinition(
         name=history_config.history_username,
         password=history_config.history_password,
+        default_tablespace=history_config.history_default_tablespace or None,
         roles=(HISTORY_ROLE,),
         system_privileges=history_privileges,
     )

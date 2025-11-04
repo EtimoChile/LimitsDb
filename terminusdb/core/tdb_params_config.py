@@ -43,6 +43,8 @@ class Config:
     admin_source_password: Annotated[Optional[str], Help("Admin Source password"), Secret()] = ""
     admin_history_username: Annotated[Optional[str], Cli("--admin-history-username"), Env("TDB_ADMIN_HISTORY_USERNAME"), Help("Admin History username")] = ""
     admin_history_password: Annotated[Optional[str], Help("Admin History password"), Secret()] = ""
+    source_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the source user"), Env("TDB_SOURCE_DEFAULT_TABLESPACE")] = None
+    history_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the history user"), Env("TDB_HISTORY_DEFAULT_TABLESPACE")] = None
 
     def __post_init__(self) -> None:
         if not self.schema:
