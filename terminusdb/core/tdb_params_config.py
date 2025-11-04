@@ -20,11 +20,11 @@ class Config:
     action: Annotated[Literal["SOURCE_ILM", "HISTORY_ILM"], Help("ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)"), Cli("--action"), Env("TDB_ACTION")] = "SOURCE_ILM"
     mode: Annotated[Literal["ALL", "QUERY_ONLY"], Help("Run everything (ALL) or only generate queries (QUERY_ONLY)"), Cli("--mode"), Env("TDB_MODE")] = "ALL"
     chunk_size: Annotated[int, Help("Rows per chunk when processing large tables"), Cli("--chunk-size"), Env("TDB_CHUNK_SIZE")] = 100000
-    use_added_columns: Annotated[bool, Help("Populate derived columns in history tables"), Cli("--use-added-columns"), Env("TDB_USE_ADDED_COLS")] = True
-    add_tdb_columns: Annotated[bool, Help("Add TerminusDB execution-date columns in history tables"), Cli("--add-tdb-columns"), Env("TDB_ADD_TDB_COLUMNS")] = True
+    use_added_columns: Annotated[bool, Help("Populate derived columns in history tables")] = True
+    add_tdb_columns: Annotated[bool, Help("Add TerminusDB execution-date columns in history tables")] = True
     generate_script: Annotated[bool, Help("Dry-run: generate SQL script without executing"), Cli("--generate-script"), Env("TDB_GENERATE_SCRIPT")] = False
     parallel_max: Annotated[int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("TDB_PARALLEL_MAX")] = 10
-    db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine"), Cli("--db-engine"), Env("TDB_DB_ENGINE")] = "oracle"
+    db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine")] = "oracle"
     log_level: Annotated[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], Help("Logging level"), Cli("--log-level"), Env("TDB_LOG_LEVEL")] = "INFO"
 
     # schema/profile + optional tables override file
@@ -33,22 +33,22 @@ class Config:
     ilm_config_file: Annotated[Optional[str], Help("YAML file with tables (bypass DB discovery)"), Cli("--ilm-config-file"), Env("ILM_CONFIG_FILE"), CliOnly()] = None
 
     # Database connection parameters
-    source_dsn: Annotated[Optional[str], Cli("--source-dsn"), Env("TDB_SOURCE_DSN"), Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
-    source_username: Annotated[Optional[str], Cli("--source-username"), Env("TDB_SOURCE_USERNAME") , Help("Username")] = ""
+    source_dsn: Annotated[Optional[str], Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
+    source_username: Annotated[Optional[str], Help("Username")] = ""
     source_password: Annotated[Optional[str], Help("Password"), Secret()] = ""
-    history_dsn: Annotated[Optional[str], Cli("--history-dsn"), Env("TDB_HISTORY_DSN"), Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
-    history_username: Annotated[Optional[str], Cli("--history-username"), Env("TDB_HISTORY_USERNAME"), Help("Username")] = ""
+    history_dsn: Annotated[Optional[str], Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
+    history_username: Annotated[Optional[str], Help("Username")] = ""
     history_password: Annotated[Optional[str], Help("Password"), Secret()] = ""
-    admin_source_username: Annotated[Optional[str], Cli("--admin-source-username"), Env("TDB_ADMIN_SOURCE_USERNAME"), Help("Admin username")] = ""
+    admin_source_username: Annotated[Optional[str], Help("Admin username")] = ""
     admin_source_password: Annotated[Optional[str], Help("Admin Source password"), Secret()] = ""
-    admin_history_username: Annotated[Optional[str], Cli("--admin-history-username"), Env("TDB_ADMIN_HISTORY_USERNAME"), Help("Admin History username")] = ""
+    admin_history_username: Annotated[Optional[str], Help("Admin History username")] = ""
     admin_history_password: Annotated[Optional[str], Help("Admin History password"), Secret()] = ""
-    source_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the source user"), Env("TDB_SOURCE_DEFAULT_TABLESPACE")] = None
-    history_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the history user"), Env("TDB_HISTORY_DEFAULT_TABLESPACE")] = None
-    history_dblink_name: Annotated[str, Help("Database link name in source environment that connects to history"), Env("TDB_HISTORY_DBLINK_NAME")] = "HIST"
-    source_dblink_name: Annotated[str, Help("Database link name in history environment that connects to source"), Env("TDB_SOURCE_DBLINK_NAME")] = "SRC"
-    source_role_name: Annotated[str, Help("Role name to create in the source environment"), Env("TDB_SOURCE_ROLE_NAME")] = "TDB_SOURCE_ROLE"
-    history_role_name: Annotated[str, Help("Role name to create in the history environment"), Env("TDB_HISTORY_ROLE_NAME")] = "TDB_HISTORY_ROLE"
+    source_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the source user")] = None
+    history_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the history user")] = None
+    history_dblink_name: Annotated[str, Help("Database link name in source environment that connects to history")] = "HIST"
+    source_dblink_name: Annotated[str, Help("Database link name in history environment that connects to source")] = "SRC"
+    source_role_name: Annotated[str, Help("Role name to create in the source environment")] = "TDB_SOURCE_ROLE"
+    history_role_name: Annotated[str, Help("Role name to create in the history environment")] = "TDB_HISTORY_ROLE"
 
     def __post_init__(self) -> None:
         if not self.schema:

@@ -1,6 +1,6 @@
 [project]
 name = "terminusdb"
-version = "0.4.0"
+version = "0.5.0"
 description = "Do configuration-based ILM to a production and history DB"
 authors = [{ name = "Gustavo Cantizano", email = "gustavo.cantizano@etimo.cl" }]
 readme = "README.md"
