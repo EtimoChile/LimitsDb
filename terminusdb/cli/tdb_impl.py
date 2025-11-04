@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from terminusdb.core.tdb_logger import configure_logger, get_logger, reconfigure_logger
 from terminusdb.core.tdb_crypto import load_or_create_key
@@ -17,6 +17,7 @@ from terminusdb.db.tdb_engines import (
     TableDefinition,
     UserDefinition,
 )
+from terminusdb.core.tdb_utils import encrypt_secrets_in_place
 
 
 configure_logger(level="WARNING")
@@ -131,6 +132,17 @@ def run_cli() -> None:
     reconfigure_logger(level=args.log_level)
 
     load_or_create_key()
+    try:
+        encrypt_secrets_in_place(
+            schema=args.schema,
+            profile=getattr(args, "profile", None),
+            config_root=getattr(args, "config_dir", None),
+        )
+    except Exception:  # pragma: no cover - log and continue
+        logger.warning(
+            "Auto-encrypt failed; continuing. Loader will enforce encrypted secrets.",
+            exc_info=True,
+        )
     cfg_dict = build_config({}, args)
 
     source_config = _make_config(cfg_dict, "SOURCE_ILM")
