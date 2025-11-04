@@ -195,15 +195,7 @@ def run_cli() -> None:
 
     summary: Dict[str, List[str]] = {}
 
-    def _get_connection(action: Literal["SOURCE_ILM", "HISTORY_ILM"], *, admin: bool) -> Any:
-        previous_action = config.action
-        config.action = action
-        try:
-            return engine.get_connection(config, admin=admin)
-        finally:
-            config.action = previous_action
-
-    source_admin_conn = _get_connection("SOURCE_ILM", admin=True)
+    source_admin_conn = engine.get_connection(config, admin=True, env="SOURCE")
     try:
         summary["source_roles"] = engine.ensure_roles(source_admin_conn, source_roles)
         summary["source_users"] = engine.ensure_users(source_admin_conn, [source_user])
@@ -213,7 +205,7 @@ def run_cli() -> None:
     finally:
         engine.close_connection(source_admin_conn)
 
-    history_admin_conn = _get_connection("HISTORY_ILM", admin=True)
+    history_admin_conn = engine.get_connection(config, admin=True, env="HISTORY")
     try:
         summary["history_roles"] = engine.ensure_roles(history_admin_conn, history_roles)
         summary["history_users"] = engine.ensure_users(history_admin_conn, [history_user])
@@ -223,13 +215,13 @@ def run_cli() -> None:
     finally:
         engine.close_connection(history_admin_conn)
 
-    source_user_conn = _get_connection("SOURCE_ILM", admin=False)
+    source_user_conn = engine.get_connection(config, admin=False, env="SOURCE")
     try:
         summary["source_database_links"] = engine.ensure_database_links(source_user_conn, [source_db_link])
     finally:
         engine.close_connection(source_user_conn)
 
-    history_user_conn = _get_connection("HISTORY_ILM", admin=False)
+    history_user_conn = engine.get_connection(config, admin=False, env="HISTORY")
     try:
         summary["history_database_links"] = engine.ensure_database_links(history_user_conn, [history_db_link])
     finally:

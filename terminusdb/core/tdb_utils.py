@@ -75,14 +75,14 @@ def join_wrapped(connector: str, items: Iterable[str], max_line_length: int) -> 
         lines.append(current_line)
     return "\n".join(lines)
     
-def get_effective_credentials(cfg: Config, *, admin: bool = False):
+def get_effective_credentials(cfg: Config, *, admin: bool = False, env: Optional[Literal["SOURCE", "HISTORY"]] = None):
     """Return (username, password, dsn) tuple according to action and admin flag."""
-    is_source = cfg.action == "SOURCE_ILM"
-    env = "source" if is_source else "history"
+    is_source = cfg.action == "SOURCE_ILM" if env is None else (env == "SOURCE")
+    env_part = "source" if is_source else "history"
     role = "admin_" if admin else ""
-    user_key = f"{role}{env}_username"
-    pwd_key = f"{role}{env}_password"
-    dsn_key = f"{env}_dsn"
+    user_key = f"{role}{env_part}_username"
+    pwd_key = f"{role}{env_part}_password"
+    dsn_key = f"{env_part}_dsn"
     user = getattr(cfg, user_key, None)
     pwd = getattr(cfg, pwd_key, None)
     dsn = getattr(cfg, dsn_key, None)

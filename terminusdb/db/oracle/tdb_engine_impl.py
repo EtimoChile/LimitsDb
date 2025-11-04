@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Literal
 import oracledb
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_status import Status
@@ -348,7 +348,7 @@ class OracleEngine(DatabaseEngine):
         )
 
     @staticmethod
-    def get_connection(config: Config, *, admin: bool = False) -> oracledb.Connection:
+    def get_connection(config: Config, *, admin: bool = False, env: Optional[Literal["SOURCE", "HISTORY"]] = None) -> oracledb.Connection:
         """Returns an Oracle connection using provided config.
         Args:
             config: Database config object.
@@ -356,7 +356,7 @@ class OracleEngine(DatabaseEngine):
         Returns:
             An active oracledb.Connection."""
         try:
-            user, password, dsn = get_effective_credentials(config, admin=admin)
+            user, password, dsn = get_effective_credentials(config, admin=admin, env=env)
             return oracledb.connect(user=user, password=password, dsn=dsn) # type: ignore
         except Exception:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
@@ -708,19 +708,22 @@ end;"""
     def _get_primary_key_info(
         cursor: oracledb.Cursor, owner: str, table_name: str
     ) -> Tuple[Optional[str], Tuple[str, ...]]:  # type: ignore[valid-type]
-        cursor.execute(
-            "SELECT constraint_name FROM all_constraints WHERE owner = :1 AND table_name = :2 AND constraint_type = 'P'",
+        logger.debug(f"Retrieving primary key info for {owner}.{table_name} cursor: {cursor}")
+        cursor.execute( # type: ignore
+            "SELECT constraint_name FROM dba_constraints WHERE owner = :1 AND table_name = :2 AND constraint_type = 'P'",
             [owner, table_name],
-        )  # type: ignore[arg-type]
+        )
         row = cursor.fetchone()
         if not row:
             return None, ()
         constraint_name = row[0]
-        cursor.execute(
-            "SELECT column_name FROM all_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+        logger.debug(f"Found primary key constraint {constraint_name} for {owner}.{table_name}")
+        cursor.execute( # type: ignore
+            "SELECT column_name FROM dba_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
             [owner, constraint_name],
-        )  # type: ignore[arg-type]
+        )
         columns = tuple(r[0] for r in cursor.fetchall())
+        logger.debug(f"Primary key columns for constraint {constraint_name} on {owner}.{table_name}: {columns}")
         return constraint_name, columns
 
     @staticmethod
@@ -773,22 +776,23 @@ end;"""
         changed = False
         owner = OracleEngine._format_identifier(table.owner)
         table_name = OracleEngine._format_identifier(table.name)
+        logger.debug(f"Ensuring structure for table {owner}.{table_name} conn: {conn}")
         try:
             cursor = conn.cursor()
             if not OracleEngine._table_exists(cursor, owner, table_name):
                 columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-                cursor.execute(
+                cursor.execute( # type: ignore
                     f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
-                )  # type: ignore[arg-type]
+                )
                 changed = True
             else:
                 existing_columns = OracleEngine._get_columns_metadata(cursor, owner, table_name)
                 for column in table.columns:
                     lookup = OracleEngine._normalize_identifier_for_lookup(column.name).lower()
                     if lookup not in existing_columns:
-                        cursor.execute(
+                        cursor.execute( # type: ignore
                             f"ALTER TABLE {owner}.{table_name} ADD ({OracleEngine._column_sql(column)})"
-                        )  # type: ignore[arg-type]
+                        )
                         changed = True
                     else:
                         existing = existing_columns[lookup]
@@ -801,28 +805,34 @@ end;"""
                 OracleEngine._format_identifier(col) for col in (table.primary_key or ())
             )
             existing_pk_name, existing_pk_cols = OracleEngine._get_primary_key_info(cursor, owner, table_name)
+            logger.debug(f"Existing PK info for {owner}.{table_name}: name={existing_pk_name}, cols={existing_pk_cols}")
             existing_pk_cols_fmt = tuple(OracleEngine._format_identifier(col) for col in existing_pk_cols)
             desired_constraint_name = OracleEngine._format_identifier(f"{table.name}_pk")
+            logger.debug(f"Existing PK for {owner}.{table_name}: {existing_pk_name} ({existing_pk_cols_fmt}) desired: {desired_pk} ({desired_constraint_name})")
             if desired_pk:
                 if not existing_pk_cols_fmt:
-                    cursor.execute(
+                    logger.debug(f"Adding PK constraint {desired_constraint_name} on {owner}.{table_name} for columns {desired_pk}")
+                    cursor.execute( # type: ignore
                         f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
-                    )  # type: ignore[arg-type]
+                    )
                     changed = True
                 elif existing_pk_cols_fmt != desired_pk:
+                    logger.debug(f"Updating PK constraint on {owner}.{table_name} to {desired_constraint_name} for columns {desired_pk}")
                     if existing_pk_name:
-                        cursor.execute(
+                        logger.debug(f"Dropping existing PK constraint {existing_pk_name} on {owner}.{table_name}")
+                        cursor.execute( # type: ignore
                             f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
-                        )  # type: ignore[arg-type]
+                        )
                         changed = True
-                    cursor.execute(
+                    logger.debug(f"Adding PK constraint {desired_constraint_name} on {owner}.{table_name} for columns {desired_pk}")
+                    cursor.execute( # type: ignore
                         f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
-                    )  # type: ignore[arg-type]
+                    )
                     changed = True
             elif existing_pk_cols_fmt and existing_pk_name:
-                cursor.execute(
+                cursor.execute( # type: ignore
                     f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
-                )  # type: ignore[arg-type]
+                )
                 changed = True
             if changed:
                 conn.commit()

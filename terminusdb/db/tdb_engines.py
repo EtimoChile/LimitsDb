@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from terminusdb.core.tdb_params_config import Config
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 from datetime import datetime
 
 
@@ -88,7 +88,7 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_connection(config: Config, *, admin: bool = False) -> Any:
+    def get_connection(config: Config, *, admin: bool = False, env: Optional[Literal["SOURCE", "HISTORY"]] = None) -> Any:
         """Establishes a connection to the database.
         Args:
             config: Configuration object.

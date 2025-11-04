@@ -96,23 +96,20 @@ def _build_history_table_definition(
 def _ensure_history_tables(
     config: Config,
     engine: DatabaseEngine,
-    source_connection: Any,
+    source_admin_connection: Any,
     tables_config: Dict[Tuple[str, str], Dict[str, Any]],
 ) -> None:
-    previous_action = config.action
-    history_connection: Optional[Any] = None
+    history_admin_connection: Optional[Any] = None
     try:
-        config.action = "HISTORY_ILM"
-        history_connection = engine.get_connection(config)
+        history_admin_connection = engine.get_connection(config, admin=True, env="HISTORY")
         for table_cnf in tables_config.values():
             if table_cnf.get("skip"):
                 continue
-            table_def = _build_history_table_definition(config, engine, source_connection, table_cnf)
-            engine.ensure_table_structure(history_connection, table_def)
+            table_def = _build_history_table_definition(config, engine, source_admin_connection, table_cnf)
+            engine.ensure_table_structure(history_admin_connection, table_def)
     finally:
-        config.action = previous_action
-        if history_connection:
-            engine.close_connection(history_connection)
+        if history_admin_connection:
+            engine.close_connection(history_admin_connection)
 
 
 def _initialize_worker_logger(log_level: str) -> None:
@@ -414,17 +411,19 @@ def tdb_run(config: Config) -> None:
     try:
         engine = get_db_engine(config.db_engine)
         connection = engine.get_connection(config)
+        admin_connection = engine.get_connection(config, admin=True)
         process_date = engine.get_system_date(connection).strftime('%Y%m%d')
         tables_config = process_table_cnf(connection, config, engine, process_date)
         if config.generate_script:
             rc = generate_script_output(config, tables_config)
         else:
             if config.action == "SOURCE_ILM":
-                _ensure_history_tables(config, engine, connection, tables_config)
+                _ensure_history_tables(config, engine, admin_connection, tables_config)
             rc = tdb_exec_ilm(config, tables_config, process_date, engine, connection)
         raise SystemExit(rc)
     except Exception:
         logger.critical("Error:", exc_info=True)
+        raise Exception
     finally:
         if engine and connection:
             engine.close_connection(connection)
