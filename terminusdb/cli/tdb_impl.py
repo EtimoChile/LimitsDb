@@ -181,13 +181,13 @@ def run_cli() -> None:
     history_tables = _build_control_tables(config.history_username)
     history_sequences = _build_sequences(config.history_username)
     source_db_link = DatabaseLinkDefinition(
-        name=config.history_dblink_name,
+        name=config.source_to_history_dblink_name,
         username=config.history_username,
         password=config.history_password,
         dsn=config.history_dsn,
     )
     history_db_link = DatabaseLinkDefinition(
-        name=config.source_dblink_name,
+        name=config.history_to_source_dblink_name,
         username=config.source_username,
         password=config.source_password,
         dsn=config.source_dsn,

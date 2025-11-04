@@ -471,17 +471,17 @@ class OracleEngine(DatabaseEngine):
         plsql += f"""
 begin
     l_process_start := sysdate;
-    check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
+    check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
     if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;"""
         if source_ilm or not config.use_added_columns:
             plsql += f"""
-    check_referencing_tables{"" if source_ilm else "@SOURCE"}(l_referencing_tables, l_process_date); commit;"""
+    check_referencing_tables(l_referencing_tables, l_process_date); commit;"""
         if not has_lob_columns or not source_ilm:
             plsql += f"""
     open c_records;
     loop
         l_chunk_start := sysdate;
-        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_START}', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
+        check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_START}', null, l_chunk_start, null, l_message, 0, null, l_sqlcode, l_out_message);
         fetch c_records bulk collect into r_rec limit l_chunk_size;
         if r_rec.count <= 0 then
             exit;
@@ -490,7 +490,7 @@ begin
                 if source_ilm and nvl(months_keep_history_max, 1) > 0:
                     plsql += f"""
         for i in 1 .. r_rec.count loop
-            insert into {history_owner.lower()}.{table_name.lower()}@hist
+            insert into {history_owner.lower()}.{table_name.lower()}@{config.source_to_history_dblink_name}
             ({indent_lines(ins_cols,12)})
             values ({indent_lines(ins_vals,12)});
         end loop;"""
@@ -499,7 +499,7 @@ begin
             delete from {source_owner.lower()}.{table_name.lower()} where rowid = r_rec(i).rowid;
         l_record_count := l_record_count + r_rec.count;"""
             plsql += f"""
-        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_END}', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
+        check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_END}', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
         commit;
     end loop;
     close c_records;"""
@@ -508,7 +508,7 @@ begin
             if config.mode == "ALL":
                 if source_ilm and nvl(months_keep_history_max,0) > 0:
                     plsql += f"""
-    insert into {history_owner.lower()}.{table_name.lower()}@hist({indent_lines(ins_cols,4)})
+    insert into {history_owner.lower()}.{table_name.lower()}@{config.source_to_history_dblink_name}({indent_lines(ins_cols,4)})
     select /*+ {hint_expr} */ {indent_lines(cols_select,4)}
     {indent_lines(query_expr, 4)};"""
                 plsql += f"""
@@ -521,12 +521,12 @@ begin
     select /*+ {hint_expr} */ count(*) into l_record_count
     {indent_lines(query_expr, 4)};"""
         plsql += f"""
-    check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
+    check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
     commit;
 exception
     when others then
         rollback;
-        check_save_status{"" if source_ilm else "@SOURCE"}(l_source_owner, l_table_name, l_process_date, l_action, '{Status.ERROR}', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
+        check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.ERROR}', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
         commit;
         if l_sqlcode not in (-20003) then
             raise;

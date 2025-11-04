@@ -45,8 +45,14 @@ class Config:
     admin_history_password: Annotated[Optional[str], Help("Admin History password"), Secret()] = ""
     source_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the source user")] = None
     history_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the history user")] = None
-    history_dblink_name: Annotated[str, Help("Database link name in source environment that connects to history")] = "HIST"
-    source_dblink_name: Annotated[str, Help("Database link name in history environment that connects to source")] = "SRC"
+    source_to_history_dblink_name: Annotated[
+        str,
+        Help("Database link name in source environment that connects to history"),
+    ] = "HIST"
+    history_to_source_dblink_name: Annotated[
+        str,
+        Help("Database link name in history environment that connects to source"),
+    ] = "SRC"
     source_role_name: Annotated[str, Help("Role name to create in the source environment")] = "TDB_SOURCE_ROLE"
     history_role_name: Annotated[str, Help("Role name to create in the history environment")] = "TDB_HISTORY_ROLE"
 
