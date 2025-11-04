@@ -348,10 +348,11 @@ class OracleEngine(DatabaseEngine):
         )
 
     @staticmethod
-    def get_connection(config: Config, *, admin: bool=False) -> oracledb.Connection:
+    def get_connection(config: Config, *, admin: bool = False) -> oracledb.Connection:
         """Returns an Oracle connection using provided config.
         Args:
             config: Database config object.
+            admin: Whether to use admin credentials.
         Returns:
             An active oracledb.Connection."""
         try:

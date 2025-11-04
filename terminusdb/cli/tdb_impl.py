@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from terminusdb.core.tdb_logger import configure_logger, get_logger, reconfigure_logger
 from terminusdb.core.tdb_crypto import load_or_create_key
@@ -43,12 +43,6 @@ def _parse_args() -> argparse.Namespace:
         help="Logging level",
     )
     return parser.parse_args()
-
-
-def _make_config(base: Dict[str, Any], action: str) -> Config:
-    cfg = dict(base)
-    cfg["action"] = action
-    return Config.from_dict(cfg)
 
 
 def _build_control_tables(owner: str) -> List[TableDefinition]:
@@ -144,76 +138,82 @@ def run_cli() -> None:
             exc_info=True,
         )
     cfg_dict = build_config({}, args)
+    config = Config.from_dict(cfg_dict)
 
-    source_config = _make_config(cfg_dict, "SOURCE_ILM")
-    history_config = _make_config(cfg_dict, "HISTORY_ILM")
-
-    if not source_config.admin_source_username or not source_config.admin_source_password:
+    if not config.admin_source_username or not config.admin_source_password:
         raise ValueError("admin_source_username and admin_source_password are required")
-    if not history_config.admin_history_username or not history_config.admin_history_password:
+    if not config.admin_history_username or not config.admin_history_password:
         raise ValueError("admin_history_username and admin_history_password are required")
-    if not source_config.source_username or not source_config.source_password:
+    if not config.source_username or not config.source_password:
         raise ValueError("source_username and source_password are required")
-    if not history_config.history_username or not history_config.history_password:
+    if not config.history_username or not config.history_password:
         raise ValueError("history_username and history_password are required")
-    if not history_config.history_dsn:
+    if not config.history_dsn:
         raise ValueError("history_dsn is required to create the database link")
 
-    engine = get_db_engine(source_config.db_engine)
+    engine = get_db_engine(config.db_engine)
 
     source_roles = [RoleDefinition(name=SOURCE_ROLE)]
     source_privileges = getattr(engine, "SOURCE_SYSTEM_PRIVILEGES", ())
     history_privileges = getattr(engine, "HISTORY_SYSTEM_PRIVILEGES", ())
 
     source_user = UserDefinition(
-        name=source_config.source_username,
-        password=source_config.source_password,
-        default_tablespace=source_config.source_default_tablespace or None,
+        name=config.source_username,
+        password=config.source_password,
+        default_tablespace=config.source_default_tablespace or None,
         roles=(SOURCE_ROLE,),
         system_privileges=source_privileges,
     )
     history_roles = [RoleDefinition(name=HISTORY_ROLE)]
     history_user = UserDefinition(
-        name=history_config.history_username,
-        password=history_config.history_password,
-        default_tablespace=history_config.history_default_tablespace or None,
+        name=config.history_username,
+        password=config.history_password,
+        default_tablespace=config.history_default_tablespace or None,
         roles=(HISTORY_ROLE,),
         system_privileges=history_privileges,
     )
-    source_tables = _build_control_tables(source_config.source_username)
-    source_sequences = _build_sequences(source_config.source_username)
-    history_tables = _build_control_tables(history_config.history_username)
-    history_sequences = _build_sequences(history_config.history_username)
+    source_tables = _build_control_tables(config.source_username)
+    source_sequences = _build_sequences(config.source_username)
+    history_tables = _build_control_tables(config.history_username)
+    history_sequences = _build_sequences(config.history_username)
     db_link = DatabaseLinkDefinition(
         name=DB_LINK_NAME,
-        username=history_config.history_username,
-        password=history_config.history_password,
-        dsn=history_config.history_dsn,
+        username=config.history_username,
+        password=config.history_password,
+        dsn=config.history_dsn,
     )
 
     summary: Dict[str, List[str]] = {}
 
-    source_admin_conn = engine.get_connection(source_config, admin=True)
+    def _get_connection(action: Literal["SOURCE_ILM", "HISTORY_ILM"], *, admin: bool) -> Any:
+        previous_action = config.action
+        config.action = action
+        try:
+            return engine.get_connection(config, admin=admin)
+        finally:
+            config.action = previous_action
+
+    source_admin_conn = _get_connection("SOURCE_ILM", admin=True)
     try:
         summary["source_roles"] = engine.ensure_roles(source_admin_conn, source_roles)
         summary["source_users"] = engine.ensure_users(source_admin_conn, [source_user])
         summary["source_tables"] = engine.ensure_tables(source_admin_conn, source_tables)
         summary["source_sequences"] = engine.ensure_sequences(source_admin_conn, source_sequences)
-        engine.ensure_supporting_plsql(source_admin_conn, source_config.source_username)
+        engine.ensure_supporting_plsql(source_admin_conn, config.source_username)
     finally:
         engine.close_connection(source_admin_conn)
 
-    history_admin_conn = engine.get_connection(history_config, admin=True)
+    history_admin_conn = _get_connection("HISTORY_ILM", admin=True)
     try:
         summary["history_roles"] = engine.ensure_roles(history_admin_conn, history_roles)
         summary["history_users"] = engine.ensure_users(history_admin_conn, [history_user])
         summary["history_tables"] = engine.ensure_tables(history_admin_conn, history_tables)
         summary["history_sequences"] = engine.ensure_sequences(history_admin_conn, history_sequences)
-        engine.ensure_supporting_plsql(history_admin_conn, history_config.history_username)
+        engine.ensure_supporting_plsql(history_admin_conn, config.history_username)
     finally:
         engine.close_connection(history_admin_conn)
 
-    source_user_conn = engine.get_connection(source_config, admin=False)
+    source_user_conn = _get_connection("SOURCE_ILM", admin=False)
     try:
         summary["database_links"] = engine.ensure_database_links(source_user_conn, [db_link])
     finally:

@@ -87,7 +87,7 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_connection(config: Config, *, admin: bool=False) -> Any:
+    def get_connection(config: Config, *, admin: bool = False) -> Any:
         """Establishes a connection to the database.
         Args:
             config: Configuration object.
