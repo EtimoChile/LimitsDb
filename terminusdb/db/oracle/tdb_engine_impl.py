@@ -225,6 +225,13 @@ class OracleEngine(DatabaseEngine):
         return f"{col_name} {col_type}{default_clause}{nullable_clause}"
 
     @staticmethod
+    def _normalize_identifier_for_lookup(name: str) -> str:
+        identifier = name.strip()
+        if identifier.startswith('"') and identifier.endswith('"') and len(identifier) > 1:
+            return identifier[1:-1]
+        return identifier.upper()
+
+    @staticmethod
     def _object_exists(cursor: oracledb.Cursor, query: str, params: Sequence[Any]) -> bool:  # type: ignore[valid-type]
         cursor.execute(query, params)  # type: ignore[arg-type]
         return cursor.fetchone() is not None
@@ -637,6 +644,192 @@ end;"""
                 where  owner = upper(:1) and table_name = upper(:2) and column_id is not null
                 order by column_id""", [owner, table_name])
             return [row[0] for row in cursor.fetchall()] # type: ignore
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def _get_columns_metadata(
+        cursor: oracledb.Cursor,
+        owner: str,
+        table_name: str,
+        columns: Optional[Sequence[str]] = None,
+    ) -> Dict[str, ColumnDefinition]:  # type: ignore[valid-type]
+        owner_name = OracleEngine._format_identifier(owner)
+        table = OracleEngine._format_identifier(table_name)
+        query = (
+            "SELECT column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used "
+            "FROM all_tab_columns WHERE owner = :1 AND table_name = :2"
+        )
+        params: List[Any] = [owner_name, table]
+        if columns:
+            normalized_columns = [OracleEngine._normalize_identifier_for_lookup(col) for col in columns]
+            placeholders = ", ".join(f":{idx + 3}" for idx in range(len(normalized_columns)))
+            query += f" AND column_name IN ({placeholders})"
+            params.extend(normalized_columns)
+        cursor.execute(query, params)  # type: ignore[arg-type]
+        metadata: Dict[str, ColumnDefinition] = {}
+        for row in cursor.fetchall():
+            column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used = row
+            dtype = data_type.lower()
+            length: Optional[int] = None
+            if dtype in ("varchar2", "varchar", "char"):
+                if char_used == "C" and char_length is not None:
+                    length = int(char_length)
+                elif data_length is not None:
+                    length = int(data_length)
+            precision = int(data_precision) if data_precision is not None else None
+            scale = int(data_scale) if data_scale is not None else None
+            normalized = OracleEngine._normalize_identifier_for_lookup(column_name).lower()
+            metadata[normalized] = ColumnDefinition(
+                name=column_name.lower(),
+                data_type=dtype,
+                length=length,
+                precision=precision,
+                scale=scale,
+                nullable=(nullable == "Y"),
+                default=data_default.strip() if isinstance(data_default, str) else None,
+            )
+        return metadata
+
+    @staticmethod
+    def get_columns_metadata(
+        conn: oracledb.Connection, owner: str, table_name: str, columns: Sequence[str]
+    ) -> Dict[str, ColumnDefinition]:
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            return OracleEngine._get_columns_metadata(cursor, owner, table_name, columns)
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def _get_primary_key_info(
+        cursor: oracledb.Cursor, owner: str, table_name: str
+    ) -> Tuple[Optional[str], Tuple[str, ...]]:  # type: ignore[valid-type]
+        cursor.execute(
+            "SELECT constraint_name FROM all_constraints WHERE owner = :1 AND table_name = :2 AND constraint_type = 'P'",
+            [owner, table_name],
+        )  # type: ignore[arg-type]
+        row = cursor.fetchone()
+        if not row:
+            return None, ()
+        constraint_name = row[0]
+        cursor.execute(
+            "SELECT column_name FROM all_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+            [owner, constraint_name],
+        )  # type: ignore[arg-type]
+        columns = tuple(r[0] for r in cursor.fetchall())
+        return constraint_name, columns
+
+    @staticmethod
+    def get_primary_key_columns(conn: oracledb.Connection, owner: str, table_name: str) -> Tuple[str, ...]:
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            owner_name = OracleEngine._format_identifier(owner)
+            table = OracleEngine._format_identifier(table_name)
+            _, columns = OracleEngine._get_primary_key_info(cursor, owner_name, table)
+            return tuple(col.lower() for col in columns)
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def _column_needs_update(existing: ColumnDefinition, desired: ColumnDefinition) -> bool:
+        desired_type = desired.data_type.lower()
+        existing_type = existing.data_type.lower()
+        if existing_type != desired_type:
+            return True
+        if desired_type in ("varchar2", "varchar", "char"):
+            desired_length = desired.length or 0
+            existing_length = existing.length or 0
+            if desired_length and desired_length > existing_length:
+                return True
+        if desired_type in ("number", "numeric", "decimal"):
+            desired_precision = desired.precision
+            desired_scale = desired.scale or 0
+            existing_precision = existing.precision
+            existing_scale = existing.scale or 0
+            if desired_precision is not None and existing_precision is not None:
+                if existing_precision < desired_precision:
+                    return True
+            if desired_precision is not None and existing_precision is None:
+                # Existing column allows maximum precision; no change required.
+                pass
+            if desired_scale > existing_scale:
+                return True
+        if desired_type in ("integer", "int"):
+            desired_precision = desired.precision or 10
+            existing_precision = existing.precision or 0
+            if desired_precision > existing_precision:
+                return True
+        return False
+
+    @staticmethod
+    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition) -> None:
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        owner = OracleEngine._format_identifier(table.owner)
+        table_name = OracleEngine._format_identifier(table.name)
+        try:
+            cursor = conn.cursor()
+            if not OracleEngine._table_exists(cursor, owner, table_name):
+                columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+                cursor.execute(
+                    f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
+                )  # type: ignore[arg-type]
+                changed = True
+            else:
+                existing_columns = OracleEngine._get_columns_metadata(cursor, owner, table_name)
+                for column in table.columns:
+                    lookup = OracleEngine._normalize_identifier_for_lookup(column.name).lower()
+                    if lookup not in existing_columns:
+                        cursor.execute(
+                            f"ALTER TABLE {owner}.{table_name} ADD ({OracleEngine._column_sql(column)})"
+                        )  # type: ignore[arg-type]
+                        changed = True
+                    else:
+                        existing = existing_columns[lookup]
+                        if OracleEngine._column_needs_update(existing, column):
+                            cursor.execute(
+                                f"ALTER TABLE {owner}.{table_name} MODIFY ({OracleEngine._column_sql(column)})"
+                            )  # type: ignore[arg-type]
+                            changed = True
+            desired_pk = tuple(
+                OracleEngine._format_identifier(col) for col in (table.primary_key or ())
+            )
+            existing_pk_name, existing_pk_cols = OracleEngine._get_primary_key_info(cursor, owner, table_name)
+            existing_pk_cols_fmt = tuple(OracleEngine._format_identifier(col) for col in existing_pk_cols)
+            desired_constraint_name = OracleEngine._format_identifier(f"{table.name}_pk")
+            if desired_pk:
+                if not existing_pk_cols_fmt:
+                    cursor.execute(
+                        f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
+                    )  # type: ignore[arg-type]
+                    changed = True
+                elif existing_pk_cols_fmt != desired_pk:
+                    if existing_pk_name:
+                        cursor.execute(
+                            f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
+                        )  # type: ignore[arg-type]
+                        changed = True
+                    cursor.execute(
+                        f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
+                    )  # type: ignore[arg-type]
+                    changed = True
+            elif existing_pk_cols_fmt and existing_pk_name:
+                cursor.execute(
+                    f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
+                )  # type: ignore[arg-type]
+                changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure table structure.", exc_info=True)
+            raise
         finally:
             if cursor:
                 cursor.close()

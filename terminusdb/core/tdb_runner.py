@@ -6,9 +6,113 @@ from terminusdb.core.tdb_logger import get_logger, configure_logger, reconfigure
 from terminusdb.core.tdb_utils import get_effective_credentials, max_ignore_none, nvl
 from terminusdb.core.tdb_ilm_config import load_rows_from_yaml
 from terminusdb.db.tdb_engine_loader import get_db_engine
-from terminusdb.db.tdb_engines import DatabaseEngine
+from terminusdb.db.tdb_engines import ColumnDefinition, DatabaseEngine, TableDefinition
 from terminusdb.core.tdb_status import Status
 logger = get_logger("runner")
+
+
+def _normalize_column_lookup(column: str) -> str:
+    column = column.strip()
+    if column.startswith('"') and column.endswith('"') and len(column) > 1:
+        return column[1:-1]
+    return column.upper()
+
+
+def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDefinition:
+    return ColumnDefinition(
+        name=name,
+        data_type=template.data_type,
+        length=template.length,
+        precision=template.precision,
+        scale=template.scale,
+        nullable=template.nullable,
+        default=template.default,
+    )
+
+
+def _build_history_table_definition(
+    config: Config,
+    engine: DatabaseEngine,
+    source_connection: Any,
+    table_cnf: Dict[str, Any],
+) -> TableDefinition:
+    cnd0 = table_cnf["conds"][0]
+    history_owner = cnd0["cnf_history_owner"]
+    table_name = cnd0["cnf_table_name"]
+    alias_map: Dict[str, Tuple[str, str]] = table_cnf.get("alias_map", {})
+    if not alias_map:
+        alias_map = {"A": (cnd0["cnf_source_owner"].upper(), table_name.upper())}
+    base_owner, base_table = alias_map["A"]
+    table_columns = table_cnf["table_columns"]
+    required_columns: List[ColumnDefinition] = []
+    base_metadata = engine.get_columns_metadata(source_connection, base_owner, base_table, table_columns)
+    for column in table_columns:
+        lookup = _normalize_column_lookup(column)
+        if lookup.lower() not in base_metadata:
+            raise ValueError(f"Column {column} not found in source table {base_owner}.{base_table}")
+        required_columns.append(_clone_column_definition(column, base_metadata[lookup.lower()]))
+    for derived in table_cnf.get("derived_columns", []):
+        name = derived["name"]
+        if derived.get("data_type"):
+            required_columns.append(
+                ColumnDefinition(
+                    name=name,
+                    data_type=derived["data_type"],
+                    nullable=True,
+                )
+            )
+            continue
+        source_alias = derived.get("source_alias")
+        source_column_lookup = derived.get("lookup")
+        if not source_alias or not source_column_lookup:
+            raise ValueError(f"Missing metadata for derived column {name}")
+        if source_alias not in alias_map:
+            raise ValueError(f"Alias {source_alias} not found for derived column {name}")
+        src_owner, src_table = alias_map[source_alias]
+        metadata = engine.get_columns_metadata(source_connection, src_owner, src_table, [source_column_lookup])
+        if source_column_lookup.lower() not in metadata:
+            raise ValueError(
+                f"Column {source_column_lookup} not found in source table {src_owner}.{src_table} for derived column {name}"
+            )
+        required_columns.append(_clone_column_definition(name, metadata[source_column_lookup.lower()]))
+    if config.add_tdb_columns:
+        required_columns.append(
+            ColumnDefinition(name="tdb_process_date", data_type="date", nullable=False)
+        )
+        required_columns.append(ColumnDefinition(name="tdb_insert_date", data_type="date", nullable=False))
+    pk_columns = list(engine.get_primary_key_columns(source_connection, base_owner, base_table))
+    if config.add_tdb_columns:
+        if "tdb_process_date" not in pk_columns:
+            pk_columns.append("tdb_process_date")
+    primary_key: Optional[Tuple[str, ...]] = tuple(pk_columns) if pk_columns else None
+    return TableDefinition(
+        owner=history_owner,
+        name=table_name,
+        columns=tuple(required_columns),
+        primary_key=primary_key,
+    )
+
+
+def _ensure_history_tables(
+    config: Config,
+    engine: DatabaseEngine,
+    source_connection: Any,
+    tables_config: Dict[Tuple[str, str], Dict[str, Any]],
+) -> None:
+    previous_action = config.action
+    history_connection: Optional[Any] = None
+    try:
+        config.action = "HISTORY_ILM"
+        history_connection = engine.get_connection(config)
+        for table_cnf in tables_config.values():
+            if table_cnf.get("skip"):
+                continue
+            table_def = _build_history_table_definition(config, engine, source_connection, table_cnf)
+            engine.ensure_table_structure(history_connection, table_def)
+    finally:
+        config.action = previous_action
+        if history_connection:
+            engine.close_connection(history_connection)
 
 
 def _initialize_worker_logger(log_level: str) -> None:
@@ -175,11 +279,11 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
     # Populate tables_config with the raw rows and derive referencing tables from cnf_referencing_tables.
     is_source_mode = (config.action == "SOURCE_ILM")
     for tdb_cnf_row in tdb_conf_rows:
-        key = (tdb_cnf_row["cnf_source_owner"], tdb_cnf_row["cnf_table_name"])
+        key = (tdb_cnf_row["cnf_source_owner"].upper(), tdb_cnf_row["cnf_table_name"].upper())
         if key not in tables_config: tables_config[key] = {"conds": [], "referencing_tables": []}
         tables_config[key]["conds"].append(tdb_cnf_row)
     for tdb_cnf_row in tdb_conf_rows:
-        key = (tdb_cnf_row["cnf_source_owner"], tdb_cnf_row["cnf_table_name"])
+        key = (tdb_cnf_row["cnf_source_owner"].upper(), tdb_cnf_row["cnf_table_name"].upper())
         referencing_tables = tdb_cnf_row["cnf_referencing_tables"]
         if referencing_tables:
             for ref_table in referencing_tables.split(","):
@@ -205,15 +309,21 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
         cnd0 = table_cnf["conds"][0]
         referencing_tables = cnd0["cnf_referencing_tables"]
         added_conds = [("A", cond) for cond in table_cnf["conds"]]
+        alias_map: Dict[str, Tuple[str, str]] = {
+            "A": (cnd0["cnf_source_owner"].upper(), cnd0["cnf_table_name"].upper())
+        }
         if referencing_tables:
             for ref_table in referencing_tables.split(","):
                 ref_table = ref_table.strip()
-                if "." in ref_table: ref_owner, ref_table = ref_table.split(".")
-                else: ref_owner = tdb_cnf_row["cnf_source_owner"] # type: ignore
-                ref_table, alias = ref_table.split(" ")
-                if (ref_owner, ref_table) not in tables_config:
+                if "." in ref_table:
+                    ref_owner, ref_table_name = ref_table.split(".")
+                else:
+                    ref_owner, ref_table_name = tdb_cnf_row["cnf_source_owner"], ref_table # type: ignore
+                ref_table_name, alias = ref_table_name.split(" ")
+                if (ref_owner.upper(), ref_table_name.upper()) not in tables_config:
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in tdb_conf_rows")
-                ref_conds = tables_config[(ref_owner, ref_table)]["conds"]
+                alias_map[alias] = (ref_owner.upper(), ref_table_name.upper())
+                ref_conds = tables_config[(ref_owner.upper(), ref_table_name.upper())]["conds"]
                 added_conds.extend([(alias, cond) for cond in ref_conds])
         for al, cd in added_conds:
             cond_list: List[str] = []
@@ -259,6 +369,8 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
         where_expr = "\n   or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
         table_cnf["other_cols_exprs"] = []
         table_cnf["other_cols_alias"] = []
+        table_cnf["alias_map"] = alias_map
+        table_cnf["derived_columns"] = []
         if config.use_added_columns:
             for al, cd in added_conds:
                 if al != "A":
@@ -266,11 +378,15 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                     if f"tdb_date_{al}" not in table_cnf["other_cols_alias"] and cd["cnf_purge_date_expr"]:
                         table_cnf["other_cols_exprs"].append(nvl(cd["cnf_purge_date_expr"], "").replace('@', al+".")+f" tdb_date_{al}") # type: ignore
                         table_cnf["other_cols_alias"].append(f"tdb_date_{al}") # type: ignore
+                        table_cnf["derived_columns"].append({"name": f"tdb_date_{al}", "data_type": "date"})
                     # Add columns in cnf_history_addtl_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
                     for col in [match[0] for match in re.findall(r'@("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)', cd["addtl_history_expr"])]:
                         if col not in table_cnf["other_cols_alias"]:
                             table_cnf["other_cols_exprs"].append(al+'.'+col) # type: ignore
                             table_cnf["other_cols_alias"].append(col) # type: ignore
+                            table_cnf["derived_columns"].append(
+                                {"name": col, "source_alias": al, "lookup": _normalize_column_lookup(col)}
+                            )
         cnf_source_owner, cnf_table_name = key
         cnf_join_expr, cnf_source_orphan_purge = cnd0["cnf_join_expr"], cnd0["cnf_source_orphan_purge"]
         # get the columns names from DB for cnf_table_name and cnf_source_owner
@@ -300,8 +416,12 @@ def tdb_run(config: Config) -> None:
         connection = engine.get_connection(config)
         process_date = engine.get_system_date(connection).strftime('%Y%m%d')
         tables_config = process_table_cnf(connection, config, engine, process_date)
-        if config.generate_script: rc = generate_script_output(config, tables_config)
-        else: rc = tdb_exec_ilm(config, tables_config, process_date, engine, connection)
+        if config.generate_script:
+            rc = generate_script_output(config, tables_config)
+        else:
+            if config.action == "SOURCE_ILM":
+                _ensure_history_tables(config, engine, connection, tables_config)
+            rc = tdb_exec_ilm(config, tables_config, process_date, engine, connection)
         raise SystemExit(rc)
     except Exception:
         logger.critical("Error:", exc_info=True)

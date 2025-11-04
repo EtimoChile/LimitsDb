@@ -205,6 +205,25 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_columns_metadata(conn: Any, owner: str, table_name: str, columns: Sequence[str]) -> Dict[str, ColumnDefinition]:
+        """Returns detailed column metadata for the specified columns.
+        Args:
+            conn: Active database connection.
+            owner: Schema owner of the table.
+            table_name: Table name.
+            columns: Columns to fetch metadata for.
+        Returns:
+            Mapping from normalized column name to column definition."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_primary_key_columns(conn: Any, owner: str, table_name: str) -> Tuple[str, ...]:
+        """Returns the primary key columns for the specified table."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def get_date_cond(date_expr: str, months_keep_src: int) -> str:
         """Returns a date condition for the given date expression and months to keep.
         Args:
@@ -243,6 +262,12 @@ class DatabaseEngine(ABC):
     @abstractmethod
     def ensure_tables(conn: Any, tables: Sequence[TableDefinition]) -> List[str]:
         """Ensure that the provided tables exist, returning newly created ones."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_table_structure(conn: Any, table: TableDefinition) -> None:
+        """Ensure that the provided table matches the expected structure."""
         pass
 
     @staticmethod
