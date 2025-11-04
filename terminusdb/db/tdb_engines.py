@@ -70,6 +70,7 @@ class UserDefinition:
     default_tablespace: Optional[str] = None
     temporary_tablespace: Optional[str] = None
     roles: Tuple[str, ...] = ()
+    roles_with_admin_option: Tuple[str, ...] = ()
     system_privileges: Tuple[str, ...] = ()
 
 

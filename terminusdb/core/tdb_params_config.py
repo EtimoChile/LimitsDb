@@ -45,6 +45,10 @@ class Config:
     admin_history_password: Annotated[Optional[str], Help("Admin History password"), Secret()] = ""
     source_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the source user"), Env("TDB_SOURCE_DEFAULT_TABLESPACE")] = None
     history_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the history user"), Env("TDB_HISTORY_DEFAULT_TABLESPACE")] = None
+    history_dblink_name: Annotated[str, Help("Database link name in source environment that connects to history"), Env("TDB_HISTORY_DBLINK_NAME")] = "HIST"
+    source_dblink_name: Annotated[str, Help("Database link name in history environment that connects to source"), Env("TDB_SOURCE_DBLINK_NAME")] = "SRC"
+    source_role_name: Annotated[str, Help("Role name to create in the source environment"), Env("TDB_SOURCE_ROLE_NAME")] = "TDB_SOURCE_ROLE"
+    history_role_name: Annotated[str, Help("Role name to create in the history environment"), Env("TDB_HISTORY_ROLE_NAME")] = "TDB_HISTORY_ROLE"
 
     def __post_init__(self) -> None:
         if not self.schema:

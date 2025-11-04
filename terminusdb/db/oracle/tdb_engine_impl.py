@@ -246,6 +246,14 @@ class OracleEngine(DatabaseEngine):
         )
 
     @staticmethod
+    def _user_has_role_with_admin_option(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2 AND admin_option = 'YES'",
+            [username, role],
+        )
+
+    @staticmethod
     def _user_has_sys_priv(cursor: oracledb.Cursor, username: str, privilege: str) -> bool:  # type: ignore[valid-type]
         return OracleEngine._object_exists(
             cursor,
@@ -734,9 +742,18 @@ end;"""
                             OracleEngine._get_user_default_tablespace(cursor, username)
                             or database_default_tablespace
                         )
+                admin_option_roles = set(OracleEngine._format_identifier(r) for r in user.roles_with_admin_option)
                 for role in user.roles:
                     role_name = OracleEngine._format_identifier(role)
-                    if not OracleEngine._user_has_role(cursor, username, role_name):
+                    requires_admin_option = role_name in admin_option_roles
+                    has_role = OracleEngine._user_has_role(cursor, username, role_name)
+                    if requires_admin_option:
+                        if not has_role or not OracleEngine._user_has_role_with_admin_option(cursor, username, role_name):
+                            cursor.execute(
+                                f"GRANT {role_name} TO {username} WITH ADMIN OPTION"
+                            )  # type: ignore[arg-type]
+                            changed = True
+                    elif not has_role:
                         cursor.execute(f"GRANT {role_name} TO {username}")  # type: ignore[arg-type]
                         changed = True
                 for privilege in user.system_privileges:

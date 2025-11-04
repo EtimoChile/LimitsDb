@@ -22,10 +22,6 @@ from terminusdb.core.tdb_utils import encrypt_secrets_in_place
 
 configure_logger(level="WARNING")
 
-SOURCE_ROLE = "TDB_SOURCE_ROLE"
-HISTORY_ROLE = "TDB_HISTORY_ROLE"
-DB_LINK_NAME = "HIST"
-
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -150,10 +146,12 @@ def run_cli() -> None:
         raise ValueError("history_username and history_password are required")
     if not config.history_dsn:
         raise ValueError("history_dsn is required to create the database link")
+    if not config.source_dsn:
+        raise ValueError("source_dsn is required to create the database link")
 
     engine = get_db_engine(config.db_engine)
 
-    source_roles = [RoleDefinition(name=SOURCE_ROLE)]
+    source_roles = [RoleDefinition(name=config.source_role_name)]
     source_privileges = getattr(engine, "SOURCE_SYSTEM_PRIVILEGES", ())
     history_privileges = getattr(engine, "HISTORY_SYSTEM_PRIVILEGES", ())
 
@@ -161,26 +159,34 @@ def run_cli() -> None:
         name=config.source_username,
         password=config.source_password,
         default_tablespace=config.source_default_tablespace or None,
-        roles=(SOURCE_ROLE,),
+        roles=(config.source_role_name,),
+        roles_with_admin_option=(config.source_role_name,),
         system_privileges=source_privileges,
     )
-    history_roles = [RoleDefinition(name=HISTORY_ROLE)]
+    history_roles = [RoleDefinition(name=config.history_role_name)]
     history_user = UserDefinition(
         name=config.history_username,
         password=config.history_password,
         default_tablespace=config.history_default_tablespace or None,
-        roles=(HISTORY_ROLE,),
+        roles=(config.history_role_name,),
+        roles_with_admin_option=(config.history_role_name,),
         system_privileges=history_privileges,
     )
     source_tables = _build_control_tables(config.source_username)
     source_sequences = _build_sequences(config.source_username)
     history_tables = _build_control_tables(config.history_username)
     history_sequences = _build_sequences(config.history_username)
-    db_link = DatabaseLinkDefinition(
-        name=DB_LINK_NAME,
+    source_db_link = DatabaseLinkDefinition(
+        name=config.history_dblink_name,
         username=config.history_username,
         password=config.history_password,
         dsn=config.history_dsn,
+    )
+    history_db_link = DatabaseLinkDefinition(
+        name=config.source_dblink_name,
+        username=config.source_username,
+        password=config.source_password,
+        dsn=config.source_dsn,
     )
 
     summary: Dict[str, List[str]] = {}
@@ -215,9 +221,15 @@ def run_cli() -> None:
 
     source_user_conn = _get_connection("SOURCE_ILM", admin=False)
     try:
-        summary["database_links"] = engine.ensure_database_links(source_user_conn, [db_link])
+        summary["source_database_links"] = engine.ensure_database_links(source_user_conn, [source_db_link])
     finally:
         engine.close_connection(source_user_conn)
+
+    history_user_conn = _get_connection("HISTORY_ILM", admin=False)
+    try:
+        summary["history_database_links"] = engine.ensure_database_links(history_user_conn, [history_db_link])
+    finally:
+        engine.close_connection(history_user_conn)
 
     anything_created = any(summary.values())
     for key, values in summary.items():
