@@ -152,8 +152,8 @@ def run_cli() -> None:
     engine = get_db_engine(config.db_engine)
 
     source_roles = [RoleDefinition(name=config.source_role_name)]
-    source_privileges = getattr(engine, "SOURCE_SYSTEM_PRIVILEGES", ())
-    history_privileges = getattr(engine, "HISTORY_SYSTEM_PRIVILEGES", ())
+    source_privileges = getattr(engine, "REQUIRED_SYSTEM_PRIVILEGES", ())
+    history_privileges = getattr(engine, "REQUIRED_SYSTEM_PRIVILEGES", ())
 
     source_user = UserDefinition(
         name=config.source_username,

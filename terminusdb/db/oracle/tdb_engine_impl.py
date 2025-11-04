@@ -4,16 +4,7 @@ import oracledb
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_status import Status
 from terminusdb.core.tdb_utils import get_effective_credentials, indent_lines, join_wrapped, nvl
-from terminusdb.db.tdb_engines import (
-    ColumnDefinition,
-    DatabaseEngine,
-    DatabaseLinkDefinition,
-    IndexDefinition,
-    RoleDefinition,
-    SequenceDefinition,
-    TableDefinition,
-    UserDefinition,
-)
+from terminusdb.db.tdb_engines import ColumnDefinition, DatabaseEngine, DatabaseLinkDefinition, RoleDefinition, SequenceDefinition, TableDefinition, UserDefinition
 from terminusdb.core.tdb_logger import get_logger
 
 CHECK_SAVE_STATUS_PROC = """
@@ -182,8 +173,9 @@ class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
 
     _supporting_objects_created: bool = False
-    SOURCE_SYSTEM_PRIVILEGES: Tuple[str, ...] = ("CREATE SESSION", "CREATE DATABASE LINK")
-    HISTORY_SYSTEM_PRIVILEGES: Tuple[str, ...] = ("CREATE SESSION",)
+    REQUIRED_SYSTEM_PRIVILEGES: Tuple[str, ...] = ("CREATE SESSION", "ALTER SESSION", "CREATE TABLE", "CREATE PROCEDURE", "CREATE TYPE", "CREATE DATABASE LINK", "CREATE SEQUENCE",
+                                                 "RESUMABLE", "ALTER USER", "CREATE SYNONYM", "CREATE VIEW", "CREATE ROLE", "CREATE TRIGGER", "CREATE MATERIALIZED VIEW",
+                                                 "QUERY REWRITE")
 
     @staticmethod
     def _format_identifier(name: str) -> str:
@@ -271,9 +263,7 @@ class OracleEngine(DatabaseEngine):
 
     @staticmethod
     def _get_database_default_tablespace(cursor: oracledb.Cursor) -> Optional[str]:  # type: ignore[valid-type]
-        cursor.execute(
-            "SELECT property_value FROM database_properties WHERE property_name = 'DEFAULT_PERMANENT_TABLESPACE'"
-        )
+        cursor.execute( "SELECT property_value FROM database_properties WHERE property_name = 'DEFAULT_PERMANENT_TABLESPACE'" ) # type: ignore
         row = cursor.fetchone()
         if row and row[0]:
             return OracleEngine._format_identifier(str(row[0]))
@@ -281,10 +271,7 @@ class OracleEngine(DatabaseEngine):
 
     @staticmethod
     def _get_user_default_tablespace(cursor: oracledb.Cursor, username: str) -> Optional[str]:  # type: ignore[valid-type]
-        cursor.execute(
-            "SELECT default_tablespace FROM dba_users WHERE username = :username",
-            username=username,
-        )
+        cursor.execute( "SELECT default_tablespace FROM dba_users WHERE username = :username", username=username ) # type: ignore
         row = cursor.fetchone()
         if row and row[0]:
             return OracleEngine._format_identifier(str(row[0]))
@@ -297,7 +284,7 @@ class OracleEngine(DatabaseEngine):
         if not tablespace:
             return False
         tablespace_name = OracleEngine._format_identifier(tablespace)
-        cursor.execute(
+        cursor.execute( # type: ignore
             """
             SELECT max_bytes
               FROM dba_ts_quotas
@@ -310,9 +297,7 @@ class OracleEngine(DatabaseEngine):
         row = cursor.fetchone()
         if row and row[0] == -1:
             return False
-        cursor.execute(
-            f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}"
-        )  # type: ignore[arg-type]
+        cursor.execute( f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}" )  # type: ignore[arg-type]
         return True
 
     @staticmethod
@@ -749,9 +734,7 @@ end;"""
                     has_role = OracleEngine._user_has_role(cursor, username, role_name)
                     if requires_admin_option:
                         if not has_role or not OracleEngine._user_has_role_with_admin_option(cursor, username, role_name):
-                            cursor.execute(
-                                f"GRANT {role_name} TO {username} WITH ADMIN OPTION"
-                            )  # type: ignore[arg-type]
+                            cursor.execute( f"GRANT {role_name} TO {username} WITH ADMIN OPTION" )  # type: ignore[arg-type]
                             changed = True
                     elif not has_role:
                         cursor.execute(f"GRANT {role_name} TO {username}")  # type: ignore[arg-type]
@@ -759,6 +742,7 @@ end;"""
                 for privilege in user.system_privileges:
                     privilege_name = privilege.upper()
                     if not OracleEngine._user_has_sys_priv(cursor, username, privilege_name):
+                        logger.debug(f"Granting system privilege {privilege_name} to user {username}")
                         cursor.execute(f"GRANT {privilege_name} TO {username}")  # type: ignore[arg-type]
                         changed = True
                 if OracleEngine._ensure_unlimited_quota(cursor, username, tablespace_for_quota):
@@ -788,18 +772,14 @@ end;"""
                 table_name = OracleEngine._format_identifier(table.name)
                 if not OracleEngine._table_exists(cursor, owner, table_name):
                     columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-                    cursor.execute(
-                        f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
-                    )  # type: ignore[arg-type]
+                    cursor.execute( f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )" )  # type: ignore[arg-type]
                     created.append(f"{owner}.{table_name}")
                     changed = True
                 if table.primary_key:
                     pk_name = OracleEngine._format_identifier(f"{table.name}_pk")
                     if not OracleEngine._constraint_exists(cursor, owner, pk_name):
                         cols = ", ".join(OracleEngine._format_identifier(col) for col in table.primary_key)
-                        cursor.execute(
-                            f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({cols})"
-                        )  # type: ignore[arg-type]
+                        cursor.execute( f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({cols})" )  # type: ignore[arg-type]
                         changed = True
                 for index in table.indexes:
                     idx_name = OracleEngine._format_identifier(index.name)
@@ -807,9 +787,7 @@ end;"""
                         continue
                     cols = ", ".join(OracleEngine._format_identifier(col) for col in index.columns)
                     unique_kw = "UNIQUE " if index.unique else ""
-                    cursor.execute(
-                        f"CREATE {unique_kw}INDEX {owner}.{idx_name} ON {owner}.{table_name} ({cols})"
-                    )  # type: ignore[arg-type]
+                    cursor.execute( f"CREATE {unique_kw}INDEX {owner}.{idx_name} ON {owner}.{table_name} ({cols})" )  # type: ignore[arg-type]
                     changed = True
             if changed:
                 conn.commit()
@@ -883,9 +861,7 @@ end;"""
                 username = OracleEngine._format_identifier(link.username)
                 password = OracleEngine._quote_password(link.password)
                 dsn_literal = OracleEngine._quote_literal(link.dsn)
-                cursor.execute(
-                    f"CREATE DATABASE LINK {link_name} CONNECT TO {username} IDENTIFIED BY {password} USING {dsn_literal}"
-                )  # type: ignore[arg-type]
+                cursor.execute(f"CREATE DATABASE LINK {link_name} CONNECT TO {username} IDENTIFIED BY {password} USING {dsn_literal}")  # type: ignore[arg-type]
                 created.append(link_name)
                 changed = True
             if changed:
@@ -923,9 +899,7 @@ end;"""
             if cursor:
                 try:
                     if previous_schema and previous_schema.upper() != owner_name:
-                        cursor.execute(
-                            f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(previous_schema)}"
-                        )  # type: ignore[arg-type]
+                        cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(previous_schema)}")  # type: ignore[arg-type]
                 finally:
                     cursor.close()
 
