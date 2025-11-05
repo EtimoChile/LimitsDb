@@ -8,6 +8,42 @@ from terminusdb.core.tdb_config_loader import load_ilm_config
 _id_counter = 0
 _loaded_tables: Set[Tuple[str, str]] = set()
 
+_VALID_ROOT_KEYS: Set[str] = {"tables"}
+
+_VALID_TABLE_KEYS: Set[str] = {
+    "source_owner",
+    "history_owner",
+    "table_name",
+    "retain_months_source",
+    "retain_months_history",
+    "exec_day",
+    "frecuency",
+    "purge_date_expr",
+    "additional_filter_expr",
+    "history_addtl_filter_expr",
+    "orphan_check_column",
+    "referencing_tables",
+    "join_expr",
+    "hint_expr",
+    "long_columns",
+    "source_orphan_purge",
+    "has_lob_columns",
+}
+
+_VALID_COND_KEYS: Set[str] = _VALID_TABLE_KEYS | {"is_active"}
+
+
+def _assert_valid_keys(keys: Set[str], *, where: str, allowed: Set[str]) -> None:
+    """Raise if any key in `keys` is not present in `allowed`."""
+    invalid = sorted(k for k in keys if k not in allowed)
+    if invalid:
+        allowed_sorted = ", ".join(sorted(allowed))
+        invalid_sorted = ", ".join(invalid)
+        raise KeyError(
+            f"Invalid key(s) in ILM config at {where}: {invalid_sorted}. "
+            f"Expected only: {allowed_sorted}"
+        )
+
 def _normalize_bool(val: Any) -> Any:
     return 'Y' if val else 'N' if val is not None else None
 
@@ -82,11 +118,14 @@ def load_rows_from_yaml(yaml_path: str) -> List[Dict[str, Any]]:
     with open(yaml_path, "r", encoding="utf-8") as f:
         data_any: Any = yaml.safe_load(f)
     data: Dict[str, Any] = _ensure_mapping(data_any, yaml_path)
+    _assert_valid_keys(set(data.keys()), where=f"{yaml_path} (root)", allowed=_VALID_ROOT_KEYS)
 
     rows: List[Dict[str, Any]] = []
     tables: List[Dict[str, Any]] = _ensure_list_of_mappings(data.get("tables"), "tables")
 
-    for table in tables:
+    for idx, table in enumerate(tables):
+        table_keys = set(table.keys()) - {"conds"}
+        _assert_valid_keys(table_keys, where=f"{yaml_path} tables[{idx}]", allowed=_VALID_TABLE_KEYS)
         owner: str = str(table.get("source_owner", "") or "")
         table_name: str = str(table.get("table_name", "") or "")
         if (owner, table_name) in _loaded_tables:
@@ -98,7 +137,12 @@ def load_rows_from_yaml(yaml_path: str) -> List[Dict[str, Any]]:
         if not conds:
             conds = [{"is_active": True}]
 
-        active_conds: List[Dict[str, Any]] = [cd for cd in conds if bool(cd.get("is_active")) is True]
+        active_conds: List[Dict[str, Any]] = []
+        for c_idx, cond in enumerate(conds):
+            _assert_valid_keys(set(cond.keys()), where=f"{yaml_path} tables[{idx}].conds[{c_idx}]", allowed=_VALID_COND_KEYS)
+            if bool(cond.get("is_active")) is True:
+                active_conds.append(cond)
+
         for cond in active_conds:
             rows.append(normalize_table_row(table, cond))
 
@@ -116,8 +160,11 @@ def resolve_and_load_ilm_rows(*, schema: str, profile: Optional[str], config_dir
     global _loaded_tables, _id_counter
     _loaded_tables = set()
     _id_counter = 0
+    _assert_valid_keys(set(ilm_dict.keys()), where=f"ILM config for schema={schema} profile={profile} (root)", allowed=_VALID_ROOT_KEYS)
     tables: List[Dict[str, Any]] = _ensure_list_of_mappings(ilm_dict.get("tables"), "tables")
-    for table in tables:
+    for idx, table in enumerate(tables):
+        table_keys = set(table.keys()) - {"conds"}
+        _assert_valid_keys(table_keys, where=f"ILM config tables[{idx}] (schema={schema} profile={profile})", allowed=_VALID_TABLE_KEYS)
         owner: str = str(table.get("source_owner", "") or "")
         table_name: str = str(table.get("table_name", "") or "")
         if (owner, table_name) in _loaded_tables:
@@ -126,7 +173,11 @@ def resolve_and_load_ilm_rows(*, schema: str, profile: Optional[str], config_dir
         conds: List[Dict[str, Any]] = _ensure_list_of_mappings(conds_any, "conds") if conds_any is not None else []
         if not conds:
             conds = [{"is_active": True}]
-        active_conds: List[Dict[str, Any]] = [cd for cd in conds if bool(cd.get("is_active")) is True]
+        active_conds: List[Dict[str, Any]] = []
+        for c_idx, cond in enumerate(conds):
+            _assert_valid_keys(set(cond.keys()), where=f"ILM config tables[{idx}].conds[{c_idx}] (schema={schema} profile={profile})", allowed=_VALID_COND_KEYS)
+            if bool(cond.get("is_active")) is True:
+                active_conds.append(cond)
         for cond in active_conds:
             rows.append(normalize_table_row(table, cond))
         if active_conds:

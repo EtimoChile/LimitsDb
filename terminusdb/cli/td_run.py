@@ -51,7 +51,7 @@ def run_cli() -> None:
         reconfigure_logger(level=config.log_level)
         logger.debug("Effective config: %s", _mask_secrets(config.to_dict()))
         tdb_run(config)
-    except ValueError as exc:
+    except (ValueError, KeyError) as exc:
         logger.error("%s", exc)
         raise SystemExit(1)
 

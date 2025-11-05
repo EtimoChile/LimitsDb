@@ -423,9 +423,6 @@ def tdb_run(config: Config) -> None:
                 _ensure_history_tables(config, engine, admin_connection, tables_config)
             rc = tdb_exec_ilm(config, tables_config, process_date, engine, connection)
         raise SystemExit(rc)
-    except Exception:
-        logger.critical("Error:", exc_info=True)
-        raise Exception
     finally:
         if engine and connection:
             engine.close_connection(connection)
