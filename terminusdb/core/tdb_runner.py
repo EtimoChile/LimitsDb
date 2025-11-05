@@ -317,11 +317,12 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                 else:
                     ref_owner, ref_table_name = tdb_cnf_row["cnf_source_owner"], ref_table # type: ignore
                 ref_table_name, alias = ref_table_name.split(" ")
-                if (ref_owner.upper(), ref_table_name.upper()) not in tables_config:
+                if (ref_owner.upper(), ref_table_name.upper()) not in tables_config: # type: ignore
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in tdb_conf_rows")
-                alias_map[alias] = (ref_owner.upper(), ref_table_name.upper())
-                ref_conds = tables_config[(ref_owner.upper(), ref_table_name.upper())]["conds"]
+                alias_map[alias] = (ref_owner.upper(), ref_table_name.upper()) # type: ignore
+                ref_conds = tables_config[(ref_owner.upper(), ref_table_name.upper())]["conds"] # type: ignore
                 added_conds.extend([(alias, cond) for cond in ref_conds])
+        logger.debug(f"Table {key} has {added_conds} contributing conditions from itself and referencing tables.")
         for al, cd in added_conds:
             cond_list: List[str] = []
             pld_expr = nvl(cd["cnf_purge_date_expr"], "")
@@ -363,7 +364,10 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
             continue
         table_cnf["skip"] = False
         # get where expression from cond_expr of all added_conds joined by " or "
+        if config.action == "SOURCE_ILM" and not any(cd["cond_expr"] for _, cd in added_conds):
+            raise ValueError(f"At least one condition must be specified for SOURCE_ILM on table {key}")
         where_expr = "\n   or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
+        logger.debug(f"Final WHERE expression for table {key}:\n{where_expr}")
         table_cnf["other_cols_exprs"] = []
         table_cnf["other_cols_alias"] = []
         table_cnf["alias_map"] = alias_map
@@ -375,15 +379,13 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                     if f"tdb_date_{al}" not in table_cnf["other_cols_alias"] and cd["cnf_purge_date_expr"]:
                         table_cnf["other_cols_exprs"].append(nvl(cd["cnf_purge_date_expr"], "").replace('@', al+".")+f" tdb_date_{al}") # type: ignore
                         table_cnf["other_cols_alias"].append(f"tdb_date_{al}") # type: ignore
-                        table_cnf["derived_columns"].append({"name": f"tdb_date_{al}", "data_type": "date"})
+                        table_cnf["derived_columns"].append({"name": f"tdb_date_{al}", "data_type": "date"}) # type: ignore
                     # Add columns in cnf_history_addtl_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
                     for col in [match[0] for match in re.findall(r'@("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)', cd["addtl_history_expr"])]:
                         if col not in table_cnf["other_cols_alias"]:
                             table_cnf["other_cols_exprs"].append(al+'.'+col) # type: ignore
                             table_cnf["other_cols_alias"].append(col) # type: ignore
-                            table_cnf["derived_columns"].append(
-                                {"name": col, "source_alias": al, "lookup": _normalize_column_lookup(col)}
-                            )
+                            table_cnf["derived_columns"].append( {"name": col, "source_alias": al, "lookup": _normalize_column_lookup(col)} ) # type: ignore
         cnf_source_owner, cnf_table_name = key
         cnf_join_expr, cnf_source_orphan_purge = cnd0["cnf_join_expr"], cnd0["cnf_source_orphan_purge"]
         # get the columns names from DB for cnf_table_name and cnf_source_owner
