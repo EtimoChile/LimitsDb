@@ -708,7 +708,6 @@ end;"""
     def _get_primary_key_info(
         cursor: oracledb.Cursor, owner: str, table_name: str
     ) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:  # type: ignore[valid-type]
-    ) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:  # type: ignore[valid-type]
         logger.debug(f"Retrieving primary key info for {owner}.{table_name} cursor: {cursor}")
         cursor.execute(  # type: ignore
             """
@@ -717,7 +716,8 @@ end;"""
              WHERE owner = :1
                AND table_name = :2
                AND constraint_type = 'P'
-            """,
+            """, [owner, table_name]
+        )
         cursor.execute(  # type: ignore
             """
             SELECT constraint_name, index_name
