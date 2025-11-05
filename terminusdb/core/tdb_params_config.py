@@ -18,7 +18,7 @@ logger = get_logger("params_config")
 class Config:
     #Execution mode parameters
     action: Annotated[Literal["SOURCE_ILM", "HISTORY_ILM"], Help("ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)"), Cli("--action"), Env("TDB_ACTION")] = "SOURCE_ILM"
-    mode: Annotated[Literal["ALL", "QUERY_ONLY"], Help("Run everything (ALL) or only generate queries (QUERY_ONLY)"), Cli("--mode"), Env("TDB_MODE")] = "ALL"
+    mode: Annotated[Literal["EXECUTE", "DRY_RUN"], Help("Run everything (EXECUTE) or only generate queries (DRY_RUN)"), Cli("--mode"), Env("TDB_MODE")] = "DRY_RUN"
     chunk_size: Annotated[int, Help("Rows per chunk when processing large tables"), Cli("--chunk-size"), Env("TDB_CHUNK_SIZE")] = 100000
     use_added_columns: Annotated[bool, Help("Populate derived columns in history tables")] = True
     add_tdb_columns: Annotated[bool, Help("Add TerminusDB execution-date columns in history tables")] = True

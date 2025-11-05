@@ -479,7 +479,7 @@ class OracleEngine(DatabaseEngine):
     l_history_owner varchar2(50) := '{history_owner}';
     l_action varchar2(10) := '{config.action}';
     l_mode varchar2(10) := '{config.mode}';
-    l_message varchar2(200) := case when l_mode = 'ALL' then null else 'QUERY ONLY' end;
+    l_message varchar2(200) := case when l_mode = 'EXECUTE' then null else 'DRY RUN' end;
     l_table_name varchar2(50) := '{table_name}';
     l_process_date date := to_date('{process_date}', 'YYYYMMDD');
     l_referencing_tables t_referencing_tables := t_referencing_tables({referencing_tables});
@@ -514,7 +514,7 @@ begin
         if r_rec.count <= 0 then
             exit;
         end if;"""
-            if (config.mode == "ALL"):
+            if (config.mode == "EXECUTE"):
                 if source_ilm and nvl(months_keep_history_max, 1) > 0:
                     plsql += f"""
         for i in 1 .. r_rec.count loop
@@ -533,7 +533,7 @@ begin
     close c_records;"""
         else:
             cols_select = ", ".join([f"a.{col}" for col in table_columns] + other_cols_exprs + gend_vals)
-            if config.mode == "ALL":
+            if config.mode == "EXECUTE":
                 if source_ilm and nvl(months_keep_history_max,0) > 0:
                     plsql += f"""
     insert into {history_owner.lower()}.{table_name.lower()}@{config.source_to_history_dblink_name}({indent_lines(ins_cols,4)})
