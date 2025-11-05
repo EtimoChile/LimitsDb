@@ -772,7 +772,67 @@ end;"""
             owner_name = OracleEngine._format_identifier(owner)
             table = OracleEngine._format_identifier(table_name)
             _, columns, _ = OracleEngine._get_primary_key_info(cursor, owner_name, table)
-            return tuple(col.lower() for col in columns)
+            if columns:
+                return tuple(col.lower() for col in columns)
+
+            cursor.execute(
+                """
+                SELECT i.index_name,
+                       i.uniqueness,
+                       c.column_name,
+                       s.distinct_keys
+                  FROM dba_indexes i
+                  JOIN dba_ind_columns c
+                    ON i.owner = c.index_owner
+                   AND i.index_name = c.index_name
+             LEFT JOIN dba_ind_statistics s
+                    ON s.owner = i.owner
+                   AND s.index_name = i.index_name
+                   AND s.partition_name IS NULL
+                 WHERE i.owner = :owner
+                   AND i.table_name = :table_name
+                 ORDER BY i.index_name, c.column_position
+                """,
+                owner=owner_name,
+                table_name=table,
+            )
+            indexes: Dict[str, Dict[str, Any]] = {}
+            for index_name, uniqueness, column_name, distinct_keys in cursor.fetchall():
+                formatted_index = OracleEngine._format_identifier(index_name)
+                formatted_column = OracleEngine._format_identifier(column_name)
+                index_info = indexes.setdefault(
+                    formatted_index,
+                    {
+                        "columns": [],
+                        "unique": uniqueness == "UNIQUE",
+                        "distinct_keys": None,
+                    },
+                )
+                index_info["columns"].append(formatted_column)
+                if distinct_keys is not None:
+                    try:
+                        index_info["distinct_keys"] = int(distinct_keys)
+                    except (TypeError, ValueError):
+                        try:
+                            index_info["distinct_keys"] = int(float(distinct_keys))
+                        except (TypeError, ValueError):
+                            index_info["distinct_keys"] = index_info.get("distinct_keys")
+            if not indexes:
+                return ()
+            all_columns = {
+                col
+                for info in indexes.values()
+                for col in info.get("columns", [])
+            }
+            column_metadata = (
+                OracleEngine._get_columns_metadata(cursor, owner_name, table, list(all_columns))
+                if all_columns
+                else {}
+            )
+            chosen = OracleEngine._choose_best_index_for_primary_key(indexes, column_metadata)
+            if not chosen:
+                return ()
+            return tuple(col.lower() for col in chosen)
         finally:
             if cursor:
                 cursor.close()
@@ -838,6 +898,114 @@ end;"""
             name: (tuple(info["columns"]), bool(info["unique"]))
             for name, info in indexes.items()
         }
+
+    @staticmethod
+    def _determine_process_date_column(table: TableDefinition) -> Optional[str]:
+        available_columns = {
+            OracleEngine._format_identifier(column.name)
+            for column in table.columns
+        }
+        for candidate in ("TDD_PROCESS_DATE", "TDB_PROCESS_DATE"):
+            if candidate in available_columns:
+                return candidate
+        return None
+
+    @staticmethod
+    def _prepare_desired_indexes(
+        table: TableDefinition,
+    ) -> Dict[str, Tuple[Tuple[str, ...], bool]]:
+        desired_pk = tuple(
+            OracleEngine._format_identifier(col)
+            for col in (table.primary_key or ())
+        )
+        process_date_column = OracleEngine._determine_process_date_column(table)
+        desired_indexes: Dict[str, Tuple[Tuple[str, ...], bool]] = {}
+        for index in table.indexes:
+            name = OracleEngine._format_identifier(index.name)
+            columns = tuple(
+                OracleEngine._format_identifier(col) for col in index.columns
+            )
+            if (
+                process_date_column
+                and process_date_column not in columns
+                and (not desired_pk or columns != desired_pk)
+            ):
+                columns = columns + (process_date_column,)
+            desired_indexes[name] = (columns, index.unique)
+        return desired_indexes
+
+    @staticmethod
+    def _choose_best_index_for_primary_key(
+        indexes: Dict[str, Dict[str, Any]],
+        column_metadata: Dict[str, ColumnDefinition],
+    ) -> Optional[Tuple[str, ...]]:
+        candidates: List[Dict[str, Any]] = []
+
+        for index_name, info in indexes.items():
+            columns_upper: Sequence[str] = info.get("columns", [])
+            if not columns_upper:
+                continue
+            column_defs: List[ColumnDefinition] = []
+            for col in columns_upper:
+                lookup = OracleEngine._normalize_identifier_for_lookup(col).lower()
+                column_def = column_metadata.get(lookup)
+                if column_def is None:
+                    column_defs = []
+                    break
+                column_defs.append(column_def)
+            if not column_defs:
+                continue
+            candidates.append(
+                {
+                    "name": index_name,
+                    "columns": tuple(col.name for col in column_defs),
+                    "unique": bool(info.get("unique")),
+                    "distinct_keys": info.get("distinct_keys"),
+                    "all_not_null": all(not col.nullable for col in column_defs),
+                }
+            )
+
+        if not candidates:
+            return None
+
+        def score(value: Any) -> int:
+            if value is None:
+                return -1
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return -1
+
+        def choose(candidate_list: List[Dict[str, Any]]) -> Optional[Tuple[str, ...]]:
+            if not candidate_list:
+                return None
+            ordered = sorted(
+                candidate_list,
+                key=lambda item: (
+                    -score(item.get("distinct_keys")),
+                    len(item["columns"]),
+                    item["name"],
+                ),
+            )
+            best = ordered[0]
+            return tuple(best["columns"])
+
+        not_null_unique = [c for c in candidates if c["unique"] and c["all_not_null"]]
+        choice = choose(not_null_unique)
+        if choice:
+            return choice
+
+        unique_candidates = [c for c in candidates if c["unique"]]
+        choice = choose(unique_candidates)
+        if choice:
+            return choice
+
+        non_unique = [c for c in candidates if not c["unique"]]
+        return choose(non_unique)
 
     @staticmethod
     def _drop_constraints_by_type(
@@ -1060,13 +1228,7 @@ end;"""
                     changed = True
                 changed = True
             existing_indexes = OracleEngine._get_table_indexes(cursor, owner, table_name)
-            desired_indexes: Dict[str, Tuple[Tuple[str, ...], bool]] = {
-                OracleEngine._format_identifier(index.name): (
-                    tuple(OracleEngine._format_identifier(col) for col in index.columns),
-                    index.unique,
-                )
-                for index in table.indexes
-            }
+            desired_indexes = OracleEngine._prepare_desired_indexes(table)
             for index_name, (columns, is_unique) in desired_indexes.items():
                 existing_index = existing_indexes.get(index_name)
                 if existing_index == (columns, is_unique):
