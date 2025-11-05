@@ -21,6 +21,7 @@ _VALID_TABLE_KEYS: Set[str] = {
     "purge_date_expr",
     "additional_filter_expr",
     "history_addtl_filter_expr",
+    "history_hint_expr",
     "orphan_check_column",
     "referencing_tables",
     "join_expr",
@@ -66,7 +67,7 @@ def normalize_table_row(table: Dict[str, Any], cond: Dict[str, Any]) -> Dict[str
     for key in [
         "source_owner", "history_owner", "table_name", "retain_months_source", "retain_months_history",
         "exec_day", "frecuency", "purge_date_expr", "additional_filter_expr",
-        "history_addtl_filter_expr", "orphan_check_column", "referencing_tables", "join_expr",
+        "history_addtl_filter_expr", "history_hint_expr", "orphan_check_column", "referencing_tables", "join_expr",
         "hint_expr", "long_columns",
     ]:
         if "cnf_" + key not in row:

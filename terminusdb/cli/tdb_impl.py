@@ -99,6 +99,7 @@ def _build_control_tables(owner: str) -> List[TableDefinition]:
                 ColumnDefinition("cnf_referencing_tables", "string", length=200),
                 ColumnDefinition("cnf_join_expr", "string", length=4000),
                 ColumnDefinition("cnf_hint_expr", "string", length=4000),
+                ColumnDefinition("cnf_history_hint_expr", "string", length=4000),
                 ColumnDefinition("cnf_long_columns", "string", length=4000),
             ),
             primary_key=("cnf_id",),

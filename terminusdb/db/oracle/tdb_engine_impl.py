@@ -417,7 +417,7 @@ class OracleEngine(DatabaseEngine):
                 """SELECT cnf_id, cnf_source_owner, cnf_history_owner, cnf_table_name, cnf_retain_months_source,
                        cnf_retain_months_history, cnf_exec_day, cnf_frecuency, cnf_is_active, cnf_purge_date_expr,
                        cnf_additional_filter_expr, cnf_history_addtl_filter_expr, cnf_source_orphan_purge, cnf_orphan_check_column, cnf_has_lob_columns,
-                       cnf_referencing_tables, cnf_join_expr, cnf_hint_expr, cnf_long_columns, null ctl_status
+                       cnf_referencing_tables, cnf_join_expr, cnf_hint_expr, cnf_history_hint_expr, cnf_long_columns, null ctl_status
                 FROM tdb_conf
                 WHERE cnf_is_active = 'Y'""")
             cols = [col[0].lower() for col in cursor.description] # type: ignore
@@ -461,7 +461,11 @@ class OracleEngine(DatabaseEngine):
             PL/SQL block as string."""
         cnd0 = table_cnf["conds"][0]
         source_owner, history_owner, table_name = cnd0["cnf_source_owner"], cnd0["cnf_history_owner"], cnd0["cnf_table_name"]
-        hint_expr, has_lob_columns = cnd0["cnf_hint_expr"], cnd0["cnf_has_lob_columns"] == 'Y'
+        history_hint_expr = cnd0.get("cnf_history_hint_expr")
+        hint_expr = cnd0["cnf_hint_expr"]
+        if config.action == "HISTORY_ILM":
+            hint_expr = nvl(history_hint_expr, hint_expr)
+        has_lob_columns = cnd0["cnf_has_lob_columns"] == 'Y'
         other_cols_exprs, other_cols_alias, referencing_tables = table_cnf["other_cols_exprs"], table_cnf["other_cols_alias"], table_cnf["referencing_tables"]
         query_expr, table_columns, months_keep_history_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_history_max"]
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
