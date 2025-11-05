@@ -707,24 +707,41 @@ end;"""
     @staticmethod
     def _get_primary_key_info(
         cursor: oracledb.Cursor, owner: str, table_name: str
-    ) -> Tuple[Optional[str], Tuple[str, ...]]:  # type: ignore[valid-type]
+    ) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:  # type: ignore[valid-type]
+    ) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:  # type: ignore[valid-type]
         logger.debug(f"Retrieving primary key info for {owner}.{table_name} cursor: {cursor}")
-        cursor.execute( # type: ignore
-            "SELECT constraint_name FROM dba_constraints WHERE owner = :1 AND table_name = :2 AND constraint_type = 'P'",
+        cursor.execute(  # type: ignore
+            """
+            SELECT constraint_name, index_name
+              FROM dba_constraints
+             WHERE owner = :1
+               AND table_name = :2
+               AND constraint_type = 'P'
+            """,
+        cursor.execute(  # type: ignore
+            """
+            SELECT constraint_name, index_name
+              FROM dba_constraints
+             WHERE owner = :1
+               AND table_name = :2
+               AND constraint_type = 'P'
+            """,
             [owner, table_name],
         )
         row = cursor.fetchone()
         if not row:
-            return None, ()
-        constraint_name = row[0]
-        logger.debug(f"Found primary key constraint {constraint_name} for {owner}.{table_name}")
+            return None, (), None
+        constraint_name, index_name = row
+        logger.debug(
+            f"Found primary key constraint {constraint_name} using index {index_name} for {owner}.{table_name}"
+        )
         cursor.execute( # type: ignore
             "SELECT column_name FROM dba_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
             [owner, constraint_name],
         )
         columns = tuple(r[0] for r in cursor.fetchall())
         logger.debug(f"Primary key columns for constraint {constraint_name} on {owner}.{table_name}: {columns}")
-        return constraint_name, columns
+        return constraint_name, columns, index_name
 
     @staticmethod
     def get_primary_key_columns(conn: oracledb.Connection, owner: str, table_name: str) -> Tuple[str, ...]:
@@ -733,7 +750,7 @@ end;"""
             cursor = conn.cursor()
             owner_name = OracleEngine._format_identifier(owner)
             table = OracleEngine._format_identifier(table_name)
-            _, columns = OracleEngine._get_primary_key_info(cursor, owner_name, table)
+            _, columns, _ = OracleEngine._get_primary_key_info(cursor, owner_name, table)
             return tuple(col.lower() for col in columns)
         finally:
             if cursor:
@@ -771,6 +788,64 @@ end;"""
         return False
 
     @staticmethod
+    def _get_table_indexes(
+        cursor: oracledb.Cursor, owner: str, table_name: str
+    ) -> Dict[str, Tuple[Tuple[str, ...], bool]]:  # type: ignore[valid-type]
+        cursor.execute(  # type: ignore[arg-type]
+            """
+            SELECT i.index_name, i.uniqueness, c.column_name
+              FROM dba_indexes i
+              JOIN dba_ind_columns c
+                ON i.owner = c.index_owner
+               AND i.index_name = c.index_name
+             WHERE i.owner = :owner
+               AND i.table_name = :table_name
+             ORDER BY i.index_name, c.column_position
+            """,
+            owner=owner,
+            table_name=table_name,
+        )
+        indexes: Dict[str, Dict[str, Any]] = {}
+        for index_name, uniqueness, column_name in cursor.fetchall():
+            formatted_index = OracleEngine._format_identifier(index_name)
+            formatted_column = OracleEngine._format_identifier(column_name)
+            index_info = indexes.setdefault(
+                formatted_index, {"columns": [], "unique": uniqueness == "UNIQUE"}
+            )
+            index_info["columns"].append(formatted_column)
+        return {
+            name: (tuple(info["columns"]), bool(info["unique"]))
+            for name, info in indexes.items()
+        }
+
+    @staticmethod
+    def _drop_constraints_by_type(
+        cursor: oracledb.Cursor, owner: str, table_name: str, constraint_types: Sequence[str]
+    ) -> List[str]:  # type: ignore[valid-type]
+        dropped: List[str] = []
+        if not constraint_types:
+            return dropped
+        type_list = ", ".join(f"'{constraint_type}'" for constraint_type in constraint_types)
+        cursor.execute(  # type: ignore[arg-type]
+            f"""
+            SELECT constraint_name
+              FROM dba_constraints
+             WHERE owner = :owner
+               AND table_name = :table_name
+               AND constraint_type IN ({type_list})
+            """,
+            owner=owner,
+            table_name=table_name,
+        )
+        for (constraint_name,) in cursor.fetchall():
+            formatted_constraint = OracleEngine._format_identifier(constraint_name)
+            cursor.execute(  # type: ignore[arg-type]
+                f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {formatted_constraint}"
+            )
+            dropped.append(formatted_constraint)
+        return dropped
+
+    @staticmethod
     def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition) -> None:
         cursor: Optional[oracledb.Cursor] = None
         changed = False
@@ -781,6 +856,7 @@ end;"""
             cursor = conn.cursor()
             if not OracleEngine._table_exists(cursor, owner, table_name):
                 columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+                logger.info("Creating table %s.%s with columns %s", owner, table_name, columns_sql)
                 cursor.execute( # type: ignore
                     f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
                 )
@@ -790,6 +866,13 @@ end;"""
                 for column in table.columns:
                     lookup = OracleEngine._normalize_identifier_for_lookup(column.name).lower()
                     if lookup not in existing_columns:
+                        logger.info(
+                            "Adding column %s to table %s.%s with definition %s",
+                            OracleEngine._format_identifier(column.name),
+                            owner,
+                            table_name,
+                            OracleEngine._column_sql(column),
+                        )
                         cursor.execute( # type: ignore
                             f"ALTER TABLE {owner}.{table_name} ADD ({OracleEngine._column_sql(column)})"
                         )
@@ -797,43 +880,208 @@ end;"""
                     else:
                         existing = existing_columns[lookup]
                         if OracleEngine._column_needs_update(existing, column):
+                            logger.info(
+                                "Modifying column %s on table %s.%s to definition %s",
+                                OracleEngine._format_identifier(column.name),
+                                owner,
+                                table_name,
+                                OracleEngine._column_sql(column),
+                            )
                             cursor.execute(
                                 f"ALTER TABLE {owner}.{table_name} MODIFY ({OracleEngine._column_sql(column)})"
                             )  # type: ignore[arg-type]
                             changed = True
+            dropped_constraints = OracleEngine._drop_constraints_by_type(
+                cursor, owner, table_name, ("U", "R")
+            )
+            if dropped_constraints:
+                logger.debug(
+                    "Dropped constraints %s on %s.%s",
+                    dropped_constraints,
+                    owner,
+                    table_name,
+                )
+                changed = True
+            existing_indexes = OracleEngine._get_table_indexes(cursor, owner, table_name)
             desired_pk = tuple(
                 OracleEngine._format_identifier(col) for col in (table.primary_key or ())
             )
-            existing_pk_name, existing_pk_cols = OracleEngine._get_primary_key_info(cursor, owner, table_name)
-            logger.debug(f"Existing PK info for {owner}.{table_name}: name={existing_pk_name}, cols={existing_pk_cols}")
+            existing_pk_name, existing_pk_cols, existing_pk_index = OracleEngine._get_primary_key_info(
+                cursor, owner, table_name
+            )
             existing_pk_cols_fmt = tuple(OracleEngine._format_identifier(col) for col in existing_pk_cols)
+            existing_pk_index_fmt = (
+                OracleEngine._format_identifier(existing_pk_index) if existing_pk_index else None
+            )
             desired_constraint_name = OracleEngine._format_identifier(f"{table.name}_pk")
-            logger.debug(f"Existing PK for {owner}.{table_name}: {existing_pk_name} ({existing_pk_cols_fmt}) desired: {desired_pk} ({desired_constraint_name})")
             if desired_pk:
                 if not existing_pk_cols_fmt:
-                    logger.debug(f"Adding PK constraint {desired_constraint_name} on {owner}.{table_name} for columns {desired_pk}")
+                    logger.info(
+                        "Adding primary key constraint %s on %s.%s for columns %s",
+                        desired_constraint_name,
+                        owner,
+                        table_name,
+                        desired_pk,
+                    )
+                    existing_index_info = existing_indexes.get(desired_constraint_name)
+                    if existing_index_info and (
+                        existing_index_info[0] != desired_pk or not existing_index_info[1]
+                    ):
+                        logger.info(
+                            "Dropping conflicting index %s on %s.%s before creating primary key",
+                            desired_constraint_name,
+                            owner,
+                            table_name,
+                        )
+                        cursor.execute(  # type: ignore[arg-type]
+                            f"DROP INDEX {owner}.{desired_constraint_name}"
+                        )
+                        existing_indexes.pop(desired_constraint_name, None)
+                        changed = True
                     cursor.execute( # type: ignore
                         f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
                     )
                     changed = True
                 elif existing_pk_cols_fmt != desired_pk:
-                    logger.debug(f"Updating PK constraint on {owner}.{table_name} to {desired_constraint_name} for columns {desired_pk}")
+                    logger.info(
+                        "Rebuilding primary key on %s.%s as %s for columns %s",
+                        owner,
+                        table_name,
+                        desired_constraint_name,
+                        desired_pk,
+                    )
                     if existing_pk_name:
-                        logger.debug(f"Dropping existing PK constraint {existing_pk_name} on {owner}.{table_name}")
+                        logger.info(
+                            "Dropping existing primary key constraint %s on %s.%s",
+                            existing_pk_name,
+                            owner,
+                            table_name,
+                        )
                         cursor.execute( # type: ignore
                             f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
                         )
+                        index_to_drop = existing_pk_index_fmt or existing_pk_name
+                        if index_to_drop in existing_indexes:
+                            logger.info(
+                                "Dropping index %s on %s.%s after removing primary key",
+                                index_to_drop,
+                                owner,
+                                table_name,
+                            )
+                            cursor.execute(  # type: ignore[arg-type]
+                                f"DROP INDEX {owner}.{index_to_drop}"
+                            )
+                            existing_indexes.pop(index_to_drop, None)
+                            changed = True
                         changed = True
-                    logger.debug(f"Adding PK constraint {desired_constraint_name} on {owner}.{table_name} for columns {desired_pk}")
+                    logger.info(
+                        "Adding primary key constraint %s on %s.%s for columns %s",
+                        desired_constraint_name,
+                        owner,
+                        table_name,
+                        desired_pk,
+                    )
+                    existing_index_info = existing_indexes.get(desired_constraint_name)
+                    if existing_index_info and (
+                        existing_index_info[0] != desired_pk or not existing_index_info[1]
+                    ):
+                        logger.info(
+                            "Dropping conflicting index %s on %s.%s before recreating primary key",
+                            desired_constraint_name,
+                            owner,
+                            table_name,
+                        )
+                        cursor.execute(  # type: ignore[arg-type]
+                            f"DROP INDEX {owner}.{desired_constraint_name}"
+                        )
+                        existing_indexes.pop(desired_constraint_name, None)
+                        changed = True
                     cursor.execute( # type: ignore
                         f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
                     )
                     changed = True
             elif existing_pk_cols_fmt and existing_pk_name:
+                logger.info(
+                    "Dropping existing primary key constraint %s on %s.%s because no primary key is expected",
+                    existing_pk_name,
+                    owner,
+                    table_name,
+                )
                 cursor.execute( # type: ignore
                     f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
                 )
+                index_to_drop = existing_pk_index_fmt or existing_pk_name
+                if index_to_drop in existing_indexes:
+                    logger.info(
+                        "Dropping index %s on %s.%s after removing unexpected primary key",
+                        index_to_drop,
+                        owner,
+                        table_name,
+                    )
+                    cursor.execute(  # type: ignore[arg-type]
+                        f"DROP INDEX {owner}.{index_to_drop}"
+                    )
+                    existing_indexes.pop(index_to_drop, None)
+                    changed = True
                 changed = True
+            existing_indexes = OracleEngine._get_table_indexes(cursor, owner, table_name)
+            desired_indexes: Dict[str, Tuple[Tuple[str, ...], bool]] = {
+                OracleEngine._format_identifier(index.name): (
+                    tuple(OracleEngine._format_identifier(col) for col in index.columns),
+                    index.unique,
+                )
+                for index in table.indexes
+            }
+            for index_name, (columns, is_unique) in desired_indexes.items():
+                existing_index = existing_indexes.get(index_name)
+                if existing_index == (columns, is_unique):
+                    continue
+                if existing_index is not None:
+                    logger.info(
+                        "Dropping index %s on %s.%s due to structural mismatch (expected columns %s unique=%s)",
+                        index_name,
+                        owner,
+                        table_name,
+                        columns,
+                        is_unique,
+                    )
+                    cursor.execute(  # type: ignore[arg-type]
+                        f"DROP INDEX {owner}.{index_name}"
+                    )
+                    changed = True
+                logger.info(
+                    "Creating %sindex %s on %s.%s for columns %s",
+                    "unique " if is_unique else "",
+                    index_name,
+                    owner,
+                    table_name,
+                    columns,
+                )
+                columns_sql = ", ".join(columns)
+                unique_clause = "UNIQUE " if is_unique else ""
+                cursor.execute(  # type: ignore[arg-type]
+                    f"CREATE {unique_clause}INDEX {owner}.{index_name} ON {owner}.{table_name} ({columns_sql})"
+                )
+                changed = True
+            final_pk_name, _, final_pk_index = OracleEngine._get_primary_key_info(cursor, owner, table_name)
+            expected_indexes = set(desired_indexes.keys())
+            if final_pk_name:
+                expected_indexes.add(final_pk_name)
+            if final_pk_index:
+                expected_indexes.add(OracleEngine._format_identifier(final_pk_index))
+            existing_indexes = OracleEngine._get_table_indexes(cursor, owner, table_name)
+            for index_name in list(existing_indexes.keys()):
+                if index_name not in expected_indexes:
+                    logger.info(
+                        "Dropping unmanaged index %s on %s.%s",
+                        index_name,
+                        owner,
+                        table_name,
+                    )
+                    cursor.execute(  # type: ignore[arg-type]
+                        f"DROP INDEX {owner}.{index_name}"
+                    )
+                    changed = True
             if changed:
                 conn.commit()
         except Exception:
