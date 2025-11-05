@@ -173,6 +173,7 @@ class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
 
     _supporting_objects_created: bool = False
+    _connection_envs: Dict[int, str] = {}
     REQUIRED_SYSTEM_PRIVILEGES: Tuple[str, ...] = ("CREATE SESSION", "ALTER SESSION", "CREATE TABLE", "CREATE PROCEDURE", "CREATE TYPE", "CREATE DATABASE LINK", "CREATE SEQUENCE",
                                                  "RESUMABLE", "ALTER USER", "CREATE SYNONYM", "CREATE VIEW", "CREATE ROLE", "CREATE TRIGGER", "CREATE MATERIALIZED VIEW",
                                                  "QUERY REWRITE")
@@ -304,7 +305,9 @@ class OracleEngine(DatabaseEngine):
         row = cursor.fetchone()
         if row and row[0] == -1:
             return False
-        cursor.execute( f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}" )  # type: ignore[arg-type]
+        sql = f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}"
+        OracleEngine._log_history_ddl(cursor.connection, sql)
+        cursor.execute(sql)  # type: ignore[arg-type]
         return True
 
     @staticmethod
@@ -340,6 +343,22 @@ class OracleEngine(DatabaseEngine):
         )
 
     @staticmethod
+    def _register_connection_env(conn: oracledb.Connection, env: Optional[str]) -> None:
+        if env:
+            OracleEngine._connection_envs[id(conn)] = env
+        else:
+            OracleEngine._connection_envs.pop(id(conn), None)
+
+    @staticmethod
+    def _get_connection_env(conn: oracledb.Connection) -> Optional[str]:
+        return OracleEngine._connection_envs.get(id(conn))
+
+    @staticmethod
+    def _log_history_ddl(conn: oracledb.Connection, statement: str) -> None:
+        if OracleEngine._get_connection_env(conn) == "HISTORY":
+            logger.info("Executing HISTORY DDL: %s", " ".join(statement.split()))
+
+    @staticmethod
     def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:  # type: ignore[valid-type]
         return OracleEngine._object_exists(
             cursor,
@@ -357,7 +376,9 @@ class OracleEngine(DatabaseEngine):
             An active oracledb.Connection."""
         try:
             user, password, dsn = get_effective_credentials(config, admin=admin, env=env)
-            return oracledb.connect(user=user, password=password, dsn=dsn) # type: ignore
+            connection = oracledb.connect(user=user, password=password, dsn=dsn)  # type: ignore
+            OracleEngine._register_connection_env(connection, env)
+            return connection
         except Exception:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
             raise
@@ -839,9 +860,9 @@ end;"""
         )
         for (constraint_name,) in cursor.fetchall():
             formatted_constraint = OracleEngine._format_identifier(constraint_name)
-            cursor.execute(  # type: ignore[arg-type]
-                f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {formatted_constraint}"
-            )
+            sql = f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {formatted_constraint}"
+            OracleEngine._log_history_ddl(cursor.connection, sql)
+            cursor.execute(sql)  # type: ignore[arg-type]
             dropped.append(formatted_constraint)
         return dropped
 
@@ -857,9 +878,9 @@ end;"""
             if not OracleEngine._table_exists(cursor, owner, table_name):
                 columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
                 logger.info("Creating table %s.%s with columns %s", owner, table_name, columns_sql)
-                cursor.execute( # type: ignore
-                    f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
-                )
+                sql = f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
+                OracleEngine._log_history_ddl(conn, sql)
+                cursor.execute(sql)  # type: ignore[arg-type]
                 changed = True
             else:
                 existing_columns = OracleEngine._get_columns_metadata(cursor, owner, table_name)
@@ -873,9 +894,9 @@ end;"""
                             table_name,
                             OracleEngine._column_sql(column),
                         )
-                        cursor.execute( # type: ignore
-                            f"ALTER TABLE {owner}.{table_name} ADD ({OracleEngine._column_sql(column)})"
-                        )
+                        sql = f"ALTER TABLE {owner}.{table_name} ADD ({OracleEngine._column_sql(column)})"
+                        OracleEngine._log_history_ddl(conn, sql)
+                        cursor.execute(sql)  # type: ignore[arg-type]
                         changed = True
                     else:
                         existing = existing_columns[lookup]
@@ -887,9 +908,9 @@ end;"""
                                 table_name,
                                 OracleEngine._column_sql(column),
                             )
-                            cursor.execute(
-                                f"ALTER TABLE {owner}.{table_name} MODIFY ({OracleEngine._column_sql(column)})"
-                            )  # type: ignore[arg-type]
+                            sql = f"ALTER TABLE {owner}.{table_name} MODIFY ({OracleEngine._column_sql(column)})"
+                            OracleEngine._log_history_ddl(conn, sql)
+                            cursor.execute(sql)  # type: ignore[arg-type]
                             changed = True
             dropped_constraints = OracleEngine._drop_constraints_by_type(
                 cursor, owner, table_name, ("U", "R")
@@ -933,14 +954,16 @@ end;"""
                             owner,
                             table_name,
                         )
-                        cursor.execute(  # type: ignore[arg-type]
-                            f"DROP INDEX {owner}.{desired_constraint_name}"
-                        )
+                        drop_sql = f"DROP INDEX {owner}.{desired_constraint_name}"
+                        OracleEngine._log_history_ddl(conn, drop_sql)
+                        cursor.execute(drop_sql)  # type: ignore[arg-type]
                         existing_indexes.pop(desired_constraint_name, None)
                         changed = True
-                    cursor.execute( # type: ignore
+                    add_pk_sql = (
                         f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
                     )
+                    OracleEngine._log_history_ddl(conn, add_pk_sql)
+                    cursor.execute(add_pk_sql)  # type: ignore[arg-type]
                     changed = True
                 elif existing_pk_cols_fmt != desired_pk:
                     logger.info(
@@ -957,9 +980,11 @@ end;"""
                             owner,
                             table_name,
                         )
-                        cursor.execute( # type: ignore
+                        drop_pk_sql = (
                             f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
                         )
+                        OracleEngine._log_history_ddl(conn, drop_pk_sql)
+                        cursor.execute(drop_pk_sql)  # type: ignore[arg-type]
                         index_to_drop = existing_pk_index_fmt or existing_pk_name
                         if index_to_drop in existing_indexes:
                             logger.info(
@@ -968,9 +993,9 @@ end;"""
                                 owner,
                                 table_name,
                             )
-                            cursor.execute(  # type: ignore[arg-type]
-                                f"DROP INDEX {owner}.{index_to_drop}"
-                            )
+                            drop_index_sql = f"DROP INDEX {owner}.{index_to_drop}"
+                            OracleEngine._log_history_ddl(conn, drop_index_sql)
+                            cursor.execute(drop_index_sql)  # type: ignore[arg-type]
                             existing_indexes.pop(index_to_drop, None)
                             changed = True
                         changed = True
@@ -991,14 +1016,16 @@ end;"""
                             owner,
                             table_name,
                         )
-                        cursor.execute(  # type: ignore[arg-type]
-                            f"DROP INDEX {owner}.{desired_constraint_name}"
-                        )
+                        drop_conflict_sql = f"DROP INDEX {owner}.{desired_constraint_name}"
+                        OracleEngine._log_history_ddl(conn, drop_conflict_sql)
+                        cursor.execute(drop_conflict_sql)  # type: ignore[arg-type]
                         existing_indexes.pop(desired_constraint_name, None)
                         changed = True
-                    cursor.execute( # type: ignore
+                    recreate_pk_sql = (
                         f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {desired_constraint_name} PRIMARY KEY ({', '.join(desired_pk)})"
                     )
+                    OracleEngine._log_history_ddl(conn, recreate_pk_sql)
+                    cursor.execute(recreate_pk_sql)  # type: ignore[arg-type]
                     changed = True
             elif existing_pk_cols_fmt and existing_pk_name:
                 logger.info(
@@ -1007,9 +1034,11 @@ end;"""
                     owner,
                     table_name,
                 )
-                cursor.execute( # type: ignore
+                drop_unexpected_pk_sql = (
                     f"ALTER TABLE {owner}.{table_name} DROP CONSTRAINT {existing_pk_name}"
                 )
+                OracleEngine._log_history_ddl(conn, drop_unexpected_pk_sql)
+                cursor.execute(drop_unexpected_pk_sql)  # type: ignore[arg-type]
                 index_to_drop = existing_pk_index_fmt or existing_pk_name
                 if index_to_drop in existing_indexes:
                     logger.info(
@@ -1018,9 +1047,9 @@ end;"""
                         owner,
                         table_name,
                     )
-                    cursor.execute(  # type: ignore[arg-type]
-                        f"DROP INDEX {owner}.{index_to_drop}"
-                    )
+                    drop_unexpected_index_sql = f"DROP INDEX {owner}.{index_to_drop}"
+                    OracleEngine._log_history_ddl(conn, drop_unexpected_index_sql)
+                    cursor.execute(drop_unexpected_index_sql)  # type: ignore[arg-type]
                     existing_indexes.pop(index_to_drop, None)
                     changed = True
                 changed = True
@@ -1045,9 +1074,9 @@ end;"""
                         columns,
                         is_unique,
                     )
-                    cursor.execute(  # type: ignore[arg-type]
-                        f"DROP INDEX {owner}.{index_name}"
-                    )
+                    drop_mismatch_index_sql = f"DROP INDEX {owner}.{index_name}"
+                    OracleEngine._log_history_ddl(conn, drop_mismatch_index_sql)
+                    cursor.execute(drop_mismatch_index_sql)  # type: ignore[arg-type]
                     changed = True
                 logger.info(
                     "Creating %sindex %s on %s.%s for columns %s",
@@ -1059,9 +1088,11 @@ end;"""
                 )
                 columns_sql = ", ".join(columns)
                 unique_clause = "UNIQUE " if is_unique else ""
-                cursor.execute(  # type: ignore[arg-type]
+                create_index_sql = (
                     f"CREATE {unique_clause}INDEX {owner}.{index_name} ON {owner}.{table_name} ({columns_sql})"
                 )
+                OracleEngine._log_history_ddl(conn, create_index_sql)
+                cursor.execute(create_index_sql)  # type: ignore[arg-type]
                 changed = True
             final_pk_name, _, final_pk_index = OracleEngine._get_primary_key_info(cursor, owner, table_name)
             expected_indexes = set(desired_indexes.keys())
@@ -1078,9 +1109,9 @@ end;"""
                         owner,
                         table_name,
                     )
-                    cursor.execute(  # type: ignore[arg-type]
-                        f"DROP INDEX {owner}.{index_name}"
-                    )
+                    drop_unmanaged_index_sql = f"DROP INDEX {owner}.{index_name}"
+                    OracleEngine._log_history_ddl(conn, drop_unmanaged_index_sql)
+                    cursor.execute(drop_unmanaged_index_sql)  # type: ignore[arg-type]
                     changed = True
             if changed:
                 conn.commit()
@@ -1108,6 +1139,7 @@ end;"""
             conn: Active Oracle connection."""
         try:
             if conn:
+                OracleEngine._register_connection_env(conn, None)
                 conn.close()
         except Exception:
             logger.critical("Failed to close Oracle DB connection.", exc_info=True)
@@ -1125,7 +1157,9 @@ end;"""
                 role_name = OracleEngine._format_identifier(role.name)
                 if OracleEngine._role_exists(cursor, role_name):
                     continue
-                cursor.execute(f"CREATE ROLE {role_name}")  # type: ignore[arg-type]
+                sql = f"CREATE ROLE {role_name}"
+                OracleEngine._log_history_ddl(conn, sql)
+                cursor.execute(sql)  # type: ignore[arg-type]
                 created.append(role_name)
                 changed = True
             if changed:
@@ -1163,6 +1197,7 @@ end;"""
                         sql += f" DEFAULT TABLESPACE {default_tablespace}"
                     if user.temporary_tablespace:
                         sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
+                    OracleEngine._log_history_ddl(conn, sql)
                     cursor.execute(sql)  # type: ignore[arg-type]
                     created.append(username)
                     changed = True
@@ -1184,16 +1219,22 @@ end;"""
                     has_role = OracleEngine._user_has_role(cursor, username, role_name)
                     if requires_admin_option:
                         if not has_role or not OracleEngine._user_has_role_with_admin_option(cursor, username, role_name):
-                            cursor.execute( f"GRANT {role_name} TO {username} WITH ADMIN OPTION" )  # type: ignore[arg-type]
+                            grant_sql = f"GRANT {role_name} TO {username} WITH ADMIN OPTION"
+                            OracleEngine._log_history_ddl(conn, grant_sql)
+                            cursor.execute(grant_sql)  # type: ignore[arg-type]
                             changed = True
                     elif not has_role:
-                        cursor.execute(f"GRANT {role_name} TO {username}")  # type: ignore[arg-type]
+                        grant_sql = f"GRANT {role_name} TO {username}"
+                        OracleEngine._log_history_ddl(conn, grant_sql)
+                        cursor.execute(grant_sql)  # type: ignore[arg-type]
                         changed = True
                 for privilege in user.system_privileges:
                     privilege_name = privilege.upper()
                     if not OracleEngine._user_has_sys_priv(cursor, username, privilege_name):
                         logger.debug(f"Granting system privilege {privilege_name} to user {username}")
-                        cursor.execute(f"GRANT {privilege_name} TO {username}")  # type: ignore[arg-type]
+                        grant_priv_sql = f"GRANT {privilege_name} TO {username}"
+                        OracleEngine._log_history_ddl(conn, grant_priv_sql)
+                        cursor.execute(grant_priv_sql)  # type: ignore[arg-type]
                         changed = True
                 if OracleEngine._ensure_unlimited_quota(cursor, username, tablespace_for_quota):
                     changed = True
@@ -1222,14 +1263,18 @@ end;"""
                 table_name = OracleEngine._format_identifier(table.name)
                 if not OracleEngine._table_exists(cursor, owner, table_name):
                     columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-                    cursor.execute( f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )" )  # type: ignore[arg-type]
+                    sql = f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )"
+                    OracleEngine._log_history_ddl(conn, sql)
+                    cursor.execute(sql)  # type: ignore[arg-type]
                     created.append(f"{owner}.{table_name}")
                     changed = True
                 if table.primary_key:
                     pk_name = OracleEngine._format_identifier(f"{table.name}_pk")
                     if not OracleEngine._constraint_exists(cursor, owner, pk_name):
                         cols = ", ".join(OracleEngine._format_identifier(col) for col in table.primary_key)
-                        cursor.execute( f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({cols})" )  # type: ignore[arg-type]
+                        sql = f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {pk_name} PRIMARY KEY ({cols})"
+                        OracleEngine._log_history_ddl(conn, sql)
+                        cursor.execute(sql)  # type: ignore[arg-type]
                         changed = True
                 for index in table.indexes:
                     idx_name = OracleEngine._format_identifier(index.name)
@@ -1237,7 +1282,9 @@ end;"""
                         continue
                     cols = ", ".join(OracleEngine._format_identifier(col) for col in index.columns)
                     unique_kw = "UNIQUE " if index.unique else ""
-                    cursor.execute( f"CREATE {unique_kw}INDEX {owner}.{idx_name} ON {owner}.{table_name} ({cols})" )  # type: ignore[arg-type]
+                    sql = f"CREATE {unique_kw}INDEX {owner}.{idx_name} ON {owner}.{table_name} ({cols})"
+                    OracleEngine._log_history_ddl(conn, sql)
+                    cursor.execute(sql)  # type: ignore[arg-type]
                     changed = True
             if changed:
                 conn.commit()
@@ -1281,6 +1328,7 @@ end;"""
                     sql += f" CACHE {sequence.cache}"
                 else:
                     sql += " NOCACHE"
+                OracleEngine._log_history_ddl(conn, sql)
                 cursor.execute(sql)  # type: ignore[arg-type]
                 created.append(f"{owner}.{sequence_name}")
                 changed = True
@@ -1311,7 +1359,11 @@ end;"""
                 username = OracleEngine._format_identifier(link.username)
                 password = OracleEngine._quote_password(link.password)
                 dsn_literal = OracleEngine._quote_literal(link.dsn)
-                cursor.execute(f"CREATE DATABASE LINK {link_name} CONNECT TO {username} IDENTIFIED BY {password} USING {dsn_literal}")  # type: ignore[arg-type]
+                sql = (
+                    f"CREATE DATABASE LINK {link_name} CONNECT TO {username} IDENTIFIED BY {password} USING {dsn_literal}"
+                )
+                OracleEngine._log_history_ddl(conn, sql)
+                cursor.execute(sql)  # type: ignore[arg-type]
                 created.append(link_name)
                 changed = True
             if changed:
@@ -1335,12 +1387,15 @@ end;"""
             cursor.execute("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual")  # type: ignore[arg-type]
             row = cursor.fetchone()
             previous_schema = row[0] if row else None
-            cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {owner_name}")  # type: ignore[arg-type]
+            sql = f"ALTER SESSION SET CURRENT_SCHEMA = {owner_name}"
+            OracleEngine._log_history_ddl(conn, sql)
+            cursor.execute(sql)  # type: ignore[arg-type]
             for statement in (
                 T_REFERENCING_TABLES_TYPE,
                 CHECK_SAVE_STATUS_PROC,
                 CHECK_REFERENCING_TABLES_PROC,
             ):
+                OracleEngine._log_history_ddl(conn, statement)
                 cursor.execute(statement)  # type: ignore[arg-type]
         except Exception:
             logger.critical("Failed to ensure supporting PL/SQL objects.", exc_info=True)
@@ -1349,7 +1404,11 @@ end;"""
             if cursor:
                 try:
                     if previous_schema and previous_schema.upper() != owner_name:
-                        cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(previous_schema)}")  # type: ignore[arg-type]
+                        restore_sql = (
+                            f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(previous_schema)}"
+                        )
+                        OracleEngine._log_history_ddl(conn, restore_sql)
+                        cursor.execute(restore_sql)  # type: ignore[arg-type]
                 finally:
                     cursor.close()
 
