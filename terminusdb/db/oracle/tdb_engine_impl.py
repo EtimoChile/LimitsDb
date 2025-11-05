@@ -986,7 +986,11 @@ end;"""
                         OracleEngine._log_history_ddl(conn, drop_pk_sql)
                         cursor.execute(drop_pk_sql)  # type: ignore[arg-type]
                         index_to_drop = existing_pk_index_fmt or existing_pk_name
-                        if index_to_drop in existing_indexes:
+                        if index_to_drop:
+                            existing_indexes = OracleEngine._get_table_indexes(
+                                cursor, owner, table_name
+                            )
+                        if index_to_drop and index_to_drop in existing_indexes:
                             logger.info(
                                 "Dropping index %s on %s.%s after removing primary key",
                                 index_to_drop,
@@ -1040,7 +1044,9 @@ end;"""
                 OracleEngine._log_history_ddl(conn, drop_unexpected_pk_sql)
                 cursor.execute(drop_unexpected_pk_sql)  # type: ignore[arg-type]
                 index_to_drop = existing_pk_index_fmt or existing_pk_name
-                if index_to_drop in existing_indexes:
+                if index_to_drop:
+                    existing_indexes = OracleEngine._get_table_indexes(cursor, owner, table_name)
+                if index_to_drop and index_to_drop in existing_indexes:
                     logger.info(
                         "Dropping index %s on %s.%s after removing unexpected primary key",
                         index_to_drop,
