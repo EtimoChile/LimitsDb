@@ -1,14 +1,159 @@
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_logger import get_logger, configure_logger, reconfigure_logger
 from terminusdb.core.tdb_utils import get_effective_credentials, max_ignore_none, nvl
-from terminusdb.core.tdb_ilm_config import load_rows_from_yaml
+from terminusdb.core.tdb_ilm_config import load_rows_from_yaml, resolve_and_load_ilm_rows
 from terminusdb.db.tdb_engine_loader import get_db_engine
 from terminusdb.db.tdb_engines import ColumnDefinition, DatabaseEngine, TableDefinition
 from terminusdb.core.tdb_status import Status
 logger = get_logger("runner")
+
+
+def _credentials_present(config: Config, *, admin: bool, env: Optional[str]) -> bool:
+    try:
+        get_effective_credentials(config, admin=admin, env=env)
+        return True
+    except ValueError:
+        return False
+
+
+def _open_connection(
+    config: Config,
+    engine: DatabaseEngine,
+    *,
+    admin: bool,
+    env: Optional[str],
+    description: str,
+) -> Optional[Any]:
+    try:
+        user, _, dsn = get_effective_credentials(config, admin=admin, env=env)
+    except ValueError as exc:
+        logger.error("%s: %s", description, exc)
+        return None
+    conn: Optional[Any] = None
+    try:
+        conn = engine.get_connection(config, admin=admin, env=env)
+        engine.get_system_date(conn)
+        logger.info("%s: connected to %s as %s", description, dsn, user)
+        return conn
+    except Exception:
+        logger.error("%s: failed to connect to %s as %s", description, dsn, user, exc_info=True)
+        if conn:
+            engine.close_connection(conn)
+        return None
+
+
+def _load_offline_rows(config: Config) -> List[Dict[str, Any]]:
+    if config.ilm_config_file:
+        return load_rows_from_yaml(config.ilm_config_file)
+    return resolve_and_load_ilm_rows(schema=config.schema, profile=config.profile)
+
+
+def _build_dependency_graph(rows: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Set[Tuple[str, str]]]:
+    graph: Dict[Tuple[str, str], Set[Tuple[str, str]]] = {}
+    for row in rows:
+        key = (row["cnf_source_owner"].upper(), row["cnf_table_name"].upper())
+        graph.setdefault(key, set())
+    for row in rows:
+        key = (row["cnf_source_owner"].upper(), row["cnf_table_name"].upper())
+        refs = str(row.get("cnf_referencing_tables") or "").split(",")
+        for raw_ref in refs:
+            ref = raw_ref.strip()
+            if not ref:
+                continue
+            if "." in ref:
+                owner_part, remainder = ref.split(".", 1)
+            else:
+                owner_part, remainder = row["cnf_source_owner"], ref
+            parts = remainder.strip().split(" ", 1)
+            if len(parts) != 2:
+                raise ValueError(f"Invalid referencing_tables entry '{ref}' for {owner_part}")
+            table_part = parts[0]
+            ref_key = (owner_part.strip().upper(), table_part.strip().upper())
+            if ref_key not in graph:
+                raise ValueError(f"Referenced table {owner_part}.{table_part} not present in ILM configuration")
+            graph[ref_key].add(key)
+    return graph
+
+
+def _compute_plan_layers(graph: Dict[Tuple[str, str], Set[Tuple[str, str]]]) -> List[List[Tuple[str, str]]]:
+    remaining = set(graph.keys())
+    layers: List[List[Tuple[str, str]]] = []
+    while remaining:
+        ready = sorted([key for key in remaining if not graph[key].intersection(remaining)])
+        if not ready:
+            cycle = ", ".join(f"{owner}.{table}" for owner, table in sorted(remaining))
+            raise ValueError(f"Cyclic dependency detected among tables: {cycle}")
+        layers.append(ready)
+        for key in ready:
+            remaining.remove(key)
+    return layers
+
+
+def _plan_mode(config: Config) -> int:
+    rows = _load_offline_rows(config)
+    if not rows:
+        logger.info("No active ILM tables found for schema %s.", config.schema)
+        return 0
+    graph = _build_dependency_graph(rows)
+    layers = _compute_plan_layers(graph)
+    logger.info("ILM execution plan (PLAN mode):")
+    for idx, layer in enumerate(layers, start=1):
+        tables = ", ".join(f"{owner}.{table}" for owner, table in layer)
+        logger.info("  Stage %d (parallel=%d): %s", idx, len(layer), tables)
+    logger.info("Plan summary: %d stage(s), %d table(s).", len(layers), len(graph))
+    return 0
+
+
+def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
+    logger.info("VALIDATE mode: checking configuration and database connectivity.")
+    ok = True
+    connections: List[Any] = []
+    primary_conn: Optional[Any] = None
+    required_specs: List[Tuple[str, bool, Optional[str]]] = []
+    optional_specs: List[Tuple[str, bool, Optional[str]]] = []
+    primary_env = "SOURCE" if config.action == "SOURCE_ILM" else "HISTORY"
+    required_specs.append((f"{primary_env} runtime", False, None))
+    required_specs.append((f"{primary_env} admin", True, None))
+    if config.action == "SOURCE_ILM":
+        required_specs.append(("HISTORY admin", True, "HISTORY"))
+        optional_specs.append(("HISTORY runtime", False, "HISTORY"))
+    else:
+        optional_specs.append(("SOURCE runtime", False, "SOURCE"))
+        optional_specs.append(("SOURCE admin", True, "SOURCE"))
+    for description, admin, env in required_specs:
+        desc_label = description.upper()
+        conn = _open_connection(config, engine, admin=admin, env=env, description=desc_label)
+        if conn is None:
+            ok = False
+        else:
+            connections.append(conn)
+            if description == f"{primary_env} runtime":
+                primary_conn = conn
+    for description, admin, env in optional_specs:
+        if not _credentials_present(config, admin=admin, env=env):
+            logger.info("%s: credentials not provided; skipping.", description.upper())
+            continue
+        conn = _open_connection(config, engine, admin=admin, env=env, description=description.upper())
+        if conn:
+            connections.append(conn)
+    try:
+        if primary_conn:
+            process_date = engine.get_system_date(primary_conn).strftime("%Y%m%d")
+            try:
+                tables_config = process_table_cnf(primary_conn, config, engine, process_date)
+                logger.info("Configuration ready: %d table(s) evaluated.", len(tables_config))
+            except Exception:
+                logger.error("Failed to process ILM configuration.", exc_info=True)
+                ok = False
+        else:
+            logger.error("Primary connection unavailable; skipping configuration validation.")
+    finally:
+        for conn in connections:
+            engine.close_connection(conn)
+    return 0 if ok else 1
 
 
 def _normalize_column_lookup(column: str) -> str:
@@ -409,16 +554,23 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
 
 def tdb_run(config: Config) -> None:
     connection: Any = None
+    admin_connection: Any = None
     engine: Optional[DatabaseEngine] = None
     try:
         engine = get_db_engine(config.db_engine)
+        if config.mode == "PLAN":
+            rc = _plan_mode(config)
+            raise SystemExit(rc)
+        if config.mode == "VALIDATE":
+            rc = _validate_environment(config, engine)
+            raise SystemExit(rc)
         connection = engine.get_connection(config)
-        admin_connection = engine.get_connection(config, admin=True)
         process_date = engine.get_system_date(connection).strftime('%Y%m%d')
         tables_config = process_table_cnf(connection, config, engine, process_date)
         if config.generate_script:
             rc = generate_script_output(config, tables_config)
         else:
+            admin_connection = engine.get_connection(config, admin=True)
             if config.action == "SOURCE_ILM":
                 _ensure_history_tables(config, engine, admin_connection, tables_config)
             rc = tdb_exec_ilm(config, tables_config, process_date, engine, connection)
@@ -426,3 +578,5 @@ def tdb_run(config: Config) -> None:
     finally:
         if engine and connection:
             engine.close_connection(connection)
+        if engine and admin_connection:
+            engine.close_connection(admin_connection)

@@ -3,13 +3,23 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence, Literal, Annotated, get_args, get_origin, get_type_hints
+from typing import Any, Dict, Mapping, Optional, Sequence, Literal, Annotated, Tuple, Set, get_args, get_origin, get_type_hints
 
 from terminusdb.core.tdb_config_loader import load_runtime_config
 from terminusdb.core.tdb_logger import get_logger
 from terminusdb.core.tdb_meta import Help, Cli, Secret, Env, CliOnly
 from terminusdb.core.tdb_utils import resolve_schema_file  # markers for Annotated metadata
 logger = get_logger("params_config")
+
+VALID_MODES: Tuple[str, ...] = ("VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE")
+MODE_ALIASES: Dict[str, str] = {"DRY_RUN": "PREVIEW"}
+MODES_REQUIRING_CONNECTIONS: Set[str] = {"VALIDATE", "PREVIEW", "SCRIPT", "EXECUTE"}
+
+
+def _normalize_mode(value: str) -> str:
+    normalized = (value or "").upper()
+    return MODE_ALIASES.get(normalized, normalized)
+
 
 # ------------------------------------------------------------------------------
 # Single source of truth: Config + Annotated metadata
@@ -18,11 +28,11 @@ logger = get_logger("params_config")
 class Config:
     #Execution mode parameters
     action: Annotated[Literal["SOURCE_ILM", "HISTORY_ILM"], Help("ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)"), Cli("--action"), Env("TDB_ACTION")] = "SOURCE_ILM"
-    mode: Annotated[Literal["EXECUTE", "DRY_RUN"], Help("Run everything (EXECUTE) or only generate queries (DRY_RUN)"), Cli("--mode"), Env("TDB_MODE")] = "DRY_RUN"
+    mode: Annotated[Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"], Help("Runtime mode: VALIDATE config/credentials, PLAN dependency order, PREVIEW simulate without changes, SCRIPT generate SQL scripts, EXECUTE apply changes"), Cli("--mode"), Env("TDB_MODE")] = "PREVIEW"
     chunk_size: Annotated[int, Help("Rows per chunk when processing large tables"), Cli("--chunk-size"), Env("TDB_CHUNK_SIZE")] = 100000
     use_added_columns: Annotated[bool, Help("Populate derived columns in history tables")] = True
     add_tdb_columns: Annotated[bool, Help("Add TerminusDB execution-date columns in history tables")] = True
-    generate_script: Annotated[bool, Help("Dry-run: generate SQL script without executing"), Cli("--generate-script"), Env("TDB_GENERATE_SCRIPT")] = False
+    generate_script: Annotated[bool, Help("Generate SQL script without executing (auto-enabled in SCRIPT mode)"), Cli("--generate-script"), Env("TDB_GENERATE_SCRIPT")] = False
     parallel_max: Annotated[int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("TDB_PARALLEL_MAX")] = 10
     db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine")] = "oracle"
     log_level: Annotated[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], Help("Logging level"), Cli("--log-level"), Env("TDB_LOG_LEVEL")] = "INFO"
@@ -57,13 +67,20 @@ class Config:
     history_role_name: Annotated[str, Help("Role name to create in the history environment")] = "TDB_HISTORY_ROLE"
 
     def __post_init__(self) -> None:
+        normalized_mode = _normalize_mode(self.mode)
+        if normalized_mode not in VALID_MODES:
+            raise ValueError(f"invalid mode: {self.mode}")
+        self.mode = normalized_mode  # type: ignore[assignment]
+        if self.mode == "SCRIPT":
+            self.generate_script = True
+        requires_connections = self.mode in MODES_REQUIRING_CONNECTIONS
         if not self.schema:
             raise ValueError("schema is required")
         if self.db_engine not in ("oracle", "postgres"):
             raise ValueError(f"invalid db_engine: {self.db_engine}")
-        if not self.generate_script and self.action == "SOURCE_ILM" and not self.source_dsn and not self.source_username and not self.source_password:
+        if requires_connections and self.action == "SOURCE_ILM" and (not self.source_dsn or not self.source_username or not self.source_password):
             raise ValueError("source_dsn, source_username and source_password are required for SOURCE_ILM action")
-        if not self.generate_script and self.action == "HISTORY_ILM" and not self.history_dsn and not self.history_username and not self.history_password:
+        if requires_connections and self.action == "HISTORY_ILM" and (not self.history_dsn or not self.history_username or not self.history_password):
             raise ValueError("history_dsn, history_username and history_password are required for HISTORY_ILM action")
 
     @classmethod

@@ -135,7 +135,7 @@ poetry run tdb-run --schema <SCHEMA> --profile <PROFILE> --action HISTORY_ILM
 Common overrides:
 
 ```
---mode EXECUTE|DRY_RUN                        # Run everything (EXECUTE) or only run queries (dry-run)
+--mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW simulate, SCRIPT emit SQL, EXECUTE run
 --generate-script / --no-generate-script      # Emit SQL to disk instead of executing it
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
@@ -163,11 +163,11 @@ poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chu
 | Parameter                | Purpose                                                                                 | Default / values                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history). | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
-| `mode`                   | Run everything or only generate queries (dry-run).                                      | Default `DRY_RUN`; choices `EXECUTE`, `DRY_RUN`.                                     |
+| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` simulate (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit SQL, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
 | `chunk_size`             | Rows per chunk when processing large tables.                                            | Default `100000`.                                                                    |
 | `use_added_columns`      | Populate derived columns in history tables.                                             | Default `True` (boolean toggle).                                                     |
 | `add_tdb_columns`        | Add TerminusDB execution-date columns in history tables.                                | Default `True` (boolean toggle).                                                     |
-| `generate_script`        | Dry-run: generate SQL script without executing.                                         | Default `False` (boolean toggle).                                                    |
+| `generate_script`        | Generate SQL script without executing (auto-enabled in `SCRIPT` mode).                 | Default `False` (boolean toggle).                                                    |
 | `parallel_max`           | Maximum number of parallel processes.                                                   | Default `10`.                                                                        |
 | `db_engine`              | Database engine.                                                                        | Default `"oracle"`; choices `"oracle"`, `"postgres"`.                                |
 | `log_level`              | Logging level.                                                                          | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
@@ -248,7 +248,7 @@ Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
 # action: "SOURCE_ILM"  # ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)
-# mode: "DRY_RUN"       # Run everything (EXECUTE) or only generate queries (DRY_RUN)
+# mode: "PREVIEW"       # VALIDATE | PLAN | PREVIEW | SCRIPT | EXECUTE (PREVIEW mirrors legacy DRY_RUN)
 # chunk_size: 100000    # Rows per chunk when processing large tables
 # use_added_columns: True  # Populate derived columns in history tables
 # add_tdb_columns: True  # Add TerminusDB execution-date columns in history tables
