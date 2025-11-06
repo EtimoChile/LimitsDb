@@ -1,6 +1,6 @@
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 import re
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_logger import get_logger, configure_logger, reconfigure_logger
 from terminusdb.core.tdb_utils import get_effective_credentials, max_ignore_none, nvl
@@ -175,6 +175,74 @@ def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDef
     )
 
 
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _iter_placeholder_columns(expr: str) -> Iterable[Tuple[Optional[str], str, bool]]:
+    idx = 0
+    length = len(expr)
+    while idx < length:
+        at_pos = expr.find("@", idx)
+        if at_pos == -1:
+            break
+        i = at_pos + 1
+        if i >= length:
+            break
+        alias_token: Optional[str] = None
+        alias_quoted = False
+        column_token: Optional[str] = None
+        column_quoted = False
+
+        if expr[i] == '"':
+            end = expr.find('"', i + 1)
+            if end == -1:
+                idx = i
+                continue
+            alias_token = expr[i + 1 : end]
+            alias_quoted = True
+            i = end + 1
+        else:
+            match = _IDENTIFIER_RE.match(expr, i)
+            if not match:
+                idx = i
+                continue
+            alias_token = match.group(0)
+            alias_quoted = False
+            i = match.end()
+
+        alias_value: Optional[str] = None
+        if i < length and expr[i] == ".":
+            alias_value = alias_token
+            i += 1
+            if i >= length:
+                idx = i
+                continue
+            if expr[i] == '"':
+                end = expr.find('"', i + 1)
+                if end == -1:
+                    idx = i
+                    continue
+                column_token = expr[i + 1 : end]
+                column_quoted = True
+                i = end + 1
+            else:
+                match = _IDENTIFIER_RE.match(expr, i)
+                if not match:
+                    idx = i
+                    continue
+                column_token = match.group(0)
+                column_quoted = False
+                i = match.end()
+        else:
+            column_token = alias_token
+            column_quoted = alias_quoted
+            alias_value = None
+
+        if column_token:
+            yield alias_value, column_token, column_quoted
+        idx = i
+
+
 def _build_history_table_definition(
     config: Config,
     engine: DatabaseEngine,
@@ -209,17 +277,28 @@ def _build_history_table_definition(
             continue
         source_alias = derived.get("source_alias")
         source_column_lookup = derived.get("lookup")
-        if not source_alias or not source_column_lookup:
+        lookup_expr = derived.get("lookup_expr")
+        if lookup_expr is None:
+            lookup_expr = source_column_lookup
+        if source_column_lookup is None and lookup_expr is not None:
+            source_column_lookup = _normalize_column_lookup(lookup_expr)
+        if not source_alias or not source_column_lookup or not lookup_expr:
             raise ValueError(f"Missing metadata for derived column {name}")
         if source_alias not in alias_map:
             raise ValueError(f"Alias {source_alias} not found for derived column {name}")
         src_owner, src_table = alias_map[source_alias]
-        metadata = engine.get_columns_metadata(source_connection, src_owner, src_table, [source_column_lookup])
-        if source_column_lookup.lower() not in metadata:
-            raise ValueError(
-                f"Column {source_column_lookup} not found in source table {src_owner}.{src_table} for derived column {name}"
-            )
-        required_columns.append(_clone_column_definition(name, metadata[source_column_lookup.lower()]))
+        metadata = engine.get_columns_metadata(source_connection, src_owner, src_table, [lookup_expr])
+        logger.debug(f"Derived column {name}: looking up {source_column_lookup} - {lookup_expr} in {src_owner}.{src_table} metadata: {metadata}")
+        lookup_key = _normalize_column_lookup(source_column_lookup).lower()
+        if lookup_key not in metadata:
+            fallback_key = _normalize_column_lookup(lookup_expr).lower()
+            if fallback_key in metadata:
+                lookup_key = fallback_key
+            else:
+                raise ValueError(
+                    f"Column {source_column_lookup} not found in source table {src_owner}.{src_table} for derived column {name}"
+                )
+        required_columns.append(_clone_column_definition(name, metadata[lookup_key]))
     if config.add_tdb_columns:
         required_columns.append(
             ColumnDefinition(name="tdb_process_date", data_type="date", nullable=False)
@@ -526,11 +605,24 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
                         table_cnf["other_cols_alias"].append(f"tdb_date_{al}") # type: ignore
                         table_cnf["derived_columns"].append({"name": f"tdb_date_{al}", "data_type": "date"}) # type: ignore
                     # Add columns in cnf_history_addtl_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
-                    for col in [match[0] for match in re.findall(r'@("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)', cd["addtl_history_expr"])]:
-                        if col not in table_cnf["other_cols_alias"]:
-                            table_cnf["other_cols_exprs"].append(al+'.'+col) # type: ignore
-                            table_cnf["other_cols_alias"].append(col) # type: ignore
-                            table_cnf["derived_columns"].append( {"name": col, "source_alias": al, "lookup": _normalize_column_lookup(col)} ) # type: ignore
+                    for alias_override, column_name, column_quoted in _iter_placeholder_columns(cd["addtl_history_expr"] or ""):
+                        if alias_override and alias_override.upper() != al.upper():
+                            continue
+                        column_alias = column_name
+                        if column_alias not in table_cnf["other_cols_alias"]:
+                            column_reference = f'"{column_name}"' if column_quoted else column_name
+                            lookup_expr = column_reference
+                            lookup_value = _normalize_column_lookup(lookup_expr)
+                            table_cnf["other_cols_exprs"].append(f"{al}.{column_reference}") # type: ignore
+                            table_cnf["other_cols_alias"].append(column_alias) # type: ignore
+                            table_cnf["derived_columns"].append(  # type: ignore
+                                {
+                                    "name": column_alias,
+                                    "source_alias": al,
+                                    "lookup": lookup_value,
+                                    "lookup_expr": lookup_expr,
+                                }
+                            )
         cnf_source_owner, cnf_table_name = key
         cnf_join_expr, cnf_source_orphan_purge = cnd0["cnf_join_expr"], cnd0["cnf_source_orphan_purge"]
         # get the columns names from DB for cnf_table_name and cnf_source_owner

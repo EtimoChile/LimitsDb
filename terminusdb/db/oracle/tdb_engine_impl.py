@@ -697,9 +697,11 @@ end;"""
             placeholders = ", ".join(f":{idx + 3}" for idx in range(len(normalized_columns)))
             query += f" AND column_name IN ({placeholders})"
             params.extend(normalized_columns)
+        logger.debug(f"Retrieving columns metadata for {owner}.{table} with query: {query} and params: {params}")    
         cursor.execute(query, params)  # type: ignore[arg-type]
         metadata: Dict[str, ColumnDefinition] = {}
         for row in cursor.fetchall():
+            logger.debug(f"Processing column metadata row: {row}")
             column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used = row
             dtype = data_type.lower()
             length: Optional[int] = None
