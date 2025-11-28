@@ -50,7 +50,7 @@ def run_cli() -> None:
         config = Config.from_dict(cfg_dict)
         reconfigure_logger(level=config.log_level)
         logger.debug("Effective config: %s", _mask_secrets(config.to_dict()))
-        tdb_run(config)
+        tdb_run(config) # type: ignore
     except (ValueError, KeyError) as exc:
         logger.error("%s", exc)
         logger.error(exc, exc_info=True)
