@@ -1,6 +1,6 @@
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
-import re
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
+from operator import attrgetter
+from typing import Any, Dict, List, Literal, Optional, Tuple, Set
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_logger import get_logger, configure_logger, reconfigure_logger
 from terminusdb.core.tdb_utils import get_effective_credentials, max_ignore_none, nvl
@@ -11,7 +11,7 @@ from terminusdb.core.tdb_status import Status
 logger = get_logger("runner")
 
 
-def _credentials_present(config: Config, *, admin: bool, env: Optional[str]) -> bool:
+def _credentials_present(config: Config, *, admin: bool, env: Optional[Literal["SOURCE", "HISTORY"]]) -> bool:
     try:
         get_effective_credentials(config, admin=admin, env=env)
         return True
@@ -19,14 +19,7 @@ def _credentials_present(config: Config, *, admin: bool, env: Optional[str]) -> 
         return False
 
 
-def _open_connection(
-    config: Config,
-    engine: DatabaseEngine,
-    *,
-    admin: bool,
-    env: Optional[str],
-    description: str,
-) -> Optional[Any]:
+def _open_connection(config: Config, engine: DatabaseEngine, *, admin: bool, env: Optional[Literal["SOURCE", "HISTORY"]], description: str) -> Optional[Any]:
     try:
         user, _, dsn = get_effective_credentials(config, admin=admin, env=env)
     except ValueError as exc:
@@ -54,11 +47,11 @@ def _load_offline_rows(config: Config) -> List[Dict[str, Any]]:
 def _build_dependency_graph(rows: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Set[Tuple[str, str]]]:
     graph: Dict[Tuple[str, str], Set[Tuple[str, str]]] = {}
     for row in rows:
-        key = (row["cnf_source_owner"].upper(), row["cnf_table_name"].upper())
+        key = (row["source_owner"], row["table_name"])
         graph.setdefault(key, set())
     for row in rows:
-        key = (row["cnf_source_owner"].upper(), row["cnf_table_name"].upper())
-        refs = str(row.get("cnf_referencing_tables") or "").split(",")
+        key = (row["source_owner"], row["table_name"])
+        refs = str(row.get("referencing_tables") or "").split(",")
         for raw_ref in refs:
             ref = raw_ref.strip()
             if not ref:
@@ -66,12 +59,12 @@ def _build_dependency_graph(rows: List[Dict[str, Any]]) -> Dict[Tuple[str, str],
             if "." in ref:
                 owner_part, remainder = ref.split(".", 1)
             else:
-                owner_part, remainder = row["cnf_source_owner"], ref
+                owner_part, remainder = row["source_owner"], ref
             parts = remainder.strip().split(" ", 1)
             if len(parts) != 2:
                 raise ValueError(f"Invalid referencing_tables entry '{ref}' for {owner_part}")
             table_part = parts[0]
-            ref_key = (owner_part.strip().upper(), table_part.strip().upper())
+            ref_key = (owner_part.strip(), table_part.strip())
             if ref_key not in graph:
                 raise ValueError(f"Referenced table {owner_part}.{table_part} not present in ILM configuration")
             graph[ref_key].add(key)
@@ -112,8 +105,8 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
     ok = True
     connections: List[Any] = []
     primary_conn: Optional[Any] = None
-    required_specs: List[Tuple[str, bool, Optional[str]]] = []
-    optional_specs: List[Tuple[str, bool, Optional[str]]] = []
+    required_specs: List[Tuple[str, bool, Optional[Literal["SOURCE", "HISTORY"]]]] = []
+    optional_specs: List[Tuple[str, bool, Optional[Literal["SOURCE", "HISTORY"]]]] = []
     primary_env = "SOURCE" if config.action == "SOURCE_ILM" else "HISTORY"
     required_specs.append((f"{primary_env} runtime", False, None))
     required_specs.append((f"{primary_env} admin", True, None))
@@ -143,7 +136,7 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
         if primary_conn:
             process_date = engine.get_system_date(primary_conn).strftime("%Y%m%d")
             try:
-                tables_config = process_table_cnf(primary_conn, config, engine, process_date)
+                tables_config = process_tables_cnf(primary_conn, config, engine, process_date)
                 logger.info("Configuration ready: %d table(s) evaluated.", len(tables_config))
             except Exception:
                 logger.error("Failed to process ILM configuration.", exc_info=True)
@@ -154,13 +147,6 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
         for conn in connections:
             engine.close_connection(conn)
     return 0 if ok else 1
-
-
-def _normalize_column_lookup(column: str) -> str:
-    column = column.strip()
-    if column.startswith('"') and column.endswith('"') and len(column) > 1:
-        return column[1:-1]
-    return column.upper()
 
 
 def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDefinition:
@@ -175,74 +161,6 @@ def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDef
     )
 
 
-_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def _iter_placeholder_columns(expr: str) -> Iterable[Tuple[Optional[str], str, bool]]:
-    idx = 0
-    length = len(expr)
-    while idx < length:
-        at_pos = expr.find("@", idx)
-        if at_pos == -1:
-            break
-        i = at_pos + 1
-        if i >= length:
-            break
-        alias_token: Optional[str] = None
-        alias_quoted = False
-        column_token: Optional[str] = None
-        column_quoted = False
-
-        if expr[i] == '"':
-            end = expr.find('"', i + 1)
-            if end == -1:
-                idx = i
-                continue
-            alias_token = expr[i + 1 : end]
-            alias_quoted = True
-            i = end + 1
-        else:
-            match = _IDENTIFIER_RE.match(expr, i)
-            if not match:
-                idx = i
-                continue
-            alias_token = match.group(0)
-            alias_quoted = False
-            i = match.end()
-
-        alias_value: Optional[str] = None
-        if i < length and expr[i] == ".":
-            alias_value = alias_token
-            i += 1
-            if i >= length:
-                idx = i
-                continue
-            if expr[i] == '"':
-                end = expr.find('"', i + 1)
-                if end == -1:
-                    idx = i
-                    continue
-                column_token = expr[i + 1 : end]
-                column_quoted = True
-                i = end + 1
-            else:
-                match = _IDENTIFIER_RE.match(expr, i)
-                if not match:
-                    idx = i
-                    continue
-                column_token = match.group(0)
-                column_quoted = False
-                i = match.end()
-        else:
-            column_token = alias_token
-            column_quoted = alias_quoted
-            alias_value = None
-
-        if column_token:
-            yield alias_value, column_token, column_quoted
-        idx = i
-
-
 def _build_history_table_definition(
     config: Config,
     engine: DatabaseEngine,
@@ -250,64 +168,16 @@ def _build_history_table_definition(
     table_cnf: Dict[str, Any],
 ) -> TableDefinition:
     cnd0 = table_cnf["conds"][0]
-    history_owner = cnd0["cnf_history_owner"]
-    table_name = cnd0["cnf_table_name"]
-    alias_map: Dict[str, Tuple[str, str]] = table_cnf.get("alias_map", {})
-    if not alias_map:
-        alias_map = {"A": (cnd0["cnf_source_owner"].upper(), table_name.upper())}
-    base_owner, base_table = alias_map["A"]
-    table_columns = table_cnf["table_columns"]
-    required_columns: List[ColumnDefinition] = []
-    base_metadata = engine.get_columns_metadata(source_connection, base_owner, base_table, table_columns)
-    for column in table_columns:
-        lookup = _normalize_column_lookup(column)
-        if lookup.lower() not in base_metadata:
-            raise ValueError(f"Column {column} not found in source table {base_owner}.{base_table}")
-        required_columns.append(_clone_column_definition(column, base_metadata[lookup.lower()]))
-    for derived in table_cnf.get("derived_columns", []):
-        name = derived["name"]
-        if derived.get("data_type"):
-            required_columns.append(
-                ColumnDefinition(
-                    name=name,
-                    data_type=derived["data_type"],
-                    nullable=True,
-                )
-            )
-            continue
-        source_alias = derived.get("source_alias")
-        source_column_lookup = derived.get("lookup")
-        lookup_expr = derived.get("lookup_expr")
-        if lookup_expr is None:
-            lookup_expr = source_column_lookup
-        if source_column_lookup is None and lookup_expr is not None:
-            source_column_lookup = _normalize_column_lookup(lookup_expr)
-        if not source_alias or not source_column_lookup or not lookup_expr:
-            raise ValueError(f"Missing metadata for derived column {name}")
-        if source_alias not in alias_map:
-            raise ValueError(f"Alias {source_alias} not found for derived column {name}")
-        src_owner, src_table = alias_map[source_alias]
-        metadata = engine.get_columns_metadata(source_connection, src_owner, src_table, [lookup_expr])
-        logger.debug(f"Derived column {name}: looking up {source_column_lookup} - {lookup_expr} in {src_owner}.{src_table} metadata: {metadata}")
-        lookup_key = _normalize_column_lookup(source_column_lookup).lower()
-        if lookup_key not in metadata:
-            fallback_key = _normalize_column_lookup(lookup_expr).lower()
-            if fallback_key in metadata:
-                lookup_key = fallback_key
-            else:
-                raise ValueError(
-                    f"Column {source_column_lookup} not found in source table {src_owner}.{src_table} for derived column {name}"
-                )
-        required_columns.append(_clone_column_definition(name, metadata[lookup_key]))
+    source_owner, history_owner, table_name = cnd0["source_owner"], cnd0["history_owner"], cnd0["table_name"]
+    required_columns: List[ColumnDefinition] = sorted(table_cnf.get("columns_metadata", {}).values(), key=attrgetter("id"))
+    logger.debug(f"Building history table definition for {history_owner}.{table_name} with base columns: {[col.name for col in required_columns]}")
+    logger.debug("table_cnf: %s", table_cnf)
+    for other_column in table_cnf.get("other_columns", []):
+        required_columns.append(other_column["metadata"])
+    pk_columns = list(engine.get_primary_key_columns(source_connection, source_owner, table_name, table_cnf))
     if config.add_tdb_columns:
-        required_columns.append(
-            ColumnDefinition(name="tdb_process_date", data_type="date", nullable=False)
-        )
-        required_columns.append(ColumnDefinition(name="tdb_insert_date", data_type="date", nullable=False))
-    pk_columns = list(engine.get_primary_key_columns(source_connection, base_owner, base_table))
-    if config.add_tdb_columns:
-        if "tdb_process_date" not in pk_columns:
-            pk_columns.append("tdb_process_date")
+        if "TDB_PROCESS_DATE" not in pk_columns:
+            pk_columns.append("TDB_PROCESS_DATE")
     primary_key: Optional[Tuple[str, ...]] = tuple(pk_columns) if pk_columns else None
     return TableDefinition(
         owner=history_owner,
@@ -330,7 +200,7 @@ def _ensure_history_tables(
             if table_cnf.get("skip"):
                 continue
             table_def = _build_history_table_definition(config, engine, source_admin_connection, table_cnf)
-            engine.ensure_table_structure(history_admin_connection, table_def)
+            engine.ensure_table_structure(history_admin_connection, table_def, table_cnf)
     finally:
         if history_admin_connection:
             engine.close_connection(history_admin_connection)
@@ -487,8 +357,7 @@ def tdb_exec_ilm(config: Config, tables_config: Dict[Tuple[str, str], Dict[str, 
         logger.error("Some tables did not finish successfully.")
         return 1
 
-
-def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, process_date: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
+def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, process_date: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
     logger.info("Processing table configuration...")
     tdb_ctl_status_rows: List[Dict[str, Any]] = []
     if config.ilm_config_file:
@@ -499,27 +368,33 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
     tables_config: Dict[Tuple[str, str], Dict[str, Any]] = {}
     # Populate tables_config with the raw rows and derive referencing tables from cnf_referencing_tables.
     is_source_mode = (config.action == "SOURCE_ILM")
+    tdb_process_date_expr, tdb_insert_date_expr = engine.get_tdb_columns_expressions()
     for tdb_cnf_row in tdb_conf_rows:
-        key = (tdb_cnf_row["cnf_source_owner"].upper(), tdb_cnf_row["cnf_table_name"].upper())
+        tdb_cnf_row["source_owner"] = engine.get_identifier_str(tdb_cnf_row["source_owner"])
+        tdb_cnf_row["table_name"] = engine.get_identifier_str(tdb_cnf_row["table_name"])
+        tdb_cnf_row["history_owner"] = engine.get_identifier_str(tdb_cnf_row["history_owner"])
+        key = (tdb_cnf_row["source_owner"], tdb_cnf_row["table_name"])
         if key not in tables_config: tables_config[key] = {"conds": [], "referencing_tables": []}
         tables_config[key]["conds"].append(tdb_cnf_row)
     for tdb_cnf_row in tdb_conf_rows:
-        key = (tdb_cnf_row["cnf_source_owner"].upper(), tdb_cnf_row["cnf_table_name"].upper())
-        referencing_tables = tdb_cnf_row["cnf_referencing_tables"]
+        key = (tdb_cnf_row["source_owner"], tdb_cnf_row["table_name"])
+        referencing_tables = tdb_cnf_row["referencing_tables"]
         if referencing_tables:
             for ref_table in referencing_tables.split(","):
                 ref_table = ref_table.strip()
                 if "." in ref_table: ref_owner, ref_table = ref_table.split(".")
-                else: ref_owner = tdb_cnf_row["cnf_source_owner"]
+                else: ref_owner = tdb_cnf_row["source_owner"]
                 ref_table, alias = ref_table.split(" ")
-                ref_key = (ref_owner.upper(), ref_table.upper())
+                ref_owner = engine.get_identifier_str(ref_owner)
+                ref_table = engine.get_identifier_str(ref_table)
+                ref_key = (ref_owner, ref_table)
                 if ref_key not in tables_config:
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in tdb_conf_rows")
                 tables_config[ref_key]["referencing_tables"].append(key)
     if not config.generate_script:
         # Inject ctl_status values loaded from the database when resuming a run.
         for tdb_ctl_status_row in tdb_ctl_status_rows:
-            key = (tdb_ctl_status_row["ctl_owner"], tdb_ctl_status_row["ctl_table_name"])
+            key = (tdb_ctl_status_row["ctl_source_owner"], tdb_ctl_status_row["ctl_table_name"])
             if key in tables_config:
                 for cond in tables_config[key]["conds"]:
                     cond["ctl_status"] = tdb_ctl_status_row["ctl_status"]
@@ -528,61 +403,57 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
     # Persist the resulting predicate in cond_expr so later stages can reuse it.
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
-        referencing_tables = cnd0["cnf_referencing_tables"]
+        referencing_tables: str = cnd0["referencing_tables"]
         added_conds = [("A", cond) for cond in table_cnf["conds"]]
-        alias_map: Dict[str, Tuple[str, str]] = {
-            "A": (cnd0["cnf_source_owner"].upper(), cnd0["cnf_table_name"].upper())
-        }
+        table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(connection, cnd0["source_owner"], cnd0["table_name"])
         if referencing_tables:
             for ref_table in referencing_tables.split(","):
                 ref_table = ref_table.strip()
                 if "." in ref_table:
                     ref_owner, ref_table_name = ref_table.split(".")
                 else:
-                    ref_owner, ref_table_name = tdb_cnf_row["cnf_source_owner"], ref_table # type: ignore
+                    ref_owner, ref_table_name = tdb_cnf_row["source_owner"], ref_table # type: ignore
                 ref_table_name, alias = ref_table_name.split(" ")
-                if (ref_owner.upper(), ref_table_name.upper()) not in tables_config: # type: ignore
+                ref_owner = engine.get_identifier_str(ref_owner) # type: ignore
+                ref_table_name = engine.get_identifier_str(ref_table_name)
+                if (ref_owner, ref_table_name) not in tables_config: # type: ignore
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in tdb_conf_rows")
-                alias_map[alias] = (ref_owner.upper(), ref_table_name.upper()) # type: ignore
-                ref_conds = tables_config[(ref_owner.upper(), ref_table_name.upper())]["conds"] # type: ignore
+                ref_conds = tables_config[(ref_owner, ref_table_name)]["conds"] # type: ignore
                 added_conds.extend([(alias, cond) for cond in ref_conds])
         logger.debug(f"Table {key} has {added_conds} contributing conditions from itself and referencing tables.")
+        # Build the combined WHERE expression from all contributing conditions.
         for al, cd in added_conds:
             cond_list: List[str] = []
-            pld_expr = nvl(cd["cnf_purge_date_expr"], "")
+            purge_date_expr = nvl(cd["purge_date_expr"], "")
             # Prefer the history-only filter during HISTORY_ILM runs; otherwise use the source filter.
-            addtl_source_expr = " ".join(nvl(cd["cnf_additional_filter_expr"], "").splitlines())
-            addtl_history_expr = " ".join(nvl(cd["cnf_history_addtl_filter_expr"], addtl_source_expr).splitlines())
-            addtl_expr = addtl_source_expr if is_source_mode else addtl_history_expr
-            months_keep_src, months_keep_hist = cd["cnf_retain_months_source"], cd["cnf_retain_months_history"]
-            logger.debug(f"Processing cond for table {key} alias {al}: pld_expr={pld_expr}, months_keep_src={months_keep_src}, months_keep_hist={months_keep_hist}, addtl_expr={addtl_expr}")
-            if months_keep_src is not None and months_keep_hist is not None:
-                months_keep_hist += months_keep_src
-            months_keep = months_keep_src if is_source_mode else months_keep_hist
-            if pld_expr and not months_keep_src:
-                raise ValueError(f"cnf_retain_months_source is required when cnf_purge_date_expr is set for {key}")
-            if months_keep_src and not pld_expr:
-                raise ValueError(f"cnf_purge_date_expr is required when cnf_retain_months_source is set for {key}")
-            if months_keep_hist and not months_keep_src:
-                raise ValueError(f"cnf_retain_months_history is required when cnf_retain_months_source is set for {key}")
+            additional_filter_expr = " ".join(nvl(cd["additional_filter_expr"], "").splitlines())
+            history_addtl_filter_expr = " ".join(nvl(cd["history_addtl_filter_expr"], additional_filter_expr).splitlines())
+            addtl_expr = additional_filter_expr if is_source_mode else history_addtl_filter_expr
+            retain_months_source, retain_months_history = cd["retain_months_source"], cd["retain_months_history"]
+            logger.debug(f"Processing cond for table {key} alias {al}: purge_date_expr={purge_date_expr}, retain_months_source={retain_months_source}, retain_months_history={retain_months_history}, addtl_expr={addtl_expr}")
+            if retain_months_source is not None and retain_months_history is not None:
+                retain_months_history += retain_months_source
+            retain_months = retain_months_source if is_source_mode else retain_months_history
+            if purge_date_expr and not retain_months_source:
+                raise ValueError(f"retain_months_source is required when cnf_purge_date_expr is set for {key}")
+            if retain_months_source and not purge_date_expr:
+                raise ValueError(f"purge_date_expr is required when cnf_retain_months_source is set for {key}")
+            if retain_months_history and not retain_months_source:
+                raise ValueError(f"retain_months_history is required when cnf_retain_months_source is set for {key}")
             alias_prefix = al+"."
-            alias_prefix_mod = alias_prefix if is_source_mode else "A."
-            mod_alexp_uac = alias_prefix if is_source_mode and config.use_added_columns else "A."
+            mod_alexp_uac = alias_prefix if is_source_mode or not config.use_added_columns else "A."
             if addtl_expr:
-                if is_source_mode:
-                    cond_list.append(addtl_expr.replace("@", alias_prefix_mod))
-                else:
-                    cond_list.append(addtl_history_expr.replace('@', mod_alexp_uac))
-            if pld_expr:
+                cond_list.append(addtl_expr.replace("@", mod_alexp_uac))
+            if purge_date_expr:
                 if is_source_mode or not config.use_added_columns or al == "A":
-                    cond_list.append(engine.get_date_cond(pld_expr.replace("@", alias_prefix), months_keep))
+                    cond_list.append(engine.get_date_condition(purge_date_expr.replace("@", alias_prefix), retain_months))
                 else:
-                    cond_list.append(engine.get_date_cond(f"A.tdb_date_{al}", months_keep_hist))
+                    cond_list.append(engine.get_date_condition(f"A.tdb_date_{al}", retain_months_history))
             cd["cond_expr"] = " and ".join(cond_list)
-            cd["addtl_history_expr"] = addtl_history_expr
+            cd["history_addtl_filter_expr"] = addtl_expr
         # get the maximum cnf_retain_months_history from all added_conds
-        table_cnf["months_keep_history_max"] = max_ignore_none([cd["cnf_retain_months_history"] for _, cd in added_conds])
-        # if mant_hist and cnf_months_keep_history_max is None, skip the table
+        table_cnf["months_keep_history_max"] = max_ignore_none([cd["retain_months_history"] for _, cd in added_conds])
+        # if HISTORY_ILM and cnf_months_keep_history_max is None, skip the table
         if not is_source_mode and table_cnf["months_keep_history_max"] is None:
             table_cnf["skip"] = True
             continue
@@ -592,41 +463,26 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
             raise ValueError(f"At least one condition must be specified for SOURCE_ILM on table {key}")
         where_expr = "\n   or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
         logger.debug(f"Final WHERE expression for table {key}:\n{where_expr}")
-        table_cnf["other_cols_exprs"] = []
-        table_cnf["other_cols_alias"] = []
-        table_cnf["alias_map"] = alias_map
-        table_cnf["derived_columns"] = []
-        if config.use_added_columns:
+        table_cnf["other_columns"] = list[Dict[str, Any]]()
+        if config.use_added_columns and is_source_mode:
             for al, cd in added_conds:
+                logger.debug(tables_config[(cd["source_owner"], cd["table_name"])])
+                columns_metadata = tables_config[(cd["source_owner"], cd["table_name"])]["columns_metadata"]
                 if al != "A":
-                    # Add the cnf_purge_date_expr to other_cols_exprs and other_cols_alias for referencing tables
-                    if f"tdb_date_{al}" not in table_cnf["other_cols_alias"] and cd["cnf_purge_date_expr"]:
-                        table_cnf["other_cols_exprs"].append(nvl(cd["cnf_purge_date_expr"], "").replace('@', al+".")+f" tdb_date_{al}") # type: ignore
-                        table_cnf["other_cols_alias"].append(f"tdb_date_{al}") # type: ignore
-                        table_cnf["derived_columns"].append({"name": f"tdb_date_{al}", "data_type": "date"}) # type: ignore
+                    # Add the cnf_purge_date_expr to other_columns for referencing tables
+                    if cd["purge_date_expr"]:
+                        column_metadata = ColumnDefinition(name=f"tdb_date_{al}", data_type="date", nullable=True)
+                        append_unique_name(table_cnf["other_columns"], {"name": f"tdb_date_{al}", "expr": nvl(cd["purge_date_expr"], "").replace('@', al+"."), "metadata": column_metadata}) # type: ignore
                     # Add columns in cnf_history_addtl_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
-                    for alias_override, column_name, column_quoted in _iter_placeholder_columns(cd["addtl_history_expr"] or ""):
-                        if alias_override and alias_override.upper() != al.upper():
-                            continue
-                        column_alias = column_name
-                        if column_alias not in table_cnf["other_cols_alias"]:
-                            column_reference = f'"{column_name}"' if column_quoted else column_name
-                            lookup_expr = column_reference
-                            lookup_value = _normalize_column_lookup(lookup_expr)
-                            table_cnf["other_cols_exprs"].append(f"{al}.{column_reference}") # type: ignore
-                            table_cnf["other_cols_alias"].append(column_alias) # type: ignore
-                            table_cnf["derived_columns"].append(  # type: ignore
-                                {
-                                    "name": column_alias,
-                                    "source_alias": al,
-                                    "lookup": lookup_value,
-                                    "lookup_expr": lookup_expr,
-                                }
-                            )
+                    for column_name in engine.get_identifiers_from_expression(cd["history_addtl_filter_expr"] or ""):
+                        column_metadata = _clone_column_definition(f"{column_name}_{al}", columns_metadata[column_name])
+                        other_column = {"name": f"{column_name}_{al}", "expr": f"{al}.{column_name}", "metadata": column_metadata} # type: ignore
+                        append_unique_name(table_cnf["other_columns"], other_column) # type: ignore
+        if config.add_tdb_columns and is_source_mode:
+            table_cnf["other_columns"].append({"name": "TDB_PROCESS_DATE", "expr": tdb_process_date_expr, "metadata": ColumnDefinition(name="TDB_PROCESS_DATE", data_type="date", nullable=False)}) # type: ignore
+            table_cnf["other_columns"].append({"name": "TDB_INSERT_DATE", "expr": tdb_insert_date_expr, "metadata": ColumnDefinition(name="TDB_INSERT_DATE", data_type="date", nullable=False)}) # type: ignore
         cnf_source_owner, cnf_table_name = key
-        cnf_join_expr, cnf_source_orphan_purge = cnd0["cnf_join_expr"], cnd0["cnf_source_orphan_purge"]
-        # get the columns names from DB for cnf_table_name and cnf_source_owner
-        table_columns = engine.get_table_columns(connection, cnf_source_owner, cnf_table_name)
+        cnf_join_expr, cnf_source_orphan_purge = cnd0["join_expr"], cnd0["source_orphan_purge"]
         # Prepare join_expr changing type of join based on cnf_source_orphan_purge
         join_expr = cnf_join_expr.replace("@", "left outer" if cnf_source_orphan_purge == "Y" else "inner") if cnf_join_expr else ""
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
@@ -634,9 +490,10 @@ def process_table_cnf(connection: Any, config: Config, engine: DatabaseEngine, p
         join_clause = f"\n   {join_expr}" if join_expr else ""
         where_clause = f"\nwhere {where_expr}" if where_expr else ""
         table_cnf["query_expr"] = base_from + join_clause + where_clause
+        table_columns = table_cnf["table_columns"]
         # if table has lob columns and long type columns, remove long type columns from table_columns
-        if cnd0["cnf_long_columns"] and cnd0["cnf_has_lob_columns"] != "N":
-            long_columns = [c.strip().lower() for c in cnd0["cnf_long_columns"].split(",")]
+        if cnd0["long_columns"] and cnd0["has_lob_columns"] != "N":
+            long_columns = [c.strip().lower() for c in cnd0["long_columns"].split(",")]
             table_columns = list(set([col.lower() for col in table_columns]) - set(long_columns))
         table_cnf["table_columns"] = table_columns
         # get sql_block and add it to tables_config
@@ -658,7 +515,7 @@ def tdb_run(config: Config) -> None:
             raise SystemExit(rc)
         connection = engine.get_connection(config)
         process_date = engine.get_system_date(connection).strftime('%Y%m%d')
-        tables_config = process_table_cnf(connection, config, engine, process_date)
+        tables_config = process_tables_cnf(connection, config, engine, process_date)
         if config.generate_script:
             rc = generate_script_output(config, tables_config)
         else:
@@ -672,3 +529,8 @@ def tdb_run(config: Config) -> None:
             engine.close_connection(connection)
         if engine and admin_connection:
             engine.close_connection(admin_connection)
+
+def append_unique_name(other_columns: List[Dict[str, Any]], other_column: Dict[str, Any]) -> None:
+    """ Appends a column to the other_columns list if its name is not already present."""
+    if other_column["name"] not in {col["name"] for col in other_columns }:
+        other_columns.append(other_column)

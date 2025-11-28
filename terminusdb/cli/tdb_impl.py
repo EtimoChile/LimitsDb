@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any, Dict, List, Literal
+from typing import Dict, List
 
 from terminusdb.core.tdb_logger import configure_logger, get_logger, reconfigure_logger
 from terminusdb.core.tdb_crypto import load_or_create_key
@@ -45,66 +45,66 @@ def _build_control_tables(owner: str) -> List[TableDefinition]:
     return [
         TableDefinition(
             owner=owner,
-            name="tdb_ctl",
+            name="TDB_CTL",
             columns=(
-                ColumnDefinition("ctl_owner", "string", length=50, nullable=False),
-                ColumnDefinition("ctl_table_name", "string", length=50, nullable=False),
-                ColumnDefinition("ctl_process_date", "date"),
-                ColumnDefinition("ctl_action", "string", length=10, nullable=False),
-                ColumnDefinition("ctl_status", "string", length=10, nullable=False),
-                ColumnDefinition("ctl_process_start", "date"),
-                ColumnDefinition("ctl_process_end", "date"),
-                ColumnDefinition("ctl_rows_processed", "number", precision=18, scale=0),
-                ColumnDefinition("ctl_plsql", "clob"),
+                ColumnDefinition("CTL_OWNER", "string", length=50, nullable=False),
+                ColumnDefinition("CTL_TABLE_NAME", "string", length=50, nullable=False),
+                ColumnDefinition("CTL_PROCESS_DATE", "date"),
+                ColumnDefinition("CTL_ACTION", "string", length=10, nullable=False),
+                ColumnDefinition("CTL_STATUS", "string", length=10, nullable=False),
+                ColumnDefinition("CTL_PROCESS_START", "date"),
+                ColumnDefinition("CTL_PROCESS_END", "date"),
+                ColumnDefinition("CTL_ROWS_PROCESSED", "number", precision=18, scale=0),
+                ColumnDefinition("CTL_PLSQL", "clob"),
             ),
-            primary_key=("ctl_owner", "ctl_table_name"),
+            primary_key=("CTL_OWNER", "CTL_TABLE_NAME"),
         ),
         TableDefinition(
             owner=owner,
-            name="tdb_log",
+            name="TDB_LOG",
             columns=(
-                ColumnDefinition("log_id", "number", precision=18, scale=0, nullable=False),
-                ColumnDefinition("log_owner", "string", length=50, nullable=False),
-                ColumnDefinition("log_table_name", "string", length=50, nullable=False),
-                ColumnDefinition("log_process_date", "date", nullable=False),
-                ColumnDefinition("log_action", "string", length=10, nullable=False),
-                ColumnDefinition("log_status", "string", length=10, nullable=False),
-                ColumnDefinition("log_process_start", "date", nullable=False),
-                ColumnDefinition("log_process_end", "date"),
-                ColumnDefinition("log_message", "string", length=4000),
-                ColumnDefinition("log_rows_processed", "number", precision=18, scale=0),
-                ColumnDefinition("log_plsql", "clob"),
+                ColumnDefinition("LOG_ID", "number", precision=18, scale=0, nullable=False),
+                ColumnDefinition("LOG_OWNER", "string", length=50, nullable=False),
+                ColumnDefinition("LOG_TABLE_NAME", "string", length=50, nullable=False),
+                ColumnDefinition("LOG_PROCESS_DATE", "date", nullable=False),
+                ColumnDefinition("LOG_ACTION", "string", length=10, nullable=False),
+                ColumnDefinition("LOG_STATUS", "string", length=10, nullable=False),
+                ColumnDefinition("LOG_PROCESS_START", "date", nullable=False),
+                ColumnDefinition("LOG_PROCESS_END", "date"),
+                ColumnDefinition("LOG_MESSAGE", "string", length=4000),
+                ColumnDefinition("LOG_ROWS_PROCESSED", "number", precision=18, scale=0),
+                ColumnDefinition("LOG_PLSQL", "clob"),
             ),
-            primary_key=("log_id",),
+            primary_key=("LOG_ID",),
         ),
         TableDefinition(
             owner=owner,
-            name="tdb_cnf",
+            name="TDB_CNF",
             columns=(
-                ColumnDefinition("cnf_id", "number", precision=18, scale=0, nullable=False),
-                ColumnDefinition("cnf_source_owner", "string", length=50),
-                ColumnDefinition("cnf_history_owner", "string", length=50),
-                ColumnDefinition("cnf_table_name", "string", length=50, nullable=False),
-                ColumnDefinition("cnf_retain_months_source", "number", precision=10, scale=0),
-                ColumnDefinition("cnf_retain_months_history", "number", precision=10, scale=0),
-                ColumnDefinition("cnf_exec_day", "string", length=10),
-                ColumnDefinition("cnf_frecuency", "string", length=10),
-                ColumnDefinition("cnf_is_active", "char", length=1, default="'Y'"),
-                ColumnDefinition("cnf_purge_date_expr", "string", length=100),
-                ColumnDefinition("cnf_additional_filter_expr", "string", length=4000),
-                ColumnDefinition("cnf_history_addtl_filter_expr", "string", length=4000),
-                ColumnDefinition("cnf_source_orphan_purge", "char", length=1, default="'N'"),
-                ColumnDefinition("cnf_orphan_check_column", "string", length=4000),
-                ColumnDefinition("cnf_has_lob_columns", "char", length=1, default="'N'"),
-                ColumnDefinition("cnf_referencing_tables", "string", length=200),
-                ColumnDefinition("cnf_join_expr", "string", length=4000),
-                ColumnDefinition("cnf_hint_expr", "string", length=4000),
-                ColumnDefinition("cnf_history_hint_expr", "string", length=4000),
-                ColumnDefinition("cnf_long_columns", "string", length=4000),
+                ColumnDefinition("CNF_ID", "number", precision=18, scale=0, nullable=False),
+                ColumnDefinition("CNF_SOURCE_OWNER", "string", length=50),
+                ColumnDefinition("CNF_HISTORY_OWNER", "string", length=50),
+                ColumnDefinition("CNF_TABLE_NAME", "string", length=50, nullable=False),
+                ColumnDefinition("CNF_RETAIN_MONTHS_SOURCE", "number", precision=10, scale=0),
+                ColumnDefinition("CNF_RETAIN_MONTHS_HISTORY", "number", precision=10, scale=0),
+                ColumnDefinition("CNF_EXEC_DAY", "string", length=10),
+                ColumnDefinition("CNF_FRECUENCY", "string", length=10),
+                ColumnDefinition("CNF_IS_ACTIVE", "char", length=1, default="'Y'"),
+                ColumnDefinition("CNF_PURGE_DATE_EXPR", "string", length=100),
+                ColumnDefinition("CNF_ADDITIONAL_FILTER_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_HISTORY_ADDTL_FILTER_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_SOURCE_ORPHAN_PURGE", "char", length=1, default="'N'"),
+                ColumnDefinition("CNF_ORPHAN_CHECK_COLUMN", "string", length=4000),
+                ColumnDefinition("CNF_HAS_LOB_COLUMNS", "char", length=1, default="'N'"),
+                ColumnDefinition("CNF_REFERENCING_TABLES", "string", length=200),
+                ColumnDefinition("CNF_JOIN_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_HINT_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_HISTORY_HINT_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_LONG_COLUMNS", "string", length=4000),
             ),
-            primary_key=("cnf_id",),
+            primary_key=("CNF_ID",),
             indexes=(
-                IndexDefinition(name="cnf_conf_i1", columns=("cnf_source_owner", "cnf_table_name")),
+                IndexDefinition(name="CNF_CONF_I1", columns=("CNF_SOURCE_OWNER", "CNF_TABLE_NAME")),
             ),
         ),
     ]
@@ -112,8 +112,8 @@ def _build_control_tables(owner: str) -> List[TableDefinition]:
 
 def _build_sequences(owner: str) -> List[SequenceDefinition]:
     return [
-        SequenceDefinition(owner=owner, name="tdb_log_id"),
-        SequenceDefinition(owner=owner, name="tdb_cnf_id"),
+        SequenceDefinition(owner=owner, name="TDB_LOG_ID"),
+        SequenceDefinition(owner=owner, name="TDB_CNF_ID"),
     ]
 
 
@@ -202,7 +202,7 @@ def run_cli() -> None:
         summary["source_users"] = engine.ensure_users(source_admin_conn, [source_user])
         summary["source_tables"] = engine.ensure_tables(source_admin_conn, source_tables)
         summary["source_sequences"] = engine.ensure_sequences(source_admin_conn, source_sequences)
-        engine.ensure_supporting_plsql(source_admin_conn, config.source_username)
+        summary["source_supporting_objects"] = engine.ensure_supporting_objects(source_admin_conn, config.source_username)
     finally:
         engine.close_connection(source_admin_conn)
 
@@ -212,7 +212,7 @@ def run_cli() -> None:
         summary["history_users"] = engine.ensure_users(history_admin_conn, [history_user])
         summary["history_tables"] = engine.ensure_tables(history_admin_conn, history_tables)
         summary["history_sequences"] = engine.ensure_sequences(history_admin_conn, history_sequences)
-        engine.ensure_supporting_plsql(history_admin_conn, config.history_username)
+        summary["history_supporting_objects"] = engine.ensure_supporting_objects(history_admin_conn, config.history_username)
     finally:
         engine.close_connection(history_admin_conn)
 

@@ -3,47 +3,41 @@ from __future__ import annotations
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from terminusdb.core.tdb_params_config import Config
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 from datetime import datetime
 
 
 @dataclass(frozen=True)
 class ColumnDefinition:
     """Generic column definition independent from a specific engine."""
-
     name: str
     data_type: str
+    id: Optional[int] = None
     length: Optional[int] = None
     precision: Optional[int] = None
     scale: Optional[int] = None
     nullable: bool = True
     default: Optional[str] = None
 
-
 @dataclass(frozen=True)
 class IndexDefinition:
     """Generic index definition."""
-
     name: str
     columns: Tuple[str, ...]
     unique: bool = False
 
-
 @dataclass(frozen=True)
 class TableDefinition:
     """Generic table definition."""
-
     owner: str
     name: str
     columns: Tuple[ColumnDefinition, ...]
     primary_key: Optional[Tuple[str, ...]] = None
     indexes: Tuple[IndexDefinition, ...] = ()
 
-
 @dataclass(frozen=True)
 class SequenceDefinition:
     """Generic sequence definition."""
-
     owner: str
     name: str
     start_with: int = 1
@@ -53,18 +47,14 @@ class SequenceDefinition:
     cycle: bool = False
     cache: Optional[int] = 20
 
-
 @dataclass(frozen=True)
 class RoleDefinition:
     """Generic role definition."""
-
     name: str
-
 
 @dataclass(frozen=True)
 class UserDefinition:
     """Generic user definition."""
-
     name: str
     password: str
     default_tablespace: Optional[str] = None
@@ -73,11 +63,9 @@ class UserDefinition:
     roles_with_admin_option: Tuple[str, ...] = ()
     system_privileges: Tuple[str, ...] = ()
 
-
 @dataclass(frozen=True)
 class DatabaseLinkDefinition:
     """Generic database link definition."""
-
     name: str
     username: str
     password: str
@@ -85,7 +73,6 @@ class DatabaseLinkDefinition:
 
 class DatabaseEngine(ABC):
     """Static interface for database engine operations."""
-
     @staticmethod
     @abstractmethod
     def get_connection(config: Config, *, admin: bool = False, env: Optional[Literal["SOURCE", "HISTORY"]] = None) -> Any:
@@ -193,38 +180,25 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_table_columns(conn: Any, owner: str, table_name: str) -> List[str]:
-        """Returns a list of column names for a given table in the specified schema.
+    def get_table_columns(conn: Any, owner: str, table_name: str) -> Tuple[List[str], Dict[str, ColumnDefinition]]:
+        """Retrieves column names and metadata for a given table.
         Args:
             conn: Active Oracle connection.
             owner: Schema owner of the table.
             table_name: Table name.
         Returns:
-            List of column names in lowercase."""
+            Tuple containing a list of column names and a dict of column metadata."""
         pass
 
     @staticmethod
     @abstractmethod
-    def get_columns_metadata(conn: Any, owner: str, table_name: str, columns: Sequence[str]) -> Dict[str, ColumnDefinition]:
-        """Returns detailed column metadata for the specified columns.
-        Args:
-            conn: Active database connection.
-            owner: Schema owner of the table.
-            table_name: Table name.
-            columns: Columns to fetch metadata for.
-        Returns:
-            Mapping from normalized column name to column definition."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def get_primary_key_columns(conn: Any, owner: str, table_name: str) -> Tuple[str, ...]:
+    def get_primary_key_columns(conn: Any, owner: str, table_name: str, table_cnf: Dict[str, Any]) -> Tuple[str, ...]:
         """Returns the primary key columns for the specified table."""
         pass
 
     @staticmethod
     @abstractmethod
-    def get_date_cond(date_expr: str, months_keep_src: int) -> str:
+    def get_date_condition(date_expr: str, months_keep_src: int) -> str:
         """Returns a date condition for the given date expression and months to keep.
         Args:
             date_expr: Date expression to evaluate.
@@ -266,7 +240,7 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def ensure_table_structure(conn: Any, table: TableDefinition) -> None:
+    def ensure_table_structure(conn: Any, table: TableDefinition, table_cnf: Dict[str, Any]) -> None:
         """Ensure that the provided table matches the expected structure."""
         pass
 
@@ -284,7 +258,47 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def ensure_supporting_plsql(conn: Any, owner: str) -> None:
+    def ensure_supporting_objects(conn: Any, owner: str) -> List[str]:
         """Ensure auxiliary PL/SQL objects required by TerminusDB exist in the schema."""
         pass
 
+    @staticmethod
+    @abstractmethod
+    def get_identifier_str(identifier: str) -> str:
+        """ Returns the identifier string required to query dictionary views.
+        Args:
+            indentifier: The identifier string to process.
+        Returns:
+            The identifier string without angle brackets.
+        """
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_identifiers_from_expression(expression: str) -> Set[str]:
+        """ Returns a set of @prefixxed identifiers found in the given expression.
+        Args:
+            expression: The expression string to process.
+        Returns:
+            A set of identifier strings found in the expression.
+        """
+
+    @staticmethod
+    @abstractmethod
+    def get_column_type(column: ColumnDefinition) -> str:
+        """ Returns the database-specific column type definition for the given column.
+        Args:
+            column: The ColumnDefinition object.
+        Returns:
+            The database-specific column type as a string.
+        """
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_tdb_columns_expressions() -> Tuple[str, str]:
+        """ Returns the expressions for the TDB process date and insert date columns.
+        Returns:
+            A tuple containing the process date expression and insert date expression.
+        """
+        pass

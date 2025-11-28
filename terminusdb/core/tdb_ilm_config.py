@@ -56,13 +56,13 @@ def normalize_table_row(table: Dict[str, Any], cond: Dict[str, Any]) -> Dict[str
     for key, value in list(table.items()) + list(cond.items()):
         if key == "conds":
             continue
-        row[f"cnf_{key}"] = _normalize_bool(value) if isinstance(value, bool) else value
+        row[key] = _normalize_bool(value) if isinstance(value, bool) else value
         row["ctl_status"] = None
 
     # Ensure default flags are present when omitted.
     for key in ["is_active", "source_orphan_purge", "has_lob_columns"]:
-        if "cnf_" + key not in row:
-            row["cnf_" + key] = "N" if key != "is_active" else "Y"
+        if key not in row:
+            row[key] = "N" if key != "is_active" else "Y"
 
     for key in [
         "source_owner", "history_owner", "table_name", "retain_months_source", "retain_months_history",
@@ -70,10 +70,10 @@ def normalize_table_row(table: Dict[str, Any], cond: Dict[str, Any]) -> Dict[str
         "history_addtl_filter_expr", "history_hint_expr", "orphan_check_column", "referencing_tables", "join_expr",
         "hint_expr", "long_columns",
     ]:
-        if "cnf_" + key not in row:
-            row["cnf_" + key] = None
+        if key not in row:
+            row[key] = None
 
-    row["cnf_id"] = _id_counter
+    row["id"] = _id_counter
     _id_counter += 1
     return row
 
@@ -120,10 +120,8 @@ def load_rows_from_yaml(yaml_path: str) -> List[Dict[str, Any]]:
         data_any: Any = yaml.safe_load(f)
     data: Dict[str, Any] = _ensure_mapping(data_any, yaml_path)
     _assert_valid_keys(set(data.keys()), where=f"{yaml_path} (root)", allowed=_VALID_ROOT_KEYS)
-
     rows: List[Dict[str, Any]] = []
     tables: List[Dict[str, Any]] = _ensure_list_of_mappings(data.get("tables"), "tables")
-
     for idx, table in enumerate(tables):
         table_keys = set(table.keys()) - {"conds"}
         _assert_valid_keys(table_keys, where=f"{yaml_path} tables[{idx}]", allowed=_VALID_TABLE_KEYS)
@@ -131,25 +129,20 @@ def load_rows_from_yaml(yaml_path: str) -> List[Dict[str, Any]]:
         table_name: str = str(table.get("table_name", "") or "")
         if (owner, table_name) in _loaded_tables:
             raise ValueError(f"Duplicate table in ilm-config-file: {owner}.{table_name}")
-
         # Normalize nested "conds" entries for the table.
         conds_any = table.get("conds")
         conds: List[Dict[str, Any]] = _ensure_list_of_mappings(conds_any, "conds") if conds_any is not None else []
         if not conds:
             conds = [{"is_active": True}]
-
         active_conds: List[Dict[str, Any]] = []
         for c_idx, cond in enumerate(conds):
             _assert_valid_keys(set(cond.keys()), where=f"{yaml_path} tables[{idx}].conds[{c_idx}]", allowed=_VALID_COND_KEYS)
             if bool(cond.get("is_active")) is True:
                 active_conds.append(cond)
-
         for cond in active_conds:
             rows.append(normalize_table_row(table, cond))
-
         if active_conds:
             _loaded_tables.add((owner, table_name))
-
     return rows
 
 def resolve_and_load_ilm_rows(*, schema: str, profile: Optional[str], config_dir: Optional[str] = None) -> List[Dict[str, Any]]:

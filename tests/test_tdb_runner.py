@@ -135,7 +135,7 @@ def _build_config() -> Config:
 def test_derived_columns_use_correct_alias(filter_expr: str, expected_lookup: str, expected_expr: str) -> None:
     engine = StubEngine(_build_config_rows(filter_expr), _build_metadata())
     config = _build_config()
-    tables = tdb_runner.process_table_cnf(object(), config, engine, "20250101")
+    tables = tdb_runner.process_tables_cnf(object(), config, engine, "20250101")
     inv_det = tables[("GL", "INV_DET")]
     derived = {col["name"]: col for col in inv_det["derived_columns"]}
     assert "INV_STATUS" in derived
@@ -148,7 +148,7 @@ def test_derived_columns_use_correct_alias(filter_expr: str, expected_lookup: st
 def test_alias_mismatch_is_ignored() -> None:
     engine = StubEngine(_build_config_rows("@A.INV_STATUS = 'A'"), _build_metadata())
     config = _build_config()
-    tables = tdb_runner.process_table_cnf(object(), config, engine, "20250101")
+    tables = tdb_runner.process_tables_cnf(object(), config, engine, "20250101")
     inv_det = tables[("GL", "INV_DET")]
     aliases = {col["name"] for col in inv_det["derived_columns"]}
     assert "INV_STATUS" not in aliases
@@ -157,7 +157,7 @@ def test_alias_mismatch_is_ignored() -> None:
 def test_quoted_columns_preserve_lookup_expression_and_case() -> None:
     engine = StubEngine(_build_config_rows('@B."QuotedCol" = \'Y\''), _build_metadata())
     config = _build_config()
-    tables = tdb_runner.process_table_cnf(object(), config, engine, "20250101")
+    tables = tdb_runner.process_tables_cnf(object(), config, engine, "20250101")
     inv_det = tables[("GL", "INV_DET")]
     derived = {col["name"]: col for col in inv_det["derived_columns"]}
     quoted = derived["QuotedCol"]

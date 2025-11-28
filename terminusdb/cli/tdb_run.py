@@ -53,6 +53,7 @@ def run_cli() -> None:
         tdb_run(config)
     except (ValueError, KeyError) as exc:
         logger.error("%s", exc)
+        logger.error(exc, exc_info=True)
         raise SystemExit(1)
 
 
