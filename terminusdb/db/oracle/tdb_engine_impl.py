@@ -213,7 +213,8 @@ class OracleEngine(DatabaseEngine):
     
     @staticmethod
     def _quote(identifier: str) -> str:
-        return f'"{identifier.replace('"', '""')}"'
+        escaped = identifier.replace("\"", "\"\"")
+        return f'"{escaped}"'
 
     @staticmethod
     def _quote_literal(value: str) -> str:
@@ -266,6 +267,21 @@ class OracleEngine(DatabaseEngine):
     @staticmethod
     def _user_has_sys_priv(cursor: oracledb.Cursor, username: str, privilege: str) -> bool:  # type: ignore[valid-type]
         return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_sys_privs WHERE grantee = :1 AND privilege = :2", [username, privilege])
+
+    @staticmethod
+    def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor,
+            """
+            SELECT 1
+              FROM dba_tab_privs
+             WHERE grantee = :grantee
+               AND owner = :owner
+               AND table_name = :table_name
+               AND privilege = :privilege
+            """,
+            [role, owner, table_name, privilege],
+        )
 
     @staticmethod
     def _role_exists(cursor: oracledb.Cursor, role: str) -> bool:  # type: ignore[valid-type]
@@ -1354,6 +1370,41 @@ end;"""
             if cursor:
                 cursor.close()
         return created
+
+    @staticmethod
+    def ensure_table_privileges(conn: oracledb.Connection, role: str, tables: Sequence[Tuple[str, str]], privileges: Sequence[str]) -> List[str]:
+        cursor: Optional[oracledb.Cursor] = None
+        granted: List[str] = []
+        changed = False
+        if not tables:
+            return granted
+        fmt_role = OracleEngine._format_identifier(role)
+        try:
+            cursor = conn.cursor()
+            for owner, table_name in tables:
+                fmttd_owner = OracleEngine._format_identifier(owner)
+                fmttd_table_name = OracleEngine._format_identifier(table_name)
+                for privilege in privileges:
+                    privilege_upper = privilege.upper()
+                    if OracleEngine._role_has_table_priv(
+                        cursor, role.upper(), owner.upper(), table_name.upper(), privilege_upper
+                    ):
+                        continue
+                    sql = f"GRANT {privilege_upper} ON {fmttd_owner}.{fmttd_table_name} TO {fmt_role}"
+                    OracleEngine._log_history_ddl(conn, sql)
+                    cursor.execute(sql)  # type: ignore[arg-type]
+                    granted.append(f"{fmttd_owner}.{fmttd_table_name}:{privilege_upper}")
+                    changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure table privileges.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return granted
 
     @staticmethod
     def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> List[str]:

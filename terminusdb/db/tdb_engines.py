@@ -264,6 +264,12 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def ensure_table_privileges(conn: Any, role: str, tables: Sequence[Tuple[str, str]], privileges: Sequence[str]) -> List[str]:
+        """Ensure the role has the specified privileges on each table, returning new grants."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def get_identifier_str(identifier: str) -> str:
         """ Returns the identifier string required to query dictionary views.
         Args:

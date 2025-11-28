@@ -85,6 +85,16 @@ def _compute_plan_layers(graph: Dict[Tuple[str, str], Set[Tuple[str, str]]]) -> 
     return layers
 
 
+def _collect_privilege_targets(tables_config: Dict[Tuple[str, str], Dict[str, Any]], owner_key: str) -> List[Tuple[str, str]]:
+    tables: Set[Tuple[str, str]] = set()
+    for table_cnf in tables_config.values():
+        if table_cnf.get("skip"):
+            continue
+        cond = table_cnf["conds"][0]
+        tables.add((cond[owner_key], cond["table_name"]))
+    return sorted(tables)
+
+
 def _plan_mode(config: Config) -> int:
     rows = _load_offline_rows(config)
     if not rows:
@@ -516,12 +526,26 @@ def tdb_run(config: Config) -> None:
         connection = engine.get_connection(config)
         process_date = engine.get_system_date(connection).strftime('%Y%m%d')
         tables_config = process_tables_cnf(connection, config, engine, process_date)
+        table_privileges = ("SELECT", "INSERT", "UPDATE", "DELETE")
+        source_tables_for_privileges = _collect_privilege_targets(tables_config, "source_owner")
+        if source_tables_for_privileges and _credentials_present(config, admin=True, env="SOURCE"):
+            source_admin_priv_conn = engine.get_connection(config, admin=True, env="SOURCE")
+            try:
+                engine.ensure_table_privileges(source_admin_priv_conn, config.source_role_name, source_tables_for_privileges, table_privileges)
+            finally:
+                engine.close_connection(source_admin_priv_conn)
         if config.generate_script:
             rc = generate_script_output(config, tables_config)
         else:
             admin_connection = engine.get_connection(config, admin=True)
-            if config.action == "SOURCE_ILM":
-                _ensure_history_tables(config, engine, admin_connection, tables_config)
+            _ensure_history_tables(config, engine, admin_connection, tables_config)
+            history_tables_for_privileges = _collect_privilege_targets(tables_config, "history_owner")
+            if history_tables_for_privileges and _credentials_present(config, admin=True, env="HISTORY"):
+                history_admin_priv_conn = engine.get_connection(config, admin=True, env="HISTORY")
+                try:
+                    engine.ensure_table_privileges(history_admin_priv_conn, config.history_role_name, history_tables_for_privileges, table_privileges)
+                finally:
+                    engine.close_connection(history_admin_priv_conn)
             rc = tdb_exec_ilm(config, tables_config, process_date, engine, connection)
         raise SystemExit(rc)
     finally:
