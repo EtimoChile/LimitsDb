@@ -1,6 +1,5 @@
 """Bootstrap database objects required by TerminusDB."""
 from __future__ import annotations
-
 import argparse
 from typing import Dict, List
 
@@ -8,114 +7,66 @@ from terminusdb.core.tdb_logger import configure_logger, get_logger, reconfigure
 from terminusdb.core.tdb_crypto import load_or_create_key
 from terminusdb.core.tdb_params_config import Config, build_config
 from terminusdb.db.tdb_engine_loader import get_db_engine
-from terminusdb.db.tdb_engines import (
-    ColumnDefinition,
-    DatabaseLinkDefinition,
-    IndexDefinition,
-    RoleDefinition,
-    SequenceDefinition,
-    TableDefinition,
-    UserDefinition,
-)
+from terminusdb.db.tdb_engines import ColumnDefinition, DatabaseLinkDefinition, IndexDefinition, RoleDefinition, SequenceDefinition, TableDefinition, UserDefinition
 from terminusdb.core.tdb_utils import encrypt_secrets_in_place
-
 
 configure_logger(level="WARNING")
 
-
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Ensure TerminusDB control objects exist in the database.",
-    )
+    parser = argparse.ArgumentParser(description="Ensure TerminusDB control objects exist in the database.", )
     parser.add_argument("--schema", required=True, help="Schema name (folder under schemas/)")
     parser.add_argument("--profile", help="Profile name (e.g., dev, prod)")
     parser.add_argument("--config-dir", help="Configuration root (overrides autodiscovery)")
     parser.add_argument("--config-file", help="Additional configuration overlay")
     parser.add_argument("--set", action="append", default=[], help="Overrides like key=value; supports dotted keys for nesting")
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging level",
-    )
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
     return parser.parse_args()
-
 
 def _build_control_tables(owner: str) -> List[TableDefinition]:
     return [
         TableDefinition(
-            owner=owner,
-            name="TDB_CTL",
-            columns=(
+            owner=owner, name="TDB_CTL", columns=(
                 ColumnDefinition("CTL_OWNER", "string", length=50, nullable=False),
-                ColumnDefinition("CTL_TABLE_NAME", "string", length=50, nullable=False),
-                ColumnDefinition("CTL_PROCESS_DATE", "date"),
+                ColumnDefinition("CTL_TABLE_NAME", "string", length=50, nullable=False), ColumnDefinition("CTL_PROCESS_DATE", "date"),
                 ColumnDefinition("CTL_ACTION", "string", length=10, nullable=False),
-                ColumnDefinition("CTL_STATUS", "string", length=10, nullable=False),
-                ColumnDefinition("CTL_PROCESS_START", "date"),
-                ColumnDefinition("CTL_PROCESS_END", "date"),
-                ColumnDefinition("CTL_ROWS_PROCESSED", "number", precision=18, scale=0),
+                ColumnDefinition("CTL_STATUS", "string", length=10, nullable=False), ColumnDefinition("CTL_PROCESS_START", "date"),
+                ColumnDefinition("CTL_PROCESS_END", "date"), ColumnDefinition("CTL_ROWS_PROCESSED", "number", precision=18, scale=0),
                 ColumnDefinition("CTL_PLSQL", "clob"),
-            ),
-            primary_key=("CTL_OWNER", "CTL_TABLE_NAME"),
+            ), primary_key=("CTL_OWNER", "CTL_TABLE_NAME"),
         ),
         TableDefinition(
-            owner=owner,
-            name="TDB_LOG",
-            columns=(
+            owner=owner, name="TDB_LOG", columns=(
                 ColumnDefinition("LOG_ID", "number", precision=18, scale=0, nullable=False),
                 ColumnDefinition("LOG_OWNER", "string", length=50, nullable=False),
-                ColumnDefinition("LOG_TABLE_NAME", "string", length=50, nullable=False),
-                ColumnDefinition("LOG_PROCESS_DATE", "date", nullable=False),
+                ColumnDefinition("LOG_TABLE_NAME", "string", length=50, nullable=False), ColumnDefinition("LOG_PROCESS_DATE", "date", nullable=False),
                 ColumnDefinition("LOG_ACTION", "string", length=10, nullable=False),
-                ColumnDefinition("LOG_STATUS", "string", length=10, nullable=False),
-                ColumnDefinition("LOG_PROCESS_START", "date", nullable=False),
-                ColumnDefinition("LOG_PROCESS_END", "date"),
-                ColumnDefinition("LOG_MESSAGE", "string", length=4000),
-                ColumnDefinition("LOG_ROWS_PROCESSED", "number", precision=18, scale=0),
-                ColumnDefinition("LOG_PLSQL", "clob"),
-            ),
-            primary_key=("LOG_ID",),
+                ColumnDefinition("LOG_STATUS", "string", length=10, nullable=False), ColumnDefinition("LOG_PROCESS_START", "date", nullable=False),
+                ColumnDefinition("LOG_PROCESS_END", "date"), ColumnDefinition("LOG_MESSAGE", "string", length=4000),
+                ColumnDefinition("LOG_ROWS_PROCESSED", "number", precision=18, scale=0), ColumnDefinition("LOG_PLSQL", "clob"),
+            ), primary_key=("LOG_ID", ),
         ),
         TableDefinition(
-            owner=owner,
-            name="TDB_CNF",
-            columns=(
-                ColumnDefinition("CNF_ID", "number", precision=18, scale=0, nullable=False),
-                ColumnDefinition("CNF_SOURCE_OWNER", "string", length=50),
-                ColumnDefinition("CNF_HISTORY_OWNER", "string", length=50),
-                ColumnDefinition("CNF_TABLE_NAME", "string", length=50, nullable=False),
+            owner=owner, name="TDB_CNF", columns=(
+                ColumnDefinition("CNF_ID", "number", precision=18, scale=0,
+                                 nullable=False), ColumnDefinition("CNF_SOURCE_OWNER", "string", length=50),
+                ColumnDefinition("CNF_HISTORY_OWNER", "string", length=50), ColumnDefinition("CNF_TABLE_NAME", "string", length=50, nullable=False),
                 ColumnDefinition("CNF_RETAIN_MONTHS_SOURCE", "number", precision=10, scale=0),
-                ColumnDefinition("CNF_RETAIN_MONTHS_HISTORY", "number", precision=10, scale=0),
-                ColumnDefinition("CNF_EXEC_DAY", "string", length=10),
-                ColumnDefinition("CNF_FRECUENCY", "string", length=10),
-                ColumnDefinition("CNF_IS_ACTIVE", "char", length=1, default="'Y'"),
-                ColumnDefinition("CNF_PURGE_DATE_EXPR", "string", length=100),
-                ColumnDefinition("CNF_ADDITIONAL_FILTER_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_RETAIN_MONTHS_HISTORY", "number", precision=10, scale=0), ColumnDefinition("CNF_EXEC_DAY", "string", length=10),
+                ColumnDefinition("CNF_FRECUENCY", "string", length=10), ColumnDefinition("CNF_IS_ACTIVE", "char", length=1, default="'Y'"),
+                ColumnDefinition("CNF_PURGE_DATE_EXPR", "string", length=100), ColumnDefinition("CNF_ADDITIONAL_FILTER_EXPR", "string", length=4000),
                 ColumnDefinition("CNF_HISTORY_ADDTL_FILTER_EXPR", "string", length=4000),
                 ColumnDefinition("CNF_SOURCE_ORPHAN_PURGE", "char", length=1, default="'N'"),
                 ColumnDefinition("CNF_ORPHAN_CHECK_COLUMN", "string", length=4000),
                 ColumnDefinition("CNF_HAS_LOB_COLUMNS", "char", length=1, default="'N'"),
-                ColumnDefinition("CNF_REFERENCING_TABLES", "string", length=200),
-                ColumnDefinition("CNF_JOIN_EXPR", "string", length=4000),
-                ColumnDefinition("CNF_HINT_EXPR", "string", length=4000),
-                ColumnDefinition("CNF_HISTORY_HINT_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_REFERENCING_TABLES", "string", length=200), ColumnDefinition("CNF_JOIN_EXPR", "string", length=4000),
+                ColumnDefinition("CNF_HINT_EXPR", "string", length=4000), ColumnDefinition("CNF_HISTORY_HINT_EXPR", "string", length=4000),
                 ColumnDefinition("CNF_LONG_COLUMNS", "string", length=4000),
-            ),
-            primary_key=("CNF_ID",),
-            indexes=(
-                IndexDefinition(name="CNF_CONF_I1", columns=("CNF_SOURCE_OWNER", "CNF_TABLE_NAME")),
-            ),
+            ), primary_key=("CNF_ID", ), indexes=(IndexDefinition(name="CNF_CONF_I1", columns=("CNF_SOURCE_OWNER", "CNF_TABLE_NAME")), ),
         ),
     ]
 
-
 def _build_sequences(owner: str) -> List[SequenceDefinition]:
-    return [
-        SequenceDefinition(owner=owner, name="TDB_LOG_ID"),
-        SequenceDefinition(owner=owner, name="TDB_CNF_ID"),
-    ]
-
+    return [SequenceDefinition(owner=owner, name="TDB_LOG_ID"), SequenceDefinition(owner=owner, name="TDB_CNF_ID"), ]
 
 def run_cli() -> None:
     logger = get_logger("impl")
@@ -125,16 +76,9 @@ def run_cli() -> None:
 
         load_or_create_key()
         try:
-            encrypt_secrets_in_place(
-                schema=args.schema,
-                profile=getattr(args, "profile", None),
-                config_root=getattr(args, "config_dir", None),
-            )
+            encrypt_secrets_in_place(schema=args.schema, profile=getattr(args, "profile", None), config_root=getattr(args, "config_dir", None))
         except Exception:  # pragma: no cover - log and continue
-            logger.warning(
-                "Auto-encrypt failed; continuing. Loader will enforce encrypted secrets.",
-                exc_info=True,
-            )
+            logger.warning("Auto-encrypt failed; continuing. Loader will enforce encrypted secrets.", exc_info=True, )
         cfg_dict = build_config({}, args)
         config = Config.from_dict(cfg_dict)
 
@@ -161,37 +105,23 @@ def run_cli() -> None:
     history_privileges = getattr(engine, "REQUIRED_SYSTEM_PRIVILEGES", ())
 
     source_user = UserDefinition(
-        name=config.source_username,
-        password=config.source_password,
-        default_tablespace=config.source_default_tablespace or None,
-        roles=(config.source_role_name,),
-        roles_with_admin_option=(config.source_role_name,),
-        system_privileges=source_privileges,
+        name=config.source_username, password=config.source_password, default_tablespace=config.source_default_tablespace or None,
+        roles=(config.source_role_name, ), roles_with_admin_option=(config.source_role_name, ), system_privileges=source_privileges
     )
     history_roles = [RoleDefinition(name=config.history_role_name)]
     history_user = UserDefinition(
-        name=config.history_username,
-        password=config.history_password,
-        default_tablespace=config.history_default_tablespace or None,
-        roles=(config.history_role_name,),
-        roles_with_admin_option=(config.history_role_name,),
-        system_privileges=history_privileges,
+        name=config.history_username, password=config.history_password, default_tablespace=config.history_default_tablespace or None,
+        roles=(config.history_role_name, ), roles_with_admin_option=(config.history_role_name, ), system_privileges=history_privileges
     )
     source_tables = _build_control_tables(config.source_username)
     source_sequences = _build_sequences(config.source_username)
     history_tables = _build_control_tables(config.history_username)
     history_sequences = _build_sequences(config.history_username)
     source_db_link = DatabaseLinkDefinition(
-        name=config.source_to_history_dblink_name,
-        username=config.history_username,
-        password=config.history_password,
-        dsn=config.history_dsn,
+        name=config.source_to_history_dblink_name, username=config.history_username, password=config.history_password, dsn=config.history_dsn
     )
     history_db_link = DatabaseLinkDefinition(
-        name=config.history_to_source_dblink_name,
-        username=config.source_username,
-        password=config.source_password,
-        dsn=config.source_dsn,
+        name=config.history_to_source_dblink_name, username=config.source_username, password=config.source_password, dsn=config.source_dsn
     )
 
     summary: Dict[str, List[str]] = {}
@@ -234,7 +164,6 @@ def run_cli() -> None:
             logger.info("Created %s: %s", key.replace("_", " "), ", ".join(values))
     if not anything_created:
         logger.info("All TerminusDB database objects are already present.")
-
 
 if __name__ == "__main__":  # pragma: no cover
     run_cli()

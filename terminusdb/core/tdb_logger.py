@@ -7,10 +7,7 @@ _configured = False
 _lock = threading.RLock()
 
 # Un único formato legible (sin JSON, sin ambientes)
-_FORMAT = logging.Formatter(
-    fmt="%(asctime)s [%(levelname)s] %(processName)s-%(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+_FORMAT = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(processName)s-%(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S", )
 
 def configure_logger(level: str = "INFO", base_name: str = _base_name) -> logging.Logger:
     """Configura el logger base una sola vez (handlers/format)."""

@@ -7,15 +7,20 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 TDB_DIR = Path(os.path.expanduser("~/.terminusdb"))
 KEY_PATH = TDB_DIR / "tdb.key"
 
-def _b64e(b: bytes) -> str: return base64.urlsafe_b64encode(b).decode("ascii")
-def _b64d(s: str) -> bytes: return base64.urlsafe_b64decode(s.encode("ascii"))
+def _b64e(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode("ascii")
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s.encode("ascii"))
 
 def _ensure_dir() -> None:
     TDB_DIR.mkdir(parents=True, exist_ok=True)
 
 def _chmod600(path: Path) -> None:
-    try: os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except Exception: pass
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        pass
 
 def _generate_aes256_key() -> bytes:
     return AESGCM.generate_key(256)
@@ -26,7 +31,7 @@ def load_or_create_key() -> bytes:
         if all(c in "0123456789abcdefABCDEF" for c in env) and len(env) == 64:
             return bytes.fromhex(env)
         try:
-            k = base64.b64decode(env); 
+            k = base64.b64decode(env)
             if len(k) == 32: return k
         except Exception:
             pass
@@ -37,8 +42,10 @@ def load_or_create_key() -> bytes:
     _ensure_dir()
     if KEY_PATH.exists():
         data = KEY_PATH.read_bytes()
-        try: key = base64.b64decode(data)
-        except Exception: key = data
+        try:
+            key = base64.b64decode(data)
+        except Exception:
+            key = data
         if len(key) != 32:
             raise ValueError("Invalid key at ~/.terminusdb/tdb.key (expected 32 bytes).")
         return key

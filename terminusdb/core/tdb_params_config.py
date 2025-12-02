@@ -9,17 +9,16 @@ from terminusdb.core.tdb_config_loader import load_runtime_config
 from terminusdb.core.tdb_logger import get_logger
 from terminusdb.core.tdb_meta import Help, Cli, Secret, Env, CliOnly
 from terminusdb.core.tdb_utils import resolve_schema_file  # markers for Annotated metadata
+
 logger = get_logger("params_config")
 
 VALID_MODES: Tuple[str, ...] = ("VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE")
 MODE_ALIASES: Dict[str, str] = {"DRY_RUN": "PREVIEW"}
 MODES_REQUIRING_CONNECTIONS: Set[str] = {"VALIDATE", "PREVIEW", "SCRIPT", "EXECUTE"}
 
-
 def _normalize_mode(value: str) -> str:
     normalized = (value or "").upper()
     return MODE_ALIASES.get(normalized, normalized)
-
 
 # ------------------------------------------------------------------------------
 # Single source of truth: Config + Annotated metadata
@@ -27,6 +26,7 @@ def _normalize_mode(value: str) -> str:
 @dataclass
 class Config:
     #Execution mode parameters
+    # yapf: disable
     action: Annotated[Literal["SOURCE_ILM", "HISTORY_ILM"], Help("ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)"), Cli("--action"), Env("TDB_ACTION")] = "SOURCE_ILM"
     mode: Annotated[Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"], Help("Runtime mode: VALIDATE config/credentials, PLAN dependency order, PREVIEW simulate without changes, SCRIPT generate SQL scripts, EXECUTE apply changes"), Cli("--mode"), Env("TDB_MODE")] = "PREVIEW"
     chunk_size: Annotated[int, Help("Rows per chunk when processing large tables"), Cli("--chunk-size"), Env("TDB_CHUNK_SIZE")] = 100000
@@ -36,12 +36,10 @@ class Config:
     parallel_max: Annotated[int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("TDB_PARALLEL_MAX")] = 10
     db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine")] = "oracle"
     log_level: Annotated[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], Help("Logging level"), Cli("--log-level"), Env("TDB_LOG_LEVEL")] = "INFO"
-
     # schema/profile + optional tables override file
     schema: Annotated[str, Help("Schema name (folder under schemas/)"), Cli("--schema"), Env("TDB_SCHEMA"), CliOnly()] = ""
     profile: Annotated[Optional[str], Help("Profile name (e.g., dev, prod)"), Cli("--profile"), Env("TDB_PROFILE"), CliOnly()] = None
     ilm_config_file: Annotated[Optional[str], Help("YAML file with tables (bypass DB discovery)"), Cli("--ilm-config-file"), Env("ILM_CONFIG_FILE"), CliOnly()] = None
-
     # Database connection parameters
     source_dsn: Annotated[Optional[str], Help("DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname.")] = ""
     source_username: Annotated[Optional[str], Help("Username")] = ""
@@ -55,16 +53,11 @@ class Config:
     admin_history_password: Annotated[Optional[str], Help("Admin History password"), Secret()] = ""
     source_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the source user")] = None
     history_default_tablespace: Annotated[Optional[str], Help("Default tablespace for the history user")] = None
-    source_to_history_dblink_name: Annotated[
-        str,
-        Help("Database link name in source environment that connects to history"),
-    ] = "HIST"
-    history_to_source_dblink_name: Annotated[
-        str,
-        Help("Database link name in history environment that connects to source"),
-    ] = "SRC"
+    source_to_history_dblink_name: Annotated[str, Help("Database link name in source environment that connects to history")] = "HIST"
+    history_to_source_dblink_name: Annotated[str, Help("Database link name in history environment that connects to source")] = "SRC"
     source_role_name: Annotated[str, Help("Role name to create in the source environment")] = "TDB_SOURCE_ROLE"
     history_role_name: Annotated[str, Help("Role name to create in the history environment")] = "TDB_HISTORY_ROLE"
+    # yapf: enable
 
     def __post_init__(self) -> None:
         normalized_mode = _normalize_mode(self.mode)
@@ -95,7 +88,6 @@ class Config:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-
 # ------------------------------------------------------------------------------
 # CLI builder from Config metadata (Annotated)
 # ------------------------------------------------------------------------------
@@ -108,14 +100,13 @@ def _arg_type_from_default(default: Any):
         return float
     return str
 
-
 def build_argparser_from_config() -> argparse.ArgumentParser:
     """
     Build an argparse.ArgumentParser from Config's Annotated metadata.
     Also adds builder-only flags: --config-dir, --config-file, and --set.
     CLI defaults are suppressed so they don't override values from YAML or ENV.
     """
-    parser = argparse.ArgumentParser( description="TerminusDB CLI", formatter_class=argparse.ArgumentDefaultsHelpFormatter, )
+    parser = argparse.ArgumentParser(description="TerminusDB CLI", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     hints = get_type_hints(Config, include_extras=True)
     for name, annotated in hints.items():
         metas = get_args(annotated)
@@ -140,9 +131,9 @@ def build_argparser_from_config() -> argparse.ArgumentParser:
         else:
             parser.add_argument(cli, type=_arg_type_from_default(default), **arg_kwargs)
     # Builder-only flags (not part of Config dataclass)
-    parser.add_argument( "--config-dir", help="Configuration root (overrides autodiscovery of ~/.config/TerminusDB and /etc/terminusdb)" )
-    parser.add_argument( "--config-file", help="Additional YAML overlay (highest priority)" )
-    parser.add_argument( "--set", action="append", default=[], help="Overrides like key=value; supports dotted keys for nesting" )
+    parser.add_argument("--config-dir", help="Configuration root (overrides autodiscovery of ~/.config/TerminusDB and /etc/terminusdb)")
+    parser.add_argument("--config-file", help="Additional YAML overlay (highest priority)")
+    parser.add_argument("--set", action="append", default=[], help="Overrides like key=value; supports dotted keys for nesting")
     return parser
 
 def parse_args() -> argparse.Namespace:
@@ -206,11 +197,8 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> D
                 cli_sets[name] = val
     # Call the loader with overlay sources
     cfg = load_runtime_config(
-        schema=cli_args.schema,
-        profile=getattr(cli_args, "profile", None),
-        cli_sets=cli_sets,
-        explicit_config_file=getattr(cli_args, "config_file", None),
-        explicit_config_dir=getattr(cli_args, "config_dir", None),
+        schema=cli_args.schema, profile=getattr(cli_args, "profile", None), cli_sets=cli_sets,
+        explicit_config_file=getattr(cli_args, "config_file", None), explicit_config_dir=getattr(cli_args, "config_dir", None),
     )
     # Merge with embedded defaults (if you still keep some minimal defaults in code)
     final = dict(defaults)
@@ -219,12 +207,7 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> D
     final["schema"] = cli_args.schema
     final["profile"] = getattr(cli_args, "profile", None)
     final["ilm_config_file"] = resolve_schema_file(
-        schema=cli_args.schema,
-        profile=getattr(cli_args, "profile", None),
-        explicit_config_dir=getattr(cli_args, "config_dir", None),
-        explicit_file=getattr(cli_args, "ilm_config_file", None),
-        prefix_name="ilm",
-        extension_name="yml",
-        description="ilm configuration file",
+        schema=cli_args.schema, profile=getattr(cli_args, "profile", None), explicit_config_dir=getattr(cli_args, "config_dir", None),
+        explicit_file=getattr(cli_args, "ilm_config_file", None), prefix_name="ilm", extension_name="yml", description="ilm configuration file",
     )
     return final

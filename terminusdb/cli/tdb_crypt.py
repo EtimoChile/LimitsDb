@@ -7,33 +7,22 @@ from terminusdb.core.tdb_logger import configure_logger, get_logger
 from terminusdb.core.tdb_crypto import load_or_create_key
 from terminusdb.core.tdb_utils import encrypt_secrets_in_place
 
-
 configure_logger(level="WARNING")
 
-
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Encrypt cleartext secrets in secrets.json",
-    )
+    parser = argparse.ArgumentParser(description="Encrypt cleartext secrets in secrets.json", )
     parser.add_argument("--schema", required=True, help="Schema name (folder under schemas/)")
     parser.add_argument("--profile", help="Profile name (e.g., dev, prod)")
     parser.add_argument("--config-dir", help="Configuration root (overrides autodiscovery)")
     return parser.parse_args()
 
-
 def run_cli() -> None:
     """Entry point for the ``tdb-crypt`` command."""
-
     logger = get_logger("crypt")
     try:
         args = _parse_args()
-
         load_or_create_key()
-        updated = encrypt_secrets_in_place(
-            schema=args.schema,
-            profile=getattr(args, "profile", None),
-            config_root=getattr(args, "config_dir", None),
-        )
+        updated = encrypt_secrets_in_place(schema=args.schema, profile=getattr(args, "profile", None), config_root=getattr(args, "config_dir", None))
         if updated:
             logger.info("Secrets updated: %s", updated)
         else:
@@ -41,7 +30,6 @@ def run_cli() -> None:
     except ValueError as exc:
         logger.error("%s", exc)
         raise SystemExit(1)
-
 
 if __name__ == "__main__":  # pragma: no cover
     run_cli()

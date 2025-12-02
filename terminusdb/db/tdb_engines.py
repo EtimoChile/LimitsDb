@@ -6,7 +6,6 @@ from terminusdb.core.tdb_params_config import Config
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 from datetime import datetime
 
-
 @dataclass(frozen=True)
 class ColumnDefinition:
     """Generic column definition independent from a specific engine."""
@@ -130,8 +129,9 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def save_error_status(conn: Any, config: Config, owner: str, table_name: str, process_date: str, process_start: datetime,
-                          message: str, plsql_code: str) -> None:
+    def save_error_status(
+        conn: Any, config: Config, owner: str, table_name: str, process_date: str, process_start: datetime, message: str, plsql_code: str
+    ) -> None:
         """Saves an error status entry in the control table.
         Args:
             conn: Active database connection.
@@ -143,7 +143,6 @@ class DatabaseEngine(ABC):
             message: Error message.
             plsql_code: PL/SQL or SQL block executed."""
         pass
-
 
     @staticmethod
     @abstractmethod
@@ -206,7 +205,6 @@ class DatabaseEngine(ABC):
         Returns:
             Date condition as string."""
         pass
-    
 
     @staticmethod
     @abstractmethod

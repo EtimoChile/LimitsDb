@@ -3,7 +3,7 @@ from typing import Any, List, Optional, Iterable, Tuple, Sequence, TypeVar, TYPE
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, get_args, get_origin, get_type_hints, Literal
-from platformdirs import PlatformDirs            # requerido
+from platformdirs import PlatformDirs  # requerido
 from importlib.resources import files as ir_files
 
 if TYPE_CHECKING:
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 from terminusdb.core.tdb_logger import get_logger
 from terminusdb.core.tdb_meta import Help, Secret, CliOnly
 from terminusdb.core.tdb_crypto import load_or_create_key, encrypt, is_encrypted
+
 logger = get_logger("utils")
 
 def nvl(value: Optional[Any], default: Any) -> Any:
@@ -23,6 +24,7 @@ def nvl(value: Optional[Any], default: Any) -> Any:
     return value if value is not None else default
 
 T = TypeVar('T')
+
 def max_ignore_none(values: Sequence[Optional[T]]) -> Optional[T]:
     """
     Returns the maximum value from a sequence, ignoring None values.
@@ -38,7 +40,7 @@ def max_ignore_none(values: Sequence[Optional[T]]) -> Optional[T]:
     if not filtered:
         return None
     try:
-        return max(filtered) # type: ignore
+        return max(filtered)  # type: ignore
     except TypeError as e:
         raise TypeError("Values are not mutually comparable.") from e
 
@@ -50,7 +52,7 @@ def indent_lines(text: str, spaces: int) -> str:
     :param spaces: Number of spaces to prepend to each line after the first.
     :return: Modified string with indentation applied.
     """
-    return ("\n"+(" " * spaces)).join(text.splitlines())
+    return ("\n" + (" " * spaces)).join(text.splitlines())
 
 def join_wrapped(connector: str, items: Iterable[str], max_line_length: int) -> str:
     """
@@ -74,7 +76,7 @@ def join_wrapped(connector: str, items: Iterable[str], max_line_length: int) -> 
     if current_line:
         lines.append(current_line)
     return "\n".join(lines)
-    
+
 def get_effective_credentials(cfg: Config, *, admin: bool = False, env: Optional[Literal["SOURCE", "HISTORY"]] = None):
     """Return (username, password, dsn) tuple according to action and admin flag."""
     is_source = cfg.action == "SOURCE_ILM" if env is None else (env == "SOURCE")
@@ -92,6 +94,7 @@ def get_effective_credentials(cfg: Config, *, admin: bool = False, env: Optional
     return user, pwd, dsn
 
 APPNAME = "TerminusDB"
+
 def _schema_dir(schema: str, profile: Optional[str], config_root: Optional[str]) -> Path:
     base = Path(config_root) if config_root else Path(get_config_roots(APPNAME)[0])
     d = base / "schemas" / schema
@@ -99,14 +102,8 @@ def _schema_dir(schema: str, profile: Optional[str], config_root: Optional[str])
     return d
 
 def resolve_schema_file(
-    *,
-    schema: str,
-    profile: Optional[str],
-    explicit_config_dir: Optional[str],
-    explicit_file: Optional[str],
-    prefix_name: Literal["config", "ilm", "secrets"],
-    extension_name: Literal["yml", "json"] = "yml", 
-    description: str,
+    *, schema: str, profile: Optional[str], explicit_config_dir: Optional[str], explicit_file: Optional[str],
+    prefix_name: Literal["config", "ilm", "secrets"], extension_name: Literal["yml", "json"] = "yml", description: str,
 ) -> Optional[str]:
     """
     Resolve the file path for a schema-level file (config.yml, ilm.yml, secrets.json).
@@ -154,11 +151,7 @@ def secret_keys_from_config() -> List[str]:
 
 def render_config_template_with_help() -> str:
     from terminusdb.core.tdb_params_config import Config  # lazy import to avoid circulars
-    lines: List[str] = [
-        "# TerminusDB config template",
-        "# All keys are commented; defaults are shown on the right; help after the hash.",
-        "",
-    ]
+    lines: List[str] = ["# TerminusDB config template", "# All keys are commented; defaults are shown on the right; help after the hash.", "", ]
     for name, annotated in _hints().items():
         metas = get_args(annotated)
         # skip secrets from config.yml (they go in secrets.json)
@@ -252,8 +245,8 @@ def get_config_roots(appname: str = APPNAME) -> Tuple[Path, Path]:
     return Path(d.user_config_dir), Path("/etc/terminusdb")
 
 def init_schema(
-    *, schema: str, profile: Optional[str] = None, config_root: Optional[str] = None,
-    overwrite: bool = False, with_examples: bool = True, auto_encrypt: bool = True
+    *, schema: str, profile: Optional[str] = None, config_root: Optional[str] = None, overwrite: bool = False, with_examples: bool = True,
+    auto_encrypt: bool = True
 ) -> Tuple[Path, Path, Path, Path | None]:
     """ Initialize schema/profile configuration structure.  """
     # ensure key exists (idempotent)

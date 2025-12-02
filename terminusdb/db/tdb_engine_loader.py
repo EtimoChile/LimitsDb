@@ -1,7 +1,6 @@
 from typing import cast
 from terminusdb.db.tdb_engines import DatabaseEngine
 
-
 def get_db_engine(engine_name: str) -> DatabaseEngine:
     """Retrieves the database engine class based on the provided engine name.
     Args:

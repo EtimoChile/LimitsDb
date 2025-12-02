@@ -9,7 +9,6 @@ from terminusdb.core import tdb_runner
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.db.tdb_engines import ColumnDefinition
 
-
 class StubEngine:
     def __init__(self, conf_rows: List[Dict[str, Any]], metadata: Dict[Tuple[str, str], Dict[str, ColumnDefinition]]) -> None:
         self._conf_rows = conf_rows
@@ -26,13 +25,7 @@ class StubEngine:
         columns = self._metadata[(owner.upper(), table_name.upper())]
         return [definition.name for definition in columns.values()]
 
-    def get_columns_metadata(
-        self,
-        conn: Any,
-        owner: str,
-        table_name: str,
-        columns: Sequence[str],
-    ) -> Dict[str, ColumnDefinition]:
+    def get_columns_metadata(self, conn: Any, owner: str, table_name: str, columns: Sequence[str], ) -> Dict[str, ColumnDefinition]:
         self.metadata_calls.append((owner.upper(), table_name.upper(), list(columns)))
         available = self._metadata[(owner.upper(), table_name.upper())]
         result: Dict[str, ColumnDefinition] = {}
@@ -48,7 +41,7 @@ class StubEngine:
         return result
 
     def get_primary_key_columns(self, conn: Any, owner: str, table_name: str) -> Tuple[str, ...]:
-        return ("inv_id",)
+        return ("inv_id", )
 
     def get_date_cond(self, date_expr: str, months_keep_src: int) -> str:
         return f"COND({date_expr},{months_keep_src})"
@@ -65,57 +58,49 @@ class StubEngine:
     def close_connection(self, conn: Any) -> None:
         return None
 
-
 def _build_config_rows(filter_expression: str) -> List[Dict[str, Any]]:
-    return [
-        {
-            "cnf_source_owner": "GL",
-            "cnf_history_owner": "GLHST",
-            "cnf_table_name": "INV_HEAD",
-            "cnf_retain_months_source": 3,
-            "cnf_retain_months_history": 11,
-            "cnf_purge_date_expr": "INV_DATE",
-            "cnf_additional_filter_expr": filter_expression,
-            "cnf_history_addtl_filter_expr": None,
-            "cnf_source_orphan_purge": "N",
-            "cnf_long_columns": None,
-            "cnf_referencing_tables": None,
-            "cnf_join_expr": None,
-            "cnf_orphan_check_column": None,
-            "cnf_has_lob_columns": "N",
-        },
-        {
-            "cnf_source_owner": "GL",
-            "cnf_history_owner": "GLHST",
-            "cnf_table_name": "INV_DET",
-            "cnf_retain_months_source": None,
-            "cnf_retain_months_history": None,
-            "cnf_purge_date_expr": None,
-            "cnf_additional_filter_expr": None,
-            "cnf_history_addtl_filter_expr": None,
-            "cnf_source_orphan_purge": "N",
-            "cnf_long_columns": None,
-            "cnf_referencing_tables": "GL.INV_HEAD B",
-            "cnf_join_expr": "JOIN GL.INV_HEAD B ON B.INV_ID = A.INV_ID",
-            "cnf_orphan_check_column": None,
-            "cnf_has_lob_columns": "N",
-        },
-    ]
-
+    return [{
+        "cnf_source_owner": "GL",
+        "cnf_history_owner": "GLHST",
+        "cnf_table_name": "INV_HEAD",
+        "cnf_retain_months_source": 3,
+        "cnf_retain_months_history": 11,
+        "cnf_purge_date_expr": "INV_DATE",
+        "cnf_additional_filter_expr": filter_expression,
+        "cnf_history_addtl_filter_expr": None,
+        "cnf_source_orphan_purge": "N",
+        "cnf_long_columns": None,
+        "cnf_referencing_tables": None,
+        "cnf_join_expr": None,
+        "cnf_orphan_check_column": None,
+        "cnf_has_lob_columns": "N",
+    }, {
+        "cnf_source_owner": "GL",
+        "cnf_history_owner": "GLHST",
+        "cnf_table_name": "INV_DET",
+        "cnf_retain_months_source": None,
+        "cnf_retain_months_history": None,
+        "cnf_purge_date_expr": None,
+        "cnf_additional_filter_expr": None,
+        "cnf_history_addtl_filter_expr": None,
+        "cnf_source_orphan_purge": "N",
+        "cnf_long_columns": None,
+        "cnf_referencing_tables": "GL.INV_HEAD B",
+        "cnf_join_expr": "JOIN GL.INV_HEAD B ON B.INV_ID = A.INV_ID",
+        "cnf_orphan_check_column": None,
+        "cnf_has_lob_columns": "N",
+    }, ]
 
 def _build_metadata() -> Dict[Tuple[str, str], Dict[str, ColumnDefinition]]:
-    return {
-        ("GL", "INV_HEAD"): {
-            "INV_ID": ColumnDefinition(name="inv_id", data_type="number", nullable=False),
-            "INV_STATUS": ColumnDefinition(name="inv_status", data_type="varchar2", length=1, nullable=False),
-            "QuotedCol": ColumnDefinition(name='"QuotedCol"', data_type="varchar2", length=10, nullable=True),
-        },
-        ("GL", "INV_DET"): {
-            "INV_ID": ColumnDefinition(name="inv_id", data_type="number", nullable=False),
-            "LINE_NO": ColumnDefinition(name="line_no", data_type="number", nullable=False),
-        },
-    }
-
+    return {("GL", "INV_HEAD"): {
+                "INV_ID": ColumnDefinition(name="inv_id", data_type="number", nullable=False),
+                "INV_STATUS": ColumnDefinition(name="inv_status", data_type="varchar2", length=1, nullable=False),
+                "QuotedCol": ColumnDefinition(name='"QuotedCol"', data_type="varchar2", length=10, nullable=True),
+            },
+            ("GL", "INV_DET"): {
+                "INV_ID": ColumnDefinition(name="inv_id", data_type="number", nullable=False),
+                "LINE_NO": ColumnDefinition(name="line_no", data_type="number", nullable=False),
+            }, }
 
 def _build_config() -> Config:
     cfg = Config(schema="demo", source_dsn="dsn", source_username="user", source_password="pwd")
@@ -124,13 +109,9 @@ def _build_config() -> Config:
     cfg.generate_script = False
     return cfg
 
-
 @pytest.mark.parametrize(
-    "filter_expr, expected_lookup, expected_expr",
-    [
-        ("@INV_STATUS = 'A'", "INV_STATUS", "INV_STATUS"),
-        ("@B.INV_STATUS = 'A'", "INV_STATUS", "INV_STATUS"),
-    ],
+    "filter_expr, expected_lookup, expected_expr", [("@INV_STATUS = 'A'", "INV_STATUS", "INV_STATUS"),
+                                                    ("@B.INV_STATUS = 'A'", "INV_STATUS", "INV_STATUS"), ],
 )
 def test_derived_columns_use_correct_alias(filter_expr: str, expected_lookup: str, expected_expr: str) -> None:
     engine = StubEngine(_build_config_rows(filter_expr), _build_metadata())
@@ -144,7 +125,6 @@ def test_derived_columns_use_correct_alias(filter_expr: str, expected_lookup: st
     assert derived["INV_STATUS"]["lookup_expr"] == expected_expr
     assert f"B.{expected_expr}" in inv_det["other_cols_exprs"]
 
-
 def test_alias_mismatch_is_ignored() -> None:
     engine = StubEngine(_build_config_rows("@A.INV_STATUS = 'A'"), _build_metadata())
     config = _build_config()
@@ -152,7 +132,6 @@ def test_alias_mismatch_is_ignored() -> None:
     inv_det = tables[("GL", "INV_DET")]
     aliases = {col["name"] for col in inv_det["derived_columns"]}
     assert "INV_STATUS" not in aliases
-
 
 def test_quoted_columns_preserve_lookup_expression_and_case() -> None:
     engine = StubEngine(_build_config_rows('@B."QuotedCol" = \'Y\''), _build_metadata())

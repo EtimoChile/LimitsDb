@@ -11,28 +11,12 @@ _loaded_tables: Set[Tuple[str, str]] = set()
 _VALID_ROOT_KEYS: Set[str] = {"tables"}
 
 _VALID_TABLE_KEYS: Set[str] = {
-    "source_owner",
-    "history_owner",
-    "table_name",
-    "retain_months_source",
-    "retain_months_history",
-    "exec_day",
-    "frecuency",
-    "purge_date_expr",
-    "additional_filter_expr",
-    "history_addtl_filter_expr",
-    "history_hint_expr",
-    "orphan_check_column",
-    "referencing_tables",
-    "join_expr",
-    "hint_expr",
-    "long_columns",
-    "source_orphan_purge",
-    "has_lob_columns",
+    "source_owner", "history_owner", "table_name", "retain_months_source", "retain_months_history", "exec_day", "frecuency", "purge_date_expr",
+    "additional_filter_expr", "history_addtl_filter_expr", "history_hint_expr", "orphan_check_column", "referencing_tables", "join_expr", "hint_expr",
+    "long_columns", "source_orphan_purge", "has_lob_columns"
 }
 
 _VALID_COND_KEYS: Set[str] = _VALID_TABLE_KEYS | {"is_active"}
-
 
 def _assert_valid_keys(keys: Set[str], *, where: str, allowed: Set[str]) -> None:
     """Raise if any key in `keys` is not present in `allowed`."""
@@ -40,10 +24,7 @@ def _assert_valid_keys(keys: Set[str], *, where: str, allowed: Set[str]) -> None
     if invalid:
         allowed_sorted = ", ".join(sorted(allowed))
         invalid_sorted = ", ".join(invalid)
-        raise KeyError(
-            f"Invalid key(s) in ILM config at {where}: {invalid_sorted}. "
-            f"Expected only: {allowed_sorted}"
-        )
+        raise KeyError(f"Invalid key(s) in ILM config at {where}: {invalid_sorted}. Expected only: {allowed_sorted}")
 
 def _normalize_bool(val: Any) -> Any:
     return 'Y' if val else 'N' if val is not None else None
@@ -51,28 +32,23 @@ def _normalize_bool(val: Any) -> Any:
 def normalize_table_row(table: Dict[str, Any], cond: Dict[str, Any]) -> Dict[str, Any]:
     global _id_counter
     row: Dict[str, Any] = {}
-
     # Merge the table definition with the condition (excluding nested "conds").
     for key, value in list(table.items()) + list(cond.items()):
         if key == "conds":
             continue
         row[key] = _normalize_bool(value) if isinstance(value, bool) else value
         row["ctl_status"] = None
-
     # Ensure default flags are present when omitted.
     for key in ["is_active", "source_orphan_purge", "has_lob_columns"]:
         if key not in row:
             row[key] = "N" if key != "is_active" else "Y"
-
     for key in [
-        "source_owner", "history_owner", "table_name", "retain_months_source", "retain_months_history",
-        "exec_day", "frecuency", "purge_date_expr", "additional_filter_expr",
-        "history_addtl_filter_expr", "history_hint_expr", "orphan_check_column", "referencing_tables", "join_expr",
-        "hint_expr", "long_columns",
+        "source_owner", "history_owner", "table_name", "retain_months_source", "retain_months_history", "exec_day", "frecuency", "purge_date_expr",
+        "additional_filter_expr", "history_addtl_filter_expr", "history_hint_expr", "orphan_check_column", "referencing_tables", "join_expr",
+        "hint_expr", "long_columns"
     ]:
         if key not in row:
             row[key] = None
-
     row["id"] = _id_counter
     _id_counter += 1
     return row
@@ -146,8 +122,7 @@ def load_rows_from_yaml(yaml_path: str) -> List[Dict[str, Any]]:
     return rows
 
 def resolve_and_load_ilm_rows(*, schema: str, profile: Optional[str], config_dir: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Load merged ILM for schema/profile and return normalized rows.
+    """ Load merged ILM for schema/profile and return normalized rows.
     """
     ilm_dict: Dict[str, Any] = load_ilm_config(schema=schema, profile=profile, explicit_config_dir=config_dir)
     rows: List[Dict[str, Any]] = []
@@ -169,7 +144,9 @@ def resolve_and_load_ilm_rows(*, schema: str, profile: Optional[str], config_dir
             conds = [{"is_active": True}]
         active_conds: List[Dict[str, Any]] = []
         for c_idx, cond in enumerate(conds):
-            _assert_valid_keys(set(cond.keys()), where=f"ILM config tables[{idx}].conds[{c_idx}] (schema={schema} profile={profile})", allowed=_VALID_COND_KEYS)
+            _assert_valid_keys(
+                set(cond.keys()), where=f"ILM config tables[{idx}].conds[{c_idx}] (schema={schema} profile={profile})", allowed=_VALID_COND_KEYS
+            )
             if bool(cond.get("is_active")) is True:
                 active_conds.append(cond)
         for cond in active_conds:

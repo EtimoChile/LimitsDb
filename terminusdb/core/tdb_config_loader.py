@@ -3,12 +3,12 @@ from __future__ import annotations
 import os, json
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, cast
-
 import yaml
 from terminusdb.core.tdb_crypto import (is_encrypted as _IS_ENC, decrypt as _DECRYPT)
 from terminusdb.core.tdb_logger import get_logger
 from terminusdb.core.tdb_utils import resolve_schema_file, secret_keys_from_config
-logger=get_logger("config_loader")
+
+logger = get_logger("config_loader")
 
 # --- utils --------------------------------------------------------------------
 def _deep_merge(a: Mapping[str, Any], b: Mapping[str, Any]) -> Dict[str, Any]:
@@ -31,7 +31,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     if isinstance(data, dict):
         return cast(Dict[str, Any], data)
     raise TypeError(f"YAML root must be a mapping (dict) in {path}")
- 
+
 def _read_env_overrides(prefix: str = "TDB_") -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, v in os.environ.items():
@@ -40,13 +40,16 @@ def _read_env_overrides(prefix: str = "TDB_") -> Dict[str, Any]:
         key = k[len(prefix):].lower().replace("__", ".").replace("_", ".")
         # basic typing
         if v.lower() in ("true", "false"):
-            out[key] = (v.lower() == "true"); continue
+            out[key] = (v.lower() == "true")
+            continue
         try:
-            out[key] = int(v); continue
+            out[key] = int(v)
+            continue
         except ValueError:
             pass
         try:
-            out[key] = float(v); continue
+            out[key] = float(v)
+            continue
         except ValueError:
             pass
         out[key] = v
@@ -69,13 +72,8 @@ def _apply_overrides(cfg: Dict[str, Any], kvs: Dict[str, Any]) -> Dict[str, Any]
 
 # --- loaders ------------------------------------------------------------------
 def load_runtime_config(
-    *,
-    schema: str,
-    profile: Optional[str],
-    cli_sets: Dict[str, Any],
-    explicit_config_file: Optional[str] = None,
-    explicit_config_dir: Optional[str] = None,
-    enforce_encrypted_secrets: bool = True,
+    *, schema: str, profile: Optional[str], cli_sets: Dict[str, Any], explicit_config_file: Optional[str] = None,
+    explicit_config_dir: Optional[str] = None, enforce_encrypted_secrets: bool = True
 ) -> Dict[str, Any]:
     """
     config_file → ENV TDB_* → --set
@@ -84,8 +82,10 @@ def load_runtime_config(
     """
     cfg: Dict[str, Any] = {}
     # 1) system/user dirs (or explicit)
-    config_file = resolve_schema_file(schema=schema, profile=profile, explicit_config_dir=explicit_config_dir,
-            explicit_file=explicit_config_file, prefix_name="config", extension_name="yml", description="configuration file")
+    config_file = resolve_schema_file(
+        schema=schema, profile=profile, explicit_config_dir=explicit_config_dir, explicit_file=explicit_config_file, prefix_name="config",
+        extension_name="yml", description="configuration file"
+    )
     if config_file:
         cfg = _deep_merge(cfg, _load_yaml(Path(config_file)))
     # 5) ENV
@@ -97,8 +97,10 @@ def load_runtime_config(
         cfg = _apply_overrides(cfg, cli_sets)
     # 7) Secrets (user > system), strictly enforced
     secrets: Dict[str, Any] = {}
-    secrets_path = resolve_schema_file(schema=schema, profile=profile, explicit_config_dir=explicit_config_dir,
-            explicit_file=None, prefix_name="secrets", extension_name="json", description="secrets file")
+    secrets_path = resolve_schema_file(
+        schema=schema, profile=profile, explicit_config_dir=explicit_config_dir, explicit_file=None, prefix_name="secrets", extension_name="json",
+        description="secrets file"
+    )
     if secrets_path:
         secrets = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
     if secrets:
@@ -116,16 +118,13 @@ def load_runtime_config(
     # minimal defaults
     return cfg
 
-def load_ilm_config(
-    *,
-    schema: str,
-    profile: Optional[str],
-    explicit_config_dir: Optional[str] = None,
-) -> Dict[str, Any]:
+def load_ilm_config(*, schema: str, profile: Optional[str], explicit_config_dir: Optional[str] = None) -> Dict[str, Any]:
     """Load ILM config from schema/profile layers."""
     ilm: Dict[str, Any] = {}
-    ilm_config_path = resolve_schema_file(schema=schema, profile=profile, explicit_config_dir=explicit_config_dir,
-            explicit_file=None, prefix_name="ilm", extension_name="yml", description="ILM configuration file")
+    ilm_config_path = resolve_schema_file(
+        schema=schema, profile=profile, explicit_config_dir=explicit_config_dir, explicit_file=None, prefix_name="ilm", extension_name="yml",
+        description="ILM configuration file"
+    )
     if ilm_config_path:
         ilm = _load_yaml(Path(ilm_config_path))
     return ilm
