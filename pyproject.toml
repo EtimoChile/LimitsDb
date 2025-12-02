@@ -23,7 +23,7 @@ dependencies = [
 dev = [
   "flake8>=7.1.1",
   "mypy>=1.14.1",
-  "black>=24.10.0",
+  "yapf>=0.40.2",
 ]
 
 [project.scripts]
@@ -36,12 +36,18 @@ tdb-impl = "terminusdb.cli.tdb_impl:run_cli"
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.black]
-line-length = 88
-target-version = ['py312']
+[tool.yapf]
+based_on_style = "pep8"
+column_limit = 150
+coalesce_brackets = true
+split_before_first_argument = false
+split_before_named_assigns = false
+blank_lines_around_top_level_definition = 1
+blank_line_before_nested_class_or_def = false
+dedent_closing_brackets = true
 
 [tool.flake8]
-max-line-length = 88
+max-line-length = 150
 ignore = ["E203", "W503"]
 
 [tool.mypy]
