@@ -171,212 +171,17 @@ logger = get_logger("oracle.engine")
 class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
 
-    _supporting_objects_created: bool = False
+    # states and class constants
     _connection_envs: Dict[int, str] = {}
     REQUIRED_SYSTEM_PRIVILEGES: Tuple[str, ...] = (
         "CREATE SESSION", "ALTER SESSION", "CREATE TABLE", "CREATE PROCEDURE", "CREATE TYPE", "CREATE DATABASE LINK", "CREATE SEQUENCE", "RESUMABLE",
         "ALTER USER", "CREATE SYNONYM", "CREATE VIEW", "CREATE ROLE", "CREATE TRIGGER", "CREATE MATERIALIZED VIEW", "QUERY REWRITE"
     )
-    #only DD uppercase identifiers are unquoted
-    _REGULAR_IDENTIFIER = re.compile(r'[A-Z_#$][A-Z0-9_#$]*')
-
-    @staticmethod
-    def _format_identifier(name: Optional[str]) -> str:
-        """Formats an Oracle identifier, quoting if necessary.
-        Args:
-            name: The identifier name as appears data dictionary.
-        Returns:
-            Formatted identifier, quoted if necessary."""
-        if not name:
-            return '""'
-        if OracleEngine._REGULAR_IDENTIFIER.fullmatch(name):
-            return name.lower()
-        return OracleEngine._quote(name)
-
+    _REGULAR_IDENTIFIER = re.compile(r'[A-Z_#$][A-Z0-9_#$]*')  #only DD uppercase identifiers are unquoted
     _PREFIXED_IDENTIFIER = re.compile(r'@("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)')
+    _PRIVATE_DDL_MARK = re.compile(r'##(.*?)##')
 
-    @staticmethod
-    def get_identifiers_from_expression(expression: str) -> Set[str]:
-        """ Returns a set of @prefixxed identifiers found in the given expression.
-        Args:
-            expression: The expression string to process.
-        Returns:
-            A set of identifier strings found in the expression."""
-        identifiers: Set[str] = set()
-        for match in OracleEngine._PREFIXED_IDENTIFIER.finditer(expression):
-            ident = match.group(1)
-            if ident.startswith('"') and ident.endswith('"'):
-                ident = ident[1:-1].replace('""', '"')
-            else:
-                ident = ident.upper()
-            identifiers.add(ident)
-        return identifiers
-
-    @staticmethod
-    def _quote(identifier: str) -> str:
-        escaped = identifier.replace("\"", "\"\"")
-        return f'"{escaped}"'
-
-    @staticmethod
-    def _quote_literal(value: str) -> str:
-        escaped = value.replace("'", "''")
-        return f"'{escaped}'"
-
-    @staticmethod
-    def get_column_type(column: ColumnDefinition) -> str:
-        dtype = column.data_type.lower()
-        if dtype in ("string", "varchar", "varchar2"):
-            length = column.length or 255
-            return f"VARCHAR2({length})"
-        if dtype == "char":
-            length = column.length or 1
-            return f"CHAR({length})"
-        if dtype in ("number", "numeric", "decimal"):
-            if column.precision is not None and column.scale is not None:
-                return f"NUMBER({column.precision},{column.scale})"
-            if column.precision is not None:
-                return f"NUMBER({column.precision})"
-            return "NUMBER"
-        if dtype in ("integer", "int"):
-            return "NUMBER(10)"
-        if dtype == "date":
-            return "DATE"
-        if dtype == "clob":
-            return "CLOB"
-        raise ValueError(f"Unsupported column data type: {column.data_type}")
-
-    @staticmethod
-    def _column_sql(column: ColumnDefinition) -> str:
-        col_name = OracleEngine._format_identifier(column.name)
-        col_type = OracleEngine.get_column_type(column)
-        default_clause = f" DEFAULT {column.default}" if column.default is not None else ""
-        nullable_clause = "" if column.nullable else " NOT NULL"
-        return f"{col_name} {col_type}{default_clause}{nullable_clause}"
-
-    @staticmethod
-    def _object_exists(cursor: oracledb.Cursor, query: str, params: Sequence[Any]) -> bool:  # type: ignore[valid-type]
-        cursor.execute(query, params)  # type: ignore[arg-type]
-        return cursor.fetchone() is not None
-
-    @staticmethod
-    def _user_has_role(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2", [username, role])
-
-    @staticmethod
-    def _user_has_role_with_admin_option(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(
-            cursor, "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2 AND admin_option = 'YES'", [username, role]
-        )
-
-    @staticmethod
-    def _user_has_sys_priv(cursor: oracledb.Cursor, username: str, privilege: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_sys_privs WHERE grantee = :1 AND privilege = :2", [username, privilege])
-
-    @staticmethod
-    def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(
-            cursor, """
-            SELECT 1
-              FROM dba_tab_privs
-             WHERE grantee = :grantee
-               AND owner = :owner
-               AND table_name = :table_name
-               AND privilege = :privilege
-            """, [role, owner, table_name, privilege],
-        )
-
-    @staticmethod
-    def _role_exists(cursor: oracledb.Cursor, role: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_roles WHERE role = :1", [role])
-
-    @staticmethod
-    def _user_exists(cursor: oracledb.Cursor, username: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_users WHERE username = :1", [username])
-
-    @staticmethod
-    def _get_database_default_tablespace(cursor: oracledb.Cursor) -> Optional[str]:  # type: ignore[valid-type]
-        cursor.execute("SELECT property_value FROM database_properties WHERE property_name = 'DEFAULT_PERMANENT_TABLESPACE'")  # type: ignore
-        row = cursor.fetchone()
-        if row and row[0]:
-            return str(row[0])
-        return None
-
-    @staticmethod
-    def _get_user_default_tablespace(cursor: oracledb.Cursor, username: str) -> Optional[str]:  # type: ignore[valid-type]
-        cursor.execute("SELECT default_tablespace FROM dba_users WHERE username = :username", username=username)  # type: ignore
-        row = cursor.fetchone()
-        if row and row[0]:
-            return str(row[0])
-        return None
-
-    @staticmethod
-    def _ensure_unlimited_quota(cursor: oracledb.Cursor, username: str, tablespace: Optional[str]) -> bool:  # type: ignore[valid-type]
-        if not tablespace:
-            return False
-        tablespace_name = OracleEngine._format_identifier(tablespace)
-        cursor.execute( # type: ignore
-            """
-            SELECT max_bytes
-              FROM dba_ts_quotas
-             WHERE username = :username
-               AND tablespace_name = :tablespace
-            """,
-            username=username,
-            tablespace=tablespace_name,
-        )
-        row = cursor.fetchone()
-        if row and row[0] == -1:
-            return False
-        sql = f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}"
-        OracleEngine._execute_ddl(cursor.connection, cursor, sql)
-        return True
-
-    @staticmethod
-    def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_tables WHERE owner = :1 AND table_name = :2", [owner, table_name], )
-
-    @staticmethod
-    def _index_exists(cursor: oracledb.Cursor, owner: str, index_name: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_indexes WHERE owner = :1 AND index_name = :2", [owner, index_name], )
-
-    @staticmethod
-    def _constraint_exists(cursor: oracledb.Cursor, owner: str, constraint_name: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(
-            cursor, "SELECT 1 FROM dba_constraints WHERE owner = :1 AND constraint_name = :2", [owner, constraint_name],
-        )
-
-    @staticmethod
-    def _sequence_exists(cursor: oracledb.Cursor, owner: str, sequence_name: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(
-            cursor, "SELECT 1 FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = :2", [owner, sequence_name],
-        )
-
-    @staticmethod
-    def _register_connection_env(conn: oracledb.Connection, env: Optional[str]) -> None:
-        if env:
-            OracleEngine._connection_envs[id(conn)] = env
-        else:
-            OracleEngine._connection_envs.pop(id(conn), None)
-
-    @staticmethod
-    def _get_connection_env(conn: oracledb.Connection) -> Optional[str]:
-        return OracleEngine._connection_envs.get(id(conn))
-
-    _SEC = re.compile(r'##(.*?)##')
-
-    @staticmethod
-    def _execute_ddl(conn: oracledb.Connection, cursor: oracledb.Cursor, statement: str) -> None:
-        log_statement = OracleEngine._SEC.sub("****", statement)
-        if len(log_statement) > 100:
-            log_statement = log_statement[:100] + " ... [truncated]"
-        statement = OracleEngine._SEC.sub(lambda m: m.group(1), statement)
-        logger.info("Executing %s DDL: %s", OracleEngine._get_connection_env(conn), " ".join(log_statement.split()))
-        cursor.execute(statement)  # type: ignore[arg-type]
-
-    @staticmethod
-    def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name])
-
+    # public API
     @staticmethod
     def get_connection(config: Config, *, admin: bool = False, env: Optional[Literal["SOURCE", "HISTORY"]] = None) -> oracledb.Connection:
         """Returns an Oracle connection using provided config.
@@ -395,24 +200,16 @@ class OracleEngine(DatabaseEngine):
             raise
 
     @staticmethod
-    def get_system_date(conn: oracledb.Connection) -> datetime:
-        """Returns the current system date from Oracle.
+    def close_connection(conn: oracledb.Connection) -> None:
+        """Closes the Oracle connection.
         Args:
-            conn: Active Oracle connection.
-        Returns:
-            Current system date as Python date."""
-        cursor: Optional[oracledb.Cursor] = None
+            conn: Active Oracle connection."""
         try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT SYSDATE FROM dual")  # type: ignore
-            sysdate: datetime = cursor.fetchone()[0]
-            return sysdate
+            if conn:
+                OracleEngine._register_connection_env(conn, None)
+                conn.close()
         except Exception:
-            logger.critical("Failed to retrieve system date from Oracle.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
+            logger.critical("Failed to close Oracle DB connection.", exc_info=True)
 
     @staticmethod
     def load_config(conn: oracledb.Connection) -> List[Dict[str, Any]]:
@@ -441,25 +238,96 @@ class OracleEngine(DatabaseEngine):
                 cursor.close()
 
     @staticmethod
-    def get_status(conn: oracledb.Connection, process_date: str) -> List[Dict[str, Any]]:
-        """Loads status from tdb_ctl for the given process date.
+    def get_table_columns(conn: oracledb.Connection, owner: str, table_name: str) -> Tuple[List[str], Dict[str, ColumnDefinition]]:
+        """Retrieves column names and metadata for a given table.
         Args:
             conn: Active Oracle connection.
-            process_date: Date in 'YYYYMMDD' format.
+            owner: Schema owner of the table.
+            table_name: Table name.
         Returns:
-            List of status rows."""
+            Tuple containing a list of column names and a dict of column metadata."""
         cursor: Optional[oracledb.Cursor] = None
+        columns: List[str] = []
+        metadata: Dict[str, ColumnDefinition] = {}
         try:
             cursor = conn.cursor()
             cursor.execute( # type: ignore
-                """SELECT ctl_owner, ctl_table_name, ctl_status
-                FROM tdb_ctl
-                WHERE ctl_process_date = TO_DATE(:1, 'YYYYMMDD')""", [process_date])
-            cols = [col[0].lower() for col in cursor.description]  # type: ignore
-            return [dict(zip(cols, row)) for row in cursor.fetchall()]  # type: ignore
+                """select column_id, column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used
+                from all_tab_columns
+                where  owner = :1 and table_name = :2 and column_id is not null
+                order by column_id""", [owner, table_name])
+            for row in cast(
+                Iterable[Tuple[int, str, str, Optional[int], Optional[int], Optional[int], str, Optional[str], Optional[str], str]], cursor
+            ):
+                column_id, column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used = row
+                dtype = data_type.lower()
+                length: Optional[int] = None
+                if dtype in ("varchar2", "varchar", "char"):
+                    if char_used == "C" and char_length is not None:
+                        length = int(char_length)
+                    elif data_length is not None:
+                        length = int(data_length)
+                precision = int(data_precision) if data_precision is not None else None
+                scale = int(data_scale) if data_scale is not None else None
+                metadata[column_name] = ColumnDefinition(
+                    name=column_name, data_type=dtype, id=column_id, length=length, precision=precision, scale=scale, nullable=(nullable == "Y"),
+                    default=data_default.strip() if isinstance(data_default, str) else None,
+                )
+                columns.append(column_name)
         finally:
             if cursor:
                 cursor.close()
+        return columns, metadata
+
+    @staticmethod
+    def get_date_condition(date_expr: str, months_keep_src: int) -> str:
+        """Returns a date condition for the given date expression and months to keep.
+        Args:
+            date_expr: Date expression to evaluate.
+            months_keep_src: Months to keep.
+        Returns:
+            Date condition as string."""
+        return f"({date_expr} < add_months(l_process_date,-{months_keep_src}))"
+
+    @staticmethod
+    def get_identifiers_from_expression(expression: str) -> Set[str]:
+        """ Returns a set of @prefixxed identifiers found in the given expression.
+        Args:
+            expression: The expression string to process.
+        Returns:
+            A set of identifier strings found in the expression."""
+        identifiers: Set[str] = set()
+        for match in OracleEngine._PREFIXED_IDENTIFIER.finditer(expression):
+            ident = match.group(1)
+            if ident.startswith('"') and ident.endswith('"'):
+                ident = ident[1:-1].replace('""', '"')
+            else:
+                ident = ident.upper()
+            identifiers.add(ident)
+        return identifiers
+
+    @staticmethod
+    def get_column_type(column: ColumnDefinition) -> str:
+        dtype = column.data_type.lower()
+        if dtype in ("string", "varchar", "varchar2"):
+            length = column.length or 255
+            return f"VARCHAR2({length})"
+        if dtype == "char":
+            length = column.length or 1
+            return f"CHAR({length})"
+        if dtype in ("number", "numeric", "decimal"):
+            if column.precision is not None and column.scale is not None:
+                return f"NUMBER({column.precision},{column.scale})"
+            if column.precision is not None:
+                return f"NUMBER({column.precision})"
+            return "NUMBER"
+        if dtype in ("integer", "int"):
+            return "NUMBER(10)"
+        if dtype == "date":
+            return "DATE"
+        if dtype == "clob":
+            return "CLOB"
+        raise ValueError(f"Unsupported column data type: {column.data_type}")
 
     @staticmethod
     def generate_sql_block(config: Config, table_cnf: Dict[str, Any], process_date: str) -> str:
@@ -585,6 +453,62 @@ end;"""
         return plsql
 
     @staticmethod
+    def get_system_date(conn: oracledb.Connection) -> datetime:
+        """Returns the current system date from Oracle.
+        Args:
+            conn: Active Oracle connection.
+        Returns:
+            Current system date as Python date."""
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT SYSDATE FROM dual")  # type: ignore
+            sysdate: datetime = cursor.fetchone()[0]
+            return sysdate
+        except Exception:
+            logger.critical("Failed to retrieve system date from Oracle.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def sql_block_run(conn: oracledb.Connection, plsql_code: str) -> None:
+        """Executes a PL/SQL block on the database.
+        Args:
+            conn: Active Oracle connection.
+            plsql_code: The PL/SQL block to execute."""
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.setinputsizes(plsql_code=oracledb.CLOB)  # type: ignore
+            cursor.execute(plsql_code, {"plsql_code": plsql_code})  # type: ignore
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def get_status(conn: oracledb.Connection, process_date: str) -> List[Dict[str, Any]]:
+        """Loads status from tdb_ctl for the given process date.
+        Args:
+            conn: Active Oracle connection.
+            process_date: Date in 'YYYYMMDD' format.
+        Returns:
+            List of status rows."""
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute( # type: ignore
+                """SELECT ctl_owner, ctl_table_name, ctl_status
+                FROM tdb_ctl
+                WHERE ctl_process_date = TO_DATE(:1, 'YYYYMMDD')""", [process_date])
+            cols = [col[0].lower() for col in cursor.description]  # type: ignore
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]  # type: ignore
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
     def get_rows_processed(conn: oracledb.Connection, owner: str, table_name: str, process_date: str) -> int:
         """Returns rows processed for a given table and process date from tdb_ctl.
         Args:
@@ -647,21 +571,6 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def sql_block_run(conn: oracledb.Connection, plsql_code: str) -> None:
-        """Executes a PL/SQL block on the database.
-        Args:
-            conn: Active Oracle connection.
-            plsql_code: The PL/SQL block to execute."""
-        cursor: Optional[oracledb.Cursor] = None
-        try:
-            cursor = conn.cursor()
-            cursor.setinputsizes(plsql_code=oracledb.CLOB)  # type: ignore
-            cursor.execute(plsql_code, {"plsql_code": plsql_code})  # type: ignore
-        finally:
-            if cursor:
-                cursor.close()
-
-    @staticmethod
     def all_status_tend(conn: oracledb.Connection, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
         """Checks if all referenced tables have status "Status.TABLE_END" in tdb_ctl.
         Args:
@@ -688,79 +597,215 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def get_table_columns(conn: oracledb.Connection, owner: str, table_name: str) -> Tuple[List[str], Dict[str, ColumnDefinition]]:
-        """Retrieves column names and metadata for a given table.
-        Args:
-            conn: Active Oracle connection.
-            owner: Schema owner of the table.
-            table_name: Table name.
-        Returns:
-            Tuple containing a list of column names and a dict of column metadata."""
+    def ensure_users(conn: oracledb.Connection, users: Sequence[UserDefinition]) -> List[str]:
+        created: List[str] = []
+        if not users:
+            return created
         cursor: Optional[oracledb.Cursor] = None
-        columns: List[str] = []
-        metadata: Dict[str, ColumnDefinition] = {}
+        changed = False
         try:
             cursor = conn.cursor()
-            cursor.execute( # type: ignore
-                """select column_id, column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used
-                from all_tab_columns
-                where  owner = :1 and table_name = :2 and column_id is not null
-                order by column_id""", [owner, table_name])
-            for row in cast(
-                Iterable[Tuple[int, str, str, Optional[int], Optional[int], Optional[int], str, Optional[str], Optional[str], str]], cursor
-            ):
-                column_id, column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used = row
-                dtype = data_type.lower()
-                length: Optional[int] = None
-                if dtype in ("varchar2", "varchar", "char"):
-                    if char_used == "C" and char_length is not None:
-                        length = int(char_length)
-                    elif data_length is not None:
-                        length = int(data_length)
-                precision = int(data_precision) if data_precision is not None else None
-                scale = int(data_scale) if data_scale is not None else None
-                metadata[column_name] = ColumnDefinition(
-                    name=column_name, data_type=dtype, id=column_id, length=length, precision=precision, scale=scale, nullable=(nullable == "Y"),
-                    default=data_default.strip() if isinstance(data_default, str) else None,
-                )
-                columns.append(column_name)
+            database_default_tablespace = OracleEngine._get_database_default_tablespace(cursor)
+            for user in users:
+                fmttd_username = OracleEngine._format_identifier(user.name)
+                fmttd_default_tablespace = OracleEngine._format_identifier(user.default_tablespace)
+                tablespace_for_quota = user.default_tablespace
+                if not OracleEngine._user_exists(cursor, user.name):
+                    sql = f"CREATE USER {fmttd_username} IDENTIFIED BY ##{OracleEngine._quote(user.password)}##"
+                    if user.default_tablespace:
+                        sql += f" DEFAULT TABLESPACE {fmttd_default_tablespace}"
+                    if user.temporary_tablespace:
+                        sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
+                    logger.debug(f"Creating user with SQL: {sql}")
+                    OracleEngine._execute_ddl(conn, cursor, sql)
+                    created.append(fmttd_username)
+                    changed = True
+                    if not user.default_tablespace:
+                        tablespace_for_quota = OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
+                else:
+                    tablespace_for_quota = OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
+                admin_option_roles = set(OracleEngine._format_identifier(r) for r in user.roles_with_admin_option)
+                for role in user.roles:
+                    fmttd_role_name = OracleEngine._format_identifier(role)
+                    requires_admin_option = role in admin_option_roles
+                    has_role = OracleEngine._user_has_role(cursor, user.name, role)
+                    if requires_admin_option:
+                        if not has_role or not OracleEngine._user_has_role_with_admin_option(cursor, user.name, role):
+                            grant_sql = f"GRANT {fmttd_role_name} TO {fmttd_username} WITH ADMIN OPTION"
+                            OracleEngine._execute_ddl(conn, cursor, grant_sql)
+                            changed = True
+                    elif not has_role:
+                        grant_sql = f"GRANT {fmttd_role_name} TO {fmttd_username}"
+                        OracleEngine._execute_ddl(conn, cursor, grant_sql)
+                        changed = True
+                for privilege in user.system_privileges:
+                    if not OracleEngine._user_has_sys_priv(cursor, user.name, privilege):
+                        grant_priv_sql = f"GRANT {privilege} TO {fmttd_username}"
+                        OracleEngine._execute_ddl(conn, cursor, grant_priv_sql)
+                        changed = True
+                if OracleEngine._ensure_unlimited_quota(cursor, user.name, tablespace_for_quota):
+                    changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure users.", exc_info=True)
+            raise
         finally:
             if cursor:
                 cursor.close()
-        return columns, metadata
+        return created
 
     @staticmethod
-    def _get_primary_key_info(cursor: oracledb.Cursor, owner: str,
-                              table_name: str) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:  # type: ignore[valid-type]
-        cursor.execute(  # type: ignore
-            """
-            SELECT constraint_name, index_name
-              FROM dba_constraints
-             WHERE owner = :1
-               AND table_name = :2
-               AND constraint_type = 'P'
-            """, [owner, table_name]
-        )
-        cursor.execute(  # type: ignore
-            """
-            SELECT constraint_name, index_name
-              FROM dba_constraints
-             WHERE owner = :1
-               AND table_name = :2
-               AND constraint_type = 'P'
-            """,
-            [owner, table_name],
-        )
-        row = cursor.fetchone()
-        if not row:
-            return None, (), None
-        constraint_name, index_name = row
-        cursor.execute( # type: ignore
-            "SELECT column_name FROM dba_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
-            [owner, constraint_name],
-        )
-        columns = tuple(r[0] for r in cast(Iterable[Tuple[str]], cursor))
-        return constraint_name, columns, index_name
+    def ensure_tables(conn: oracledb.Connection, tables: Sequence[TableDefinition]) -> List[str]:
+        created: List[str] = []
+        if not tables:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for table in tables:
+                fmttd_owner = OracleEngine._format_identifier(table.owner)
+                fmttd_table_name = OracleEngine._format_identifier(table.name)
+                if not OracleEngine._table_exists(cursor, table.owner, table.name):
+                    columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+                    sql = f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {columns_sql}\n    )"
+                    OracleEngine._execute_ddl(conn, cursor, sql)
+                    created.append(f"{fmttd_owner}.{fmttd_table_name}")
+                    changed = True
+                if table.primary_key:
+                    pk_name = f"{table.name}_PK"
+                    fmttd_pk_name = OracleEngine._format_identifier(pk_name)
+                    if not OracleEngine._constraint_exists(cursor, table.owner, pk_name):
+                        cols = ", ".join(OracleEngine._format_identifier(col) for col in table.primary_key)
+                        sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_pk_name} PRIMARY KEY ({cols})"
+                        OracleEngine._execute_ddl(conn, cursor, sql)
+                        changed = True
+                for index in table.indexes:
+                    fmttd_idx_name = OracleEngine._format_identifier(index.name)
+                    if OracleEngine._index_exists(cursor, table.owner, index.name):
+                        continue
+                    cols = ", ".join(OracleEngine._format_identifier(col) for col in index.columns)
+                    unique_kw = "UNIQUE " if index.unique else ""
+                    sql = f"CREATE {unique_kw}INDEX {fmttd_owner}.{fmttd_idx_name} ON {fmttd_owner}.{fmttd_table_name} ({cols})"
+                    OracleEngine._execute_ddl(conn, cursor, sql)
+                    changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure tables.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition, table_cnf: Dict[str, Any]) -> None:
+        cursor: Optional[oracledb.Cursor] = None
+        fmttd_owner = OracleEngine._format_identifier(table.owner)
+        fmttd_table_name = OracleEngine._format_identifier(table.name)
+        logger.debug(f"Ensuring structure for table {table.owner}.{table.name} conn: {conn}")
+        try:
+            cursor = conn.cursor()
+            if not OracleEngine._table_exists(cursor, table.owner, table.name):
+                fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+                sql = f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )"
+                OracleEngine._execute_ddl(conn, cursor, sql)
+            else:
+                _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
+                for column in table.columns:
+                    column_definition = OracleEngine._column_sql(column)
+                    if not column.name in existing_columns:
+                        sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD ({column_definition})"
+                        OracleEngine._execute_ddl(conn, cursor, sql)
+                    else:
+                        existing = existing_columns[column.name]
+                        if OracleEngine._column_needs_update(existing, column):
+                            sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} MODIFY ({column_definition})"
+                            OracleEngine._execute_ddl(conn, cursor, sql)
+            existing_indexes = OracleEngine._get_table_indexes(cursor, fmttd_owner, fmttd_table_name)
+            desired_pk = tuple((table.primary_key or ()))
+            fmttd_desired_pk = tuple(OracleEngine._format_identifier(col) for col in desired_pk)
+            existing_pk_name, existing_pk_cols, existing_pk_index = OracleEngine._get_primary_key_info(cursor, table.owner, table.name)
+            fmttd_existing_pk_cols = tuple(OracleEngine._format_identifier(col) for col in existing_pk_cols)
+            fmttd_existing_pk_index = (OracleEngine._format_identifier(existing_pk_index) if existing_pk_index else None)
+            desired_constraint_name = f"{table.name}_PK"
+            fmttd_desired_constraint_name = OracleEngine._format_identifier(desired_constraint_name)
+            if desired_pk:
+                if not existing_pk_cols:
+                    existing_index_info = existing_indexes.get(desired_constraint_name)
+                    if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
+                        drop_sql = f"DROP INDEX {fmttd_owner}.{fmttd_desired_constraint_name}"
+                        OracleEngine._execute_ddl(conn, cursor, drop_sql)
+                        existing_indexes.pop(desired_constraint_name, None)
+                    add_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_constraint_name} PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
+                    OracleEngine._execute_ddl(conn, cursor, add_pk_sql)
+                elif existing_pk_cols != desired_pk:
+                    if existing_pk_name:
+                        drop_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {OracleEngine._format_identifier(existing_pk_name)}"
+                        OracleEngine._execute_ddl(conn, cursor, drop_pk_sql)
+                        index_to_drop = fmttd_existing_pk_index or existing_pk_name
+                        if index_to_drop:
+                            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
+                        if index_to_drop and index_to_drop in existing_indexes:
+                            drop_index_sql = f"DROP INDEX {fmttd_owner}.{index_to_drop}"
+                            OracleEngine._execute_ddl(conn, cursor, drop_index_sql)
+                            existing_indexes.pop(index_to_drop, None)
+                    existing_index_info = existing_indexes.get(desired_constraint_name)
+                    if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
+                        drop_conflict_sql = f"DROP INDEX {fmttd_owner}.{fmttd_desired_constraint_name}"
+                        OracleEngine._execute_ddl(conn, cursor, drop_conflict_sql)
+                        existing_indexes.pop(desired_constraint_name, None)
+                    recreate_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_constraint_name} PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
+                    OracleEngine._execute_ddl(conn, cursor, recreate_pk_sql)
+            elif fmttd_existing_pk_cols and existing_pk_name:
+                drop_unexpected_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {existing_pk_name}"
+                OracleEngine._execute_ddl(conn, cursor, drop_unexpected_pk_sql)
+                index_to_drop = fmttd_existing_pk_index or existing_pk_name
+                if index_to_drop:
+                    existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
+                if index_to_drop and index_to_drop in existing_indexes:
+                    drop_unexpected_index_sql = f"DROP INDEX {fmttd_owner}.{index_to_drop}"
+                    OracleEngine._execute_ddl(conn, cursor, drop_unexpected_index_sql)
+                    existing_indexes.pop(index_to_drop, None)
+            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
+            desired_indexes = OracleEngine._prepare_desired_indexes(table)
+            for index_name, (columns, is_unique) in desired_indexes.items():
+                fmttd_index_name = OracleEngine._format_identifier(index_name)
+                fmttd_columns = tuple(OracleEngine._format_identifier(col) for col in columns)
+                existing_index = existing_indexes.get(index_name)
+                if existing_index == (columns, is_unique):
+                    continue
+                if existing_index is not None:
+                    drop_mismatch_index_sql = f"DROP INDEX {fmttd_owner}.{fmttd_index_name}"
+                    OracleEngine._execute_ddl(conn, cursor, drop_mismatch_index_sql)
+                fmttd_columns_sql = ", ".join(fmttd_columns)
+                unique_clause = "UNIQUE " if is_unique else ""
+                create_index_sql = f"CREATE {unique_clause}INDEX {fmttd_owner}.{index_name} ON {fmttd_owner}.{fmttd_table_name} ({fmttd_columns_sql})"
+                OracleEngine._execute_ddl(conn, cursor, create_index_sql)
+            final_pk_name, _, final_pk_index = OracleEngine._get_primary_key_info(cursor, fmttd_owner, fmttd_table_name)
+            expected_indexes = set(desired_indexes.keys())
+            if final_pk_name:
+                expected_indexes.add(final_pk_name)
+            if final_pk_index:
+                expected_indexes.add(final_pk_index)
+            existing_indexes = OracleEngine._get_table_indexes(cursor, fmttd_owner, fmttd_table_name)
+            for index_name in list(existing_indexes.keys()):
+                if index_name not in expected_indexes:
+                    fmttd_index_name = OracleEngine._format_identifier(index_name)
+                    logger.info("Dropping unmanaged index %s on %s.%s", fmttd_index_name, fmttd_owner, fmttd_table_name)
+                    drop_unmanaged_index_sql = f"DROP INDEX {fmttd_owner}.{fmttd_index_name}"
+                    OracleEngine._execute_ddl(conn, cursor, drop_unmanaged_index_sql)
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure table structure.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
 
     @staticmethod
     def get_primary_key_columns(conn: oracledb.Connection, owner: str, table_name: str, table_cnf: Dict[str, Any]) -> Tuple[str, ...]:
@@ -770,7 +815,6 @@ end;"""
             _, columns, _ = OracleEngine._get_primary_key_info(cursor, owner, table_name)
             if columns:
                 return tuple(col for col in columns)
-
             cursor.execute( # type: ignore
                 """
                 SELECT i.index_name, i.uniqueness, c.column_name, s.distinct_keys
@@ -809,6 +853,367 @@ end;"""
         finally:
             if cursor:
                 cursor.close()
+
+    @staticmethod
+    def ensure_roles(conn: oracledb.Connection, roles: Sequence[RoleDefinition]) -> List[str]:
+        created: List[str] = []
+        if not roles:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for role in roles:
+                fmttd_role_name = OracleEngine._format_identifier(role.name)
+                if OracleEngine._role_exists(cursor, role.name):
+                    continue
+                sql = f"CREATE ROLE {fmttd_role_name}"
+                OracleEngine._execute_ddl(conn, cursor, sql)
+                created.append(fmttd_role_name)
+                changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure roles.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_sequences(conn: oracledb.Connection, sequences: Sequence[SequenceDefinition]) -> List[str]:
+        created: List[str] = []
+        if not sequences:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for sequence in sequences:
+                fmttd_owner = OracleEngine._format_identifier(sequence.owner)
+                fmttd_sequence_name = OracleEngine._format_identifier(sequence.name)
+                if OracleEngine._sequence_exists(cursor, sequence.owner, sequence.name):
+                    continue
+                sql = (
+                    f"CREATE SEQUENCE {fmttd_owner}.{fmttd_sequence_name} "
+                    f"START WITH {sequence.start_with} INCREMENT BY {sequence.increment_by}"
+                )
+                if sequence.minvalue is not None:
+                    sql += f" MINVALUE {sequence.minvalue}"
+                else:
+                    sql += " NOMINVALUE"
+                if sequence.maxvalue is not None:
+                    sql += f" MAXVALUE {sequence.maxvalue}"
+                else:
+                    sql += " NOMAXVALUE"
+                sql += " CYCLE" if sequence.cycle else " NOCYCLE"
+                if sequence.cache is not None:
+                    sql += f" CACHE {sequence.cache}"
+                else:
+                    sql += " NOCACHE"
+                OracleEngine._execute_ddl(conn, cursor, sql)
+                created.append(f"{fmttd_owner}.{fmttd_sequence_name}")
+                changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure sequences.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_database_links(conn: oracledb.Connection, links: Sequence[DatabaseLinkDefinition]) -> List[str]:
+        created: List[str] = []
+        if not links:
+            return created
+        cursor: Optional[oracledb.Cursor] = None
+        changed = False
+        try:
+            cursor = conn.cursor()
+            for link in links:
+                fmttd_link_name = OracleEngine._format_identifier(link.name)
+                if OracleEngine._db_link_exists(cursor, link.name):
+                    continue
+                fmttd_username = OracleEngine._format_identifier(link.username)
+                fmttd_password = OracleEngine._quote(link.password)
+                literal_dsn_literal = OracleEngine._quote_literal(link.dsn)
+                sql = f"CREATE DATABASE LINK {fmttd_link_name} CONNECT TO {fmttd_username} IDENTIFIED BY ##{fmttd_password}## USING {literal_dsn_literal}"
+                OracleEngine._execute_ddl(conn, cursor, sql)
+                created.append(fmttd_link_name)
+                changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure database links.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return created
+
+    @staticmethod
+    def ensure_table_privileges(conn: oracledb.Connection, role: str, tables: Sequence[Tuple[str, str]], privileges: Sequence[str]) -> List[str]:
+        cursor: Optional[oracledb.Cursor] = None
+        granted: List[str] = []
+        changed = False
+        if not tables:
+            return granted
+        fmt_role = OracleEngine._format_identifier(role)
+        try:
+            cursor = conn.cursor()
+            for owner, table_name in tables:
+                fmttd_owner = OracleEngine._format_identifier(owner)
+                fmttd_table_name = OracleEngine._format_identifier(table_name)
+                for privilege in privileges:
+                    privilege_upper = privilege.upper()
+                    if OracleEngine._role_has_table_priv(cursor, role.upper(), owner.upper(), table_name.upper(), privilege_upper):
+                        continue
+                    sql = f"GRANT {privilege_upper} ON {fmttd_owner}.{fmttd_table_name} TO {fmt_role}"
+                    OracleEngine._execute_ddl(conn, cursor, sql)
+                    granted.append(f"{fmttd_owner}.{fmttd_table_name}:{privilege_upper}")
+                    changed = True
+            if changed:
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.critical("Failed to ensure table privileges.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+        return granted
+
+    @staticmethod
+    def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> List[str]:
+        cursor: Optional[oracledb.Cursor] = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(owner)}")  # type: ignore[arg-type]
+            for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
+                OracleEngine._execute_ddl(conn, cursor, statement)
+            return SUPPORTING_OBJECT_LIST
+        except Exception:
+            logger.critical("Failed to ensure supporting PL/SQL objects.", exc_info=True)
+            raise
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def get_identifier_str(identifier: str) -> str:
+        """ Returns the identifier string required to query dictionary views.
+        Args:
+            indentifier: The identifier string to process.
+        Returns:
+            The identifier string without angle brackets.
+        """
+        identifier = identifier.strip()
+        if identifier.startswith('"') and identifier.endswith('"'):
+            return identifier[1:-1]
+        return identifier.upper()
+
+    @staticmethod
+    def get_tdb_columns_expressions() -> Tuple[str, str]:
+        """ Returns the expressions for the TDB process date and insert date columns.
+        Returns:
+            A tuple containing the process date expression and insert date expression.
+        """
+        return "l_process_date", "sysdate"
+
+    @staticmethod
+    def _column_sql(column: ColumnDefinition) -> str:
+        col_name = OracleEngine._format_identifier(column.name)
+        col_type = OracleEngine.get_column_type(column)
+        default_clause = f" DEFAULT {column.default}" if column.default is not None else ""
+        nullable_clause = "" if column.nullable else " NOT NULL"
+        return f"{col_name} {col_type}{default_clause}{nullable_clause}"
+
+    # format / expressions helpers
+    @staticmethod
+    def _format_identifier(name: Optional[str]) -> str:
+        """Formats an Oracle identifier, quoting if necessary.
+        Args:
+            name: The identifier name as appears data dictionary.
+        Returns:
+            Formatted identifier, quoted if necessary."""
+        if not name:
+            return '""'
+        if OracleEngine._REGULAR_IDENTIFIER.fullmatch(name):
+            return name.lower()
+        return OracleEngine._quote(name)
+
+    @staticmethod
+    def _quote(identifier: str) -> str:
+        escaped = identifier.replace("\"", "\"\"")
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _quote_literal(value: str) -> str:
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+
+    # metadata and privilege helpers
+    @staticmethod
+    def _object_exists(cursor: oracledb.Cursor, query: str, params: Sequence[Any]) -> bool:  # type: ignore[valid-type]
+        cursor.execute(query, params)  # type: ignore[arg-type]
+        return cursor.fetchone() is not None
+
+    @staticmethod
+    def _user_has_role(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2", [username, role])
+
+    @staticmethod
+    def _user_has_role_with_admin_option(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor, "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2 AND admin_option = 'YES'", [username, role]
+        )
+
+    @staticmethod
+    def _user_has_sys_priv(cursor: oracledb.Cursor, username: str, privilege: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_sys_privs WHERE grantee = :1 AND privilege = :2", [username, privilege])
+
+    @staticmethod
+    def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor, """
+            SELECT 1
+              FROM dba_tab_privs
+             WHERE grantee = :grantee
+               AND owner = :owner
+               AND table_name = :table_name
+               AND privilege = :privilege
+            """, [role, owner, table_name, privilege],
+        )
+
+    @staticmethod
+    def _role_exists(cursor: oracledb.Cursor, role: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_roles WHERE role = :1", [role])
+
+    @staticmethod
+    def _user_exists(cursor: oracledb.Cursor, username: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_users WHERE username = :1", [username])
+
+    @staticmethod
+    def _get_database_default_tablespace(cursor: oracledb.Cursor) -> Optional[str]:  # type: ignore[valid-type]
+        cursor.execute("SELECT property_value FROM database_properties WHERE property_name = 'DEFAULT_PERMANENT_TABLESPACE'")  # type: ignore
+        row = cursor.fetchone()
+        if row and row[0]:
+            return str(row[0])
+        return None
+
+    @staticmethod
+    def _get_user_default_tablespace(cursor: oracledb.Cursor, username: str) -> Optional[str]:  # type: ignore[valid-type]
+        cursor.execute("SELECT default_tablespace FROM dba_users WHERE username = :username", username=username)  # type: ignore
+        row = cursor.fetchone()
+        if row and row[0]:
+            return str(row[0])
+        return None
+
+    @staticmethod
+    def _ensure_unlimited_quota(cursor: oracledb.Cursor, username: str, tablespace: Optional[str]) -> bool:  # type: ignore[valid-type]
+        if not tablespace:
+            return False
+        tablespace_name = OracleEngine._format_identifier(tablespace)
+        cursor.execute( # type: ignore
+            """
+            SELECT max_bytes
+              FROM dba_ts_quotas
+             WHERE username = :username
+               AND tablespace_name = :tablespace
+            """,
+            username=username,
+            tablespace=tablespace_name,
+        )
+        row = cursor.fetchone()
+        if row and row[0] == -1:
+            return False
+        sql = f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}"
+        OracleEngine._execute_ddl(cursor.connection, cursor, sql)
+        return True
+
+    @staticmethod
+    def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_tables WHERE owner = :1 AND table_name = :2", [owner, table_name], )
+
+    @staticmethod
+    def _index_exists(cursor: oracledb.Cursor, owner: str, index_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_indexes WHERE owner = :1 AND index_name = :2", [owner, index_name], )
+
+    @staticmethod
+    def _constraint_exists(cursor: oracledb.Cursor, owner: str, constraint_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor, "SELECT 1 FROM dba_constraints WHERE owner = :1 AND constraint_name = :2", [owner, constraint_name],
+        )
+
+    @staticmethod
+    def _sequence_exists(cursor: oracledb.Cursor, owner: str, sequence_name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(
+            cursor, "SELECT 1 FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = :2", [owner, sequence_name],
+        )
+
+    @staticmethod
+    def _register_connection_env(conn: oracledb.Connection, env: Optional[str]) -> None:
+        if env:
+            OracleEngine._connection_envs[id(conn)] = env
+        else:
+            OracleEngine._connection_envs.pop(id(conn), None)
+
+    @staticmethod
+    def _get_connection_env(conn: oracledb.Connection) -> Optional[str]:
+        return OracleEngine._connection_envs.get(id(conn))
+
+    @staticmethod
+    def _execute_ddl(conn: oracledb.Connection, cursor: oracledb.Cursor, statement: str) -> None:
+        log_statement = OracleEngine._PRIVATE_DDL_MARK.sub("****", statement)
+        if len(log_statement) > 100:
+            log_statement = log_statement[:100] + " ... [truncated]"
+        statement = OracleEngine._PRIVATE_DDL_MARK.sub(lambda m: m.group(1), statement)
+        logger.info("Executing %s DDL: %s", OracleEngine._get_connection_env(conn), " ".join(log_statement.split()))
+        cursor.execute(statement)  # type: ignore[arg-type]
+
+    @staticmethod
+    def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:  # type: ignore[valid-type]
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name])
+
+    @staticmethod
+    def _get_primary_key_info(cursor: oracledb.Cursor, owner: str,
+                              table_name: str) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:  # type: ignore[valid-type]
+        cursor.execute(  # type: ignore
+            """
+            SELECT constraint_name, index_name
+              FROM dba_constraints
+             WHERE owner = :1
+               AND table_name = :2
+               AND constraint_type = 'P'
+            """, [owner, table_name]
+        )
+        cursor.execute(  # type: ignore
+            """
+            SELECT constraint_name, index_name
+              FROM dba_constraints
+             WHERE owner = :1
+               AND table_name = :2
+               AND constraint_type = 'P'
+            """,
+            [owner, table_name],
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None, (), None
+        constraint_name, index_name = row
+        cursor.execute( # type: ignore
+            "SELECT column_name FROM dba_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+            [owner, constraint_name],
+        )
+        columns = tuple(r[0] for r in cast(Iterable[Tuple[str]], cursor))
+        return constraint_name, columns, index_name
 
     @staticmethod
     def _column_needs_update(existing: ColumnDefinition, desired: ColumnDefinition) -> bool:
@@ -963,409 +1368,3 @@ end;"""
             OracleEngine._execute_ddl(cursor.connection, cursor, sql)
             dropped.append(fmttd_constraint_name)
         return dropped
-
-    @staticmethod
-    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition, table_cnf: Dict[str, Any]) -> None:
-        cursor: Optional[oracledb.Cursor] = None
-        fmttd_owner = OracleEngine._format_identifier(table.owner)
-        fmttd_table_name = OracleEngine._format_identifier(table.name)
-        logger.debug(f"Ensuring structure for table {table.owner}.{table.name} conn: {conn}")
-        try:
-            cursor = conn.cursor()
-            if not OracleEngine._table_exists(cursor, table.owner, table.name):
-                fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-                sql = f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )"
-                OracleEngine._execute_ddl(conn, cursor, sql)
-            else:
-                _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
-                for column in table.columns:
-                    column_definition = OracleEngine._column_sql(column)
-                    if not column.name in existing_columns:
-                        sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD ({column_definition})"
-                        OracleEngine._execute_ddl(conn, cursor, sql)
-                    else:
-                        existing = existing_columns[column.name]
-                        if OracleEngine._column_needs_update(existing, column):
-                            sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} MODIFY ({column_definition})"
-                            OracleEngine._execute_ddl(conn, cursor, sql)
-            existing_indexes = OracleEngine._get_table_indexes(cursor, fmttd_owner, fmttd_table_name)
-            desired_pk = tuple((table.primary_key or ()))
-            fmttd_desired_pk = tuple(OracleEngine._format_identifier(col) for col in desired_pk)
-            existing_pk_name, existing_pk_cols, existing_pk_index = OracleEngine._get_primary_key_info(cursor, table.owner, table.name)
-            fmttd_existing_pk_cols = tuple(OracleEngine._format_identifier(col) for col in existing_pk_cols)
-            fmttd_existing_pk_index = (OracleEngine._format_identifier(existing_pk_index) if existing_pk_index else None)
-            desired_constraint_name = f"{table.name}_PK"
-            fmttd_desired_constraint_name = OracleEngine._format_identifier(desired_constraint_name)
-            if desired_pk:
-                if not existing_pk_cols:
-                    existing_index_info = existing_indexes.get(desired_constraint_name)
-                    if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
-                        drop_sql = f"DROP INDEX {fmttd_owner}.{fmttd_desired_constraint_name}"
-                        OracleEngine._execute_ddl(conn, cursor, drop_sql)
-                        existing_indexes.pop(desired_constraint_name, None)
-                    add_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_constraint_name} PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
-                    OracleEngine._execute_ddl(conn, cursor, add_pk_sql)
-                elif existing_pk_cols != desired_pk:
-                    if existing_pk_name:
-                        drop_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {OracleEngine._format_identifier(existing_pk_name)}"
-                        OracleEngine._execute_ddl(conn, cursor, drop_pk_sql)
-                        index_to_drop = fmttd_existing_pk_index or existing_pk_name
-                        if index_to_drop:
-                            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
-                        if index_to_drop and index_to_drop in existing_indexes:
-                            drop_index_sql = f"DROP INDEX {fmttd_owner}.{index_to_drop}"
-                            OracleEngine._execute_ddl(conn, cursor, drop_index_sql)
-                            existing_indexes.pop(index_to_drop, None)
-                    existing_index_info = existing_indexes.get(desired_constraint_name)
-                    if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
-                        drop_conflict_sql = f"DROP INDEX {fmttd_owner}.{fmttd_desired_constraint_name}"
-                        OracleEngine._execute_ddl(conn, cursor, drop_conflict_sql)
-                        existing_indexes.pop(desired_constraint_name, None)
-                    recreate_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_constraint_name} PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
-                    OracleEngine._execute_ddl(conn, cursor, recreate_pk_sql)
-            elif fmttd_existing_pk_cols and existing_pk_name:
-                drop_unexpected_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {existing_pk_name}"
-                OracleEngine._execute_ddl(conn, cursor, drop_unexpected_pk_sql)
-                index_to_drop = fmttd_existing_pk_index or existing_pk_name
-                if index_to_drop:
-                    existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
-                if index_to_drop and index_to_drop in existing_indexes:
-                    drop_unexpected_index_sql = f"DROP INDEX {fmttd_owner}.{index_to_drop}"
-                    OracleEngine._execute_ddl(conn, cursor, drop_unexpected_index_sql)
-                    existing_indexes.pop(index_to_drop, None)
-            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
-            desired_indexes = OracleEngine._prepare_desired_indexes(table)
-            for index_name, (columns, is_unique) in desired_indexes.items():
-                fmttd_index_name = OracleEngine._format_identifier(index_name)
-                fmttd_columns = tuple(OracleEngine._format_identifier(col) for col in columns)
-                existing_index = existing_indexes.get(index_name)
-                if existing_index == (columns, is_unique):
-                    continue
-                if existing_index is not None:
-                    drop_mismatch_index_sql = f"DROP INDEX {fmttd_owner}.{fmttd_index_name}"
-                    OracleEngine._execute_ddl(conn, cursor, drop_mismatch_index_sql)
-                fmttd_columns_sql = ", ".join(fmttd_columns)
-                unique_clause = "UNIQUE " if is_unique else ""
-                create_index_sql = f"CREATE {unique_clause}INDEX {fmttd_owner}.{index_name} ON {fmttd_owner}.{fmttd_table_name} ({fmttd_columns_sql})"
-                OracleEngine._execute_ddl(conn, cursor, create_index_sql)
-            final_pk_name, _, final_pk_index = OracleEngine._get_primary_key_info(cursor, fmttd_owner, fmttd_table_name)
-            expected_indexes = set(desired_indexes.keys())
-            if final_pk_name:
-                expected_indexes.add(final_pk_name)
-            if final_pk_index:
-                expected_indexes.add(final_pk_index)
-            existing_indexes = OracleEngine._get_table_indexes(cursor, fmttd_owner, fmttd_table_name)
-            for index_name in list(existing_indexes.keys()):
-                if index_name not in expected_indexes:
-                    fmttd_index_name = OracleEngine._format_identifier(index_name)
-                    logger.info("Dropping unmanaged index %s on %s.%s", fmttd_index_name, fmttd_owner, fmttd_table_name)
-                    drop_unmanaged_index_sql = f"DROP INDEX {fmttd_owner}.{fmttd_index_name}"
-                    OracleEngine._execute_ddl(conn, cursor, drop_unmanaged_index_sql)
-        except Exception:
-            conn.rollback()
-            logger.critical("Failed to ensure table structure.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-
-    @staticmethod
-    def get_date_condition(date_expr: str, months_keep_src: int) -> str:
-        """Returns a date condition for the given date expression and months to keep.
-        Args:
-            date_expr: Date expression to evaluate.
-            months_keep_src: Months to keep.
-        Returns:
-            Date condition as string."""
-        return f"({date_expr} < add_months(l_process_date,-{months_keep_src}))"
-
-    @staticmethod
-    def close_connection(conn: oracledb.Connection) -> None:
-        """Closes the Oracle connection.
-        Args:
-            conn: Active Oracle connection."""
-        try:
-            if conn:
-                OracleEngine._register_connection_env(conn, None)
-                conn.close()
-        except Exception:
-            logger.critical("Failed to close Oracle DB connection.", exc_info=True)
-
-    @staticmethod
-    def ensure_roles(conn: oracledb.Connection, roles: Sequence[RoleDefinition]) -> List[str]:
-        created: List[str] = []
-        if not roles:
-            return created
-        cursor: Optional[oracledb.Cursor] = None
-        changed = False
-        try:
-            cursor = conn.cursor()
-            for role in roles:
-                fmttd_role_name = OracleEngine._format_identifier(role.name)
-                if OracleEngine._role_exists(cursor, role.name):
-                    continue
-                sql = f"CREATE ROLE {fmttd_role_name}"
-                OracleEngine._execute_ddl(conn, cursor, sql)
-                created.append(fmttd_role_name)
-                changed = True
-            if changed:
-                conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.critical("Failed to ensure roles.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-        return created
-
-    @staticmethod
-    def ensure_users(conn: oracledb.Connection, users: Sequence[UserDefinition]) -> List[str]:
-        created: List[str] = []
-        if not users:
-            return created
-        cursor: Optional[oracledb.Cursor] = None
-        changed = False
-        try:
-            cursor = conn.cursor()
-            database_default_tablespace = OracleEngine._get_database_default_tablespace(cursor)
-            for user in users:
-                fmttd_username = OracleEngine._format_identifier(user.name)
-                fmttd_default_tablespace = OracleEngine._format_identifier(user.default_tablespace)
-                tablespace_for_quota = user.default_tablespace
-                if not OracleEngine._user_exists(cursor, user.name):
-                    sql = f"CREATE USER {fmttd_username} IDENTIFIED BY ##{OracleEngine._quote(user.password)}##"
-                    if user.default_tablespace:
-                        sql += f" DEFAULT TABLESPACE {fmttd_default_tablespace}"
-                    if user.temporary_tablespace:
-                        sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
-                    logger.debug(f"Creating user with SQL: {sql}")
-                    OracleEngine._execute_ddl(conn, cursor, sql)
-                    created.append(fmttd_username)
-                    changed = True
-                    if not user.default_tablespace:
-                        tablespace_for_quota = OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
-                else:
-                    tablespace_for_quota = OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
-                admin_option_roles = set(OracleEngine._format_identifier(r) for r in user.roles_with_admin_option)
-                for role in user.roles:
-                    fmttd_role_name = OracleEngine._format_identifier(role)
-                    requires_admin_option = role in admin_option_roles
-                    has_role = OracleEngine._user_has_role(cursor, user.name, role)
-                    if requires_admin_option:
-                        if not has_role or not OracleEngine._user_has_role_with_admin_option(cursor, user.name, role):
-                            grant_sql = f"GRANT {fmttd_role_name} TO {fmttd_username} WITH ADMIN OPTION"
-                            OracleEngine._execute_ddl(conn, cursor, grant_sql)
-                            changed = True
-                    elif not has_role:
-                        grant_sql = f"GRANT {fmttd_role_name} TO {fmttd_username}"
-                        OracleEngine._execute_ddl(conn, cursor, grant_sql)
-                        changed = True
-                for privilege in user.system_privileges:
-                    if not OracleEngine._user_has_sys_priv(cursor, user.name, privilege):
-                        grant_priv_sql = f"GRANT {privilege} TO {fmttd_username}"
-                        OracleEngine._execute_ddl(conn, cursor, grant_priv_sql)
-                        changed = True
-                if OracleEngine._ensure_unlimited_quota(cursor, user.name, tablespace_for_quota):
-                    changed = True
-            if changed:
-                conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.critical("Failed to ensure users.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-        return created
-
-    @staticmethod
-    def ensure_tables(conn: oracledb.Connection, tables: Sequence[TableDefinition]) -> List[str]:
-        created: List[str] = []
-        if not tables:
-            return created
-        cursor: Optional[oracledb.Cursor] = None
-        changed = False
-        try:
-            cursor = conn.cursor()
-            for table in tables:
-                fmttd_owner = OracleEngine._format_identifier(table.owner)
-                fmttd_table_name = OracleEngine._format_identifier(table.name)
-                if not OracleEngine._table_exists(cursor, table.owner, table.name):
-                    columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-                    sql = f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {columns_sql}\n    )"
-                    OracleEngine._execute_ddl(conn, cursor, sql)
-                    created.append(f"{fmttd_owner}.{fmttd_table_name}")
-                    changed = True
-                if table.primary_key:
-                    pk_name = f"{table.name}_PK"
-                    fmttd_pk_name = OracleEngine._format_identifier(pk_name)
-                    if not OracleEngine._constraint_exists(cursor, table.owner, pk_name):
-                        cols = ", ".join(OracleEngine._format_identifier(col) for col in table.primary_key)
-                        sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_pk_name} PRIMARY KEY ({cols})"
-                        OracleEngine._execute_ddl(conn, cursor, sql)
-                        changed = True
-                for index in table.indexes:
-                    fmttd_idx_name = OracleEngine._format_identifier(index.name)
-                    if OracleEngine._index_exists(cursor, table.owner, index.name):
-                        continue
-                    cols = ", ".join(OracleEngine._format_identifier(col) for col in index.columns)
-                    unique_kw = "UNIQUE " if index.unique else ""
-                    sql = f"CREATE {unique_kw}INDEX {fmttd_owner}.{fmttd_idx_name} ON {fmttd_owner}.{fmttd_table_name} ({cols})"
-                    OracleEngine._execute_ddl(conn, cursor, sql)
-                    changed = True
-            if changed:
-                conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.critical("Failed to ensure tables.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-        return created
-
-    @staticmethod
-    def ensure_sequences(conn: oracledb.Connection, sequences: Sequence[SequenceDefinition]) -> List[str]:
-        created: List[str] = []
-        if not sequences:
-            return created
-        cursor: Optional[oracledb.Cursor] = None
-        changed = False
-        try:
-            cursor = conn.cursor()
-            for sequence in sequences:
-                fmttd_owner = OracleEngine._format_identifier(sequence.owner)
-                fmttd_sequence_name = OracleEngine._format_identifier(sequence.name)
-                if OracleEngine._sequence_exists(cursor, sequence.owner, sequence.name):
-                    continue
-                sql = (
-                    f"CREATE SEQUENCE {fmttd_owner}.{fmttd_sequence_name} "
-                    f"START WITH {sequence.start_with} INCREMENT BY {sequence.increment_by}"
-                )
-                if sequence.minvalue is not None:
-                    sql += f" MINVALUE {sequence.minvalue}"
-                else:
-                    sql += " NOMINVALUE"
-                if sequence.maxvalue is not None:
-                    sql += f" MAXVALUE {sequence.maxvalue}"
-                else:
-                    sql += " NOMAXVALUE"
-                sql += " CYCLE" if sequence.cycle else " NOCYCLE"
-                if sequence.cache is not None:
-                    sql += f" CACHE {sequence.cache}"
-                else:
-                    sql += " NOCACHE"
-                OracleEngine._execute_ddl(conn, cursor, sql)
-                created.append(f"{fmttd_owner}.{fmttd_sequence_name}")
-                changed = True
-            if changed:
-                conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.critical("Failed to ensure sequences.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-        return created
-
-    @staticmethod
-    def ensure_database_links(conn: oracledb.Connection, links: Sequence[DatabaseLinkDefinition]) -> List[str]:
-        created: List[str] = []
-        if not links:
-            return created
-        cursor: Optional[oracledb.Cursor] = None
-        changed = False
-        try:
-            cursor = conn.cursor()
-            for link in links:
-                fmttd_link_name = OracleEngine._format_identifier(link.name)
-                if OracleEngine._db_link_exists(cursor, link.name):
-                    continue
-                fmttd_username = OracleEngine._format_identifier(link.username)
-                fmttd_password = OracleEngine._quote(link.password)
-                literal_dsn_literal = OracleEngine._quote_literal(link.dsn)
-                sql = f"CREATE DATABASE LINK {fmttd_link_name} CONNECT TO {fmttd_username} IDENTIFIED BY ##{fmttd_password}## USING {literal_dsn_literal}"
-                OracleEngine._execute_ddl(conn, cursor, sql)
-                created.append(fmttd_link_name)
-                changed = True
-            if changed:
-                conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.critical("Failed to ensure database links.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-        return created
-
-    @staticmethod
-    def ensure_table_privileges(conn: oracledb.Connection, role: str, tables: Sequence[Tuple[str, str]], privileges: Sequence[str]) -> List[str]:
-        cursor: Optional[oracledb.Cursor] = None
-        granted: List[str] = []
-        changed = False
-        if not tables:
-            return granted
-        fmt_role = OracleEngine._format_identifier(role)
-        try:
-            cursor = conn.cursor()
-            for owner, table_name in tables:
-                fmttd_owner = OracleEngine._format_identifier(owner)
-                fmttd_table_name = OracleEngine._format_identifier(table_name)
-                for privilege in privileges:
-                    privilege_upper = privilege.upper()
-                    if OracleEngine._role_has_table_priv(cursor, role.upper(), owner.upper(), table_name.upper(), privilege_upper):
-                        continue
-                    sql = f"GRANT {privilege_upper} ON {fmttd_owner}.{fmttd_table_name} TO {fmt_role}"
-                    OracleEngine._execute_ddl(conn, cursor, sql)
-                    granted.append(f"{fmttd_owner}.{fmttd_table_name}:{privilege_upper}")
-                    changed = True
-            if changed:
-                conn.commit()
-        except Exception:
-            conn.rollback()
-            logger.critical("Failed to ensure table privileges.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-        return granted
-
-    @staticmethod
-    def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> List[str]:
-        cursor: Optional[oracledb.Cursor] = None
-        try:
-            cursor = conn.cursor()
-            cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(owner)}")  # type: ignore[arg-type]
-            for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
-                OracleEngine._execute_ddl(conn, cursor, statement)
-            return SUPPORTING_OBJECT_LIST
-        except Exception:
-            logger.critical("Failed to ensure supporting PL/SQL objects.", exc_info=True)
-            raise
-        finally:
-            if cursor:
-                cursor.close()
-
-    @staticmethod
-    def get_identifier_str(identifier: str) -> str:
-        """ Returns the identifier string required to query dictionary views.
-        Args:
-            indentifier: The identifier string to process.
-        Returns:
-            The identifier string without angle brackets.
-        """
-        identifier = identifier.strip()
-        if identifier.startswith('"') and identifier.endswith('"'):
-            return identifier[1:-1]
-        return identifier.upper()
-
-    @staticmethod
-    def get_tdb_columns_expressions() -> Tuple[str, str]:
-        """ Returns the expressions for the TDB process date and insert date columns.
-        Returns:
-            A tuple containing the process date expression and insert date expression.
-        """
-        return "l_process_date", "sysdate"
