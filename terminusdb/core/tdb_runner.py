@@ -296,7 +296,6 @@ def tdb_exec_ilm(
                 cycle_launched = False
                 # Search for a process to launch
                 next_ready_table = get_next_ready_table(tables_config, active_tables)
-                logger.debug(f"Next ready table: {next_ready_table[0:2] if next_ready_table else 'None'}")
                 if next_ready_table:
                     owner, table_name, table_info = next_ready_table
                     logger.info(f"Launching background process for {owner}.{table_name}...")

@@ -367,6 +367,8 @@ class OracleEngine(DatabaseEngine):
     @staticmethod
     def _execute_ddl(conn: oracledb.Connection, cursor: oracledb.Cursor, statement: str) -> None:
         log_statement = OracleEngine._SEC.sub("****", statement)
+        if len(log_statement) > 100:
+            log_statement = log_statement[:100] + " ... [truncated]"
         statement = OracleEngine._SEC.sub(lambda m: m.group(1), statement)
         logger.info("Executing %s DDL: %s", OracleEngine._get_connection_env(conn), " ".join(log_statement.split()))
         cursor.execute(statement)  # type: ignore[arg-type]
