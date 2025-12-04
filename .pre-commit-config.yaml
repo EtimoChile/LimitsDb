@@ -19,3 +19,11 @@ repos:
       - id: mypy
         args: ["--config-file", "pyproject.toml", "terminusdb", "tests"]
         pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        pass_filenames: false
