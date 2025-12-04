@@ -46,6 +46,25 @@ cd TerminusDB
 poetry install
 ```
 
+## Development & Testing
+
+To run the test suite, install the development dependencies (pytest, coverage, linters) either with Poetry or pip:
+
+```bash
+# Using Poetry
+poetry install --with dev
+
+# Or with pip directly
+python -m pip install -r requirements-dev.txt
+```
+
+Then execute the tests (optionally collecting coverage):
+
+```bash
+poetry run pytest -q
+poetry run coverage run -m pytest -q && poetry run coverage report
+```
+
 ## CLI Commands
 
 After `poetry install`, the following executables are available:
