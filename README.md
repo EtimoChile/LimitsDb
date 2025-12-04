@@ -46,6 +46,36 @@ cd TerminusDB
 poetry install
 ```
 
+## Quickstart
+
+Spin up a minimal end-to-end run with the built-in scaffolding tools:
+
+1. **Create config files** for a schema/profile pair:
+
+   ```bash
+   poetry run tdb-init --schema billing --profile dev
+   ```
+
+2. **Fill in connection details** in `~/.config/TerminusDB/schemas/billing/config.dev.yml` and secrets in `secrets.dev.json`.
+
+3. **Encrypt secrets** in place:
+
+   ```bash
+   poetry run tdb-crypt --schema billing --profile dev
+   ```
+
+4. **Dry-run the ILM plan** (no data changes) and review the generated SQL:
+
+   ```bash
+   poetry run tdb-run --schema billing --profile dev --action SOURCE_ILM --mode PREVIEW --generate-script
+   ```
+
+5. **Execute for real** once you are satisfied with the plan:
+
+   ```bash
+   poetry run tdb-run --schema billing --profile dev --action SOURCE_ILM --mode EXECUTE
+   ```
+
 ## Development & Testing
 
 To run the test suite, install the development dependencies (pytest, coverage, linters) either with Poetry or pip:
