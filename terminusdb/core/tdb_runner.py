@@ -217,7 +217,7 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str,
             try:
                 rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
                 engine.save_error_status(conn, config, owner, table_name, process_date, process_start, error.message, plsql_code)
-            except Exception as e:
+            except Exception:
                 logger.critical(f"Error getting rows processed for {owner}.{table_name}:", exc_info=True)
                 rows_processed = 0
             return (owner, table_name, Status.ERROR, prev_rows_processed, rows_processed, error.code, error.message)
@@ -239,7 +239,8 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
     while True:
         cycle_printed = False
         for (owner, table_name), table_info in tables_config.items():
-            if table_info["skip"]: continue
+            if table_info["skip"]:
+                continue
             cd = tables_config[(owner, table_name)]["conds"][0]
             if cd["ctl_status"] in ["GENERATED"]:
                 continue
@@ -266,7 +267,8 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
 def get_next_ready_table(tables_config: Dict[Tuple[str, str], Dict[str, Any]],
                          active_tables: set[Tuple[str, str]]) -> Optional[Tuple[str, str, Dict[str, Any]]]:  # type: ignore
     for (owner, table_name), table_cnf in tables_config.items():
-        if table_cnf["skip"]: continue
+        if table_cnf["skip"]:
+            continue
         cd = tables_config[(owner, table_name)]["conds"][0]
         if cd["ctl_status"] in [Status.SKIPPED, Status.TABLE_END] or (owner, table_name) in active_tables:
             continue
@@ -358,7 +360,8 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
         tdb_cnf_row["table_name"] = engine.get_identifier_str(tdb_cnf_row["table_name"])
         tdb_cnf_row["history_owner"] = engine.get_identifier_str(tdb_cnf_row["history_owner"])
         key = (tdb_cnf_row["source_owner"], tdb_cnf_row["table_name"])
-        if key not in tables_config: tables_config[key] = {"conds": [], "referencing_tables": []}
+        if key not in tables_config:
+            tables_config[key] = {"conds": [], "referencing_tables": []}
         tables_config[key]["conds"].append(tdb_cnf_row)
     for tdb_cnf_row in tdb_conf_rows:
         key = (tdb_cnf_row["source_owner"], tdb_cnf_row["table_name"])
@@ -366,8 +369,10 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
         if referencing_tables:
             for ref_table in referencing_tables.split(","):
                 ref_table = ref_table.strip()
-                if "." in ref_table: ref_owner, ref_table = ref_table.split(".")
-                else: ref_owner = tdb_cnf_row["source_owner"]
+                if "." in ref_table:
+                    ref_owner, ref_table = ref_table.split(".")
+                else:
+                    ref_owner = tdb_cnf_row["source_owner"]
                 ref_table, alias = ref_table.split(" ")
                 ref_owner = engine.get_identifier_str(ref_owner)
                 ref_table = engine.get_identifier_str(ref_table)

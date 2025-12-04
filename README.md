@@ -101,16 +101,18 @@ poetry run coverage run -m pytest -q && poetry run coverage report
 
 After `poetry install`, the following executables are available:
 
-- `tdb-run` — main ILM runner
 - `tdb-init` — scaffold per-schema configuration files
 - `tdb-crypt` — encrypt cleartext secrets in place
+- `tdb-impl` — verify and create DB control schemas and objects
+- `tdb-run` — main ILM runner
 
 From shell:
 
 ```bash
-poetry run tdb-run --help
 poetry run tdb-init --help
 poetry run tdb-crypt --help
+poetry run tdb-impl --help
+poetry run tdb-run --help
 ```
 
 ## Initialize Configuration
@@ -333,7 +335,7 @@ Booleans accept `true/false`, `1/0`, `on/off` (case-insensitive).
 Format, lint, type-check:
 
 ```bash
-poetry run black .
+poetry run yapf . --recursive
 poetry run flake8
 poetry run mypy .
 ```

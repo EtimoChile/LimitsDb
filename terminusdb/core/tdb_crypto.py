@@ -32,7 +32,8 @@ def load_or_create_key() -> bytes:
             return bytes.fromhex(env)
         try:
             k = base64.b64decode(env)
-            if len(k) == 32: return k
+            if len(k) == 32:
+                return k
         except Exception:
             pass
         if len(env) == 32:

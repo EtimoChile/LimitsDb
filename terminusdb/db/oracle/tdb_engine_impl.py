@@ -358,7 +358,8 @@ class OracleEngine(DatabaseEngine):
             gend_cols = gend_vals = []
         ins_cols = join_wrapped(", ", table_columns + other_cols_alias + gend_cols, 200)
         ins_vals = join_wrapped(", ", [f"r_rec(i).{col}" for col in table_columns + other_cols_alias] + gend_vals, 200)
-        if config.generate_script: process_date = "&process_date"
+        if config.generate_script:
+            process_date = "&process_date"
         plsql = f"""declare
     l_source_owner varchar2(50) := '{source_owner}';
     l_history_owner varchar2(50) := '{history_owner}';
@@ -392,7 +393,7 @@ begin
     check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
     if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;"""
         if source_ilm or not config.use_added_columns:
-            plsql += f"""
+            plsql += """
     check_referencing_tables(l_referencing_tables, l_process_date); commit;"""
         if not has_lob_columns or not source_ilm:
             plsql += f"""
@@ -409,8 +410,8 @@ begin
                     plsql += f"""
         for i in 1 .. r_rec.count loop
             insert into {OracleEngine._format_identifier(history_owner)}.{OracleEngine._format_identifier(table_name)}@{OracleEngine._format_identifier(config.source_to_history_dblink_name)}
-            ({indent_lines(ins_cols,12)})
-            values ({indent_lines(ins_vals,12)});
+            ({indent_lines(ins_cols, 12)})
+            values ({indent_lines(ins_vals, 12)});
         end loop;"""
                 plsql += f"""
         forall i in 1 .. r_rec.count
@@ -426,8 +427,8 @@ begin
             if config.mode in ("EXECUTE", "SCRIPT"):
                 if source_ilm and nvl(months_keep_history_max, 0) > 0:
                     plsql += f"""
-    insert into {OracleEngine._format_identifier(history_owner)}.{OracleEngine._format_identifier(table_name)}@{OracleEngine._format_identifier(config.source_to_history_dblink_name)}({indent_lines(ins_cols,4)})
-    select /*+ {hint_expr} */ {indent_lines(cols_select,4)}
+    insert into {OracleEngine._format_identifier(history_owner)}.{OracleEngine._format_identifier(table_name)}@{OracleEngine._format_identifier(config.source_to_history_dblink_name)}({indent_lines(ins_cols, 4)})
+    select /*+ {hint_expr} */ {indent_lines(cols_select, 4)}
     {indent_lines(query_expr, 4)};"""
                 plsql += f"""
     delete from {OracleEngine._format_identifier(source_owner)}.{OracleEngine._format_identifier(table_name)} where rowid in
@@ -583,7 +584,8 @@ end;"""
         try:
             cursor = conn.cursor()
             for (owner, table_name), table_cnf in tables_config.items():
-                if table_cnf["skip"]: continue
+                if table_cnf["skip"]:
+                    continue
                 cursor.execute( # type: ignore
                     f"""SELECT ctl_status FROM tdb_ctl
                     WHERE ctl_owner = :1 AND ctl_table_name = :2
@@ -718,7 +720,7 @@ end;"""
                 _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
                 for column in table.columns:
                     column_definition = OracleEngine._column_sql(column)
-                    if not column.name in existing_columns:
+                    if column.name not in existing_columns:
                         sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD ({column_definition})"
                         OracleEngine._execute_ddl(conn, cursor, sql)
                     else:

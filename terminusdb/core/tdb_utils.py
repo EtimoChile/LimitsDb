@@ -1,8 +1,7 @@
 from __future__ import annotations
-from typing import Any, List, Optional, Iterable, Tuple, Sequence, TypeVar, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Iterable, Tuple, Sequence, TypeVar, Literal, get_args, get_origin, get_type_hints, TYPE_CHECKING
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, get_args, get_origin, get_type_hints, Literal
 from platformdirs import PlatformDirs  # requerido
 from importlib.resources import files as ir_files
 
