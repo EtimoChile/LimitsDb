@@ -142,6 +142,7 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
             try:
                 tables_config = process_tables_cnf(primary_conn, config, engine, process_date)
                 logger.info("Configuration ready: %d table(s) evaluated.", len(tables_config))
+                _log_where_predicates(tables_config)
             except Exception:
                 logger.error("Failed to process ILM configuration.", exc_info=True)
                 ok = False
@@ -451,7 +452,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                     # Add the cnf_purge_date_expr to other_columns for referencing tables
                     if cd["purge_date_expr"]:
                         column_metadata = ColumnDefinition(name=f"tdb_date_{al}", data_type="date", nullable=True)
-                        append_unique_name(
+                        _append_unique_name(
                             table_cnf["other_columns"], {
                                 "name": f"tdb_date_{al}",
                                 "expr": nvl(cd["purge_date_expr"], "").replace('@', al + "."),
@@ -462,7 +463,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                     for column_name in engine.get_identifiers_from_expression(cd["history_addtl_filter_expr"] or ""):
                         column_metadata = _clone_column_definition(f"{column_name}_{al}", columns_metadata[column_name])
                         other_column = {"name": f"{column_name}_{al}", "expr": f"{al}.{column_name}", "metadata": column_metadata}  # type: ignore
-                        append_unique_name(table_cnf["other_columns"], other_column)  # type: ignore
+                        _append_unique_name(table_cnf["other_columns"], other_column)  # type: ignore
         if config.add_tdb_columns and is_source_mode:
             table_cnf["other_columns"].append({
                 "name": "TDB_PROCESS_DATE",
@@ -537,7 +538,20 @@ def tdb_run(config: Config) -> None:
         if engine and admin_connection:
             engine.close_connection(admin_connection)
 
-def append_unique_name(other_columns: List[Dict[str, Any]], other_column: Dict[str, Any]) -> None:
+def _log_where_predicates(tables_config: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
+    any_predicates = False
+    for table_info in tables_config.values():
+        query_expr = table_info.get("query_expr")
+        if not query_expr:
+            continue
+        if not any_predicates:
+            logger.info("WHERE predicates evaluated for ILM:")
+            any_predicates = True
+        logger.info("\n%s", query_expr)
+    if not any_predicates:
+        logger.info("There are no WHERE predicates calculated for ILM tables.")
+
+def _append_unique_name(other_columns: List[Dict[str, Any]], other_column: Dict[str, Any]) -> None:
     """ Appends a column to the other_columns list if its name is not already present."""
     if other_column["name"] not in {col["name"] for col in other_columns}:
         other_columns.append(other_column)
