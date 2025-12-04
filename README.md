@@ -12,6 +12,8 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
 - **Works with hints and special cases.** Add optimizer hints, mark LOB-heavy tables, and tune behavior per table.
 - **Dry-run anytime.** Generate the exact operations without executing them, to review and approve planned changes.
 - **Keeps secrets safe.** Database credentials are stored encrypted and transparently decrypted at runtime.
+- **Automates control DB objects creation.** Creates missing control schemas and DB objects.
+- **Automates history objects creation and updates.** Creates missing history tables and correct columns, contraints and indexes for ILM executions.
 
 ### Typical outcomes
 
@@ -64,10 +66,10 @@ Spin up a minimal end-to-end run with the built-in scaffolding tools:
    poetry run tdb-crypt --schema billing --profile dev
    ```
 
-4. **Dry-run the ILM plan** (no data changes) and review the generated SQL:
+4. **Dry-run the ILM plan** (no data changes):
 
    ```bash
-   poetry run tdb-run --schema billing --profile dev --action SOURCE_ILM --mode PREVIEW --generate-script
+   poetry run tdb-run --schema billing --profile dev --action SOURCE_ILM --mode PREVIEW
    ```
 
 5. **Execute for real** once you are satisfied with the plan:
@@ -185,7 +187,6 @@ Common overrides:
 
 ```
 --mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW simulate, SCRIPT emit SQL, EXECUTE run
---generate-script / --no-generate-script      # Emit SQL to disk instead of executing it
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --use-added-columns / --no-use-added-columns  # Toggle helper columns in history tables
@@ -201,38 +202,37 @@ Examples:
 
 ```bash
 # Dry-run with verbose logging
-poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --generate-script --log-level DEBUG
+poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --mode PREVIEW --log-level DEBUG
 
 # Apply quick overrides without editing files
-poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chunk_size=200000 --set parallel_max=8
+poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set chunk_size=200000 --set parallel_max=8
 ```
 
 ### Configuration parameters reference
 
-| Parameter                | Purpose                                                                                 | Default / values                                                                     |
-| ------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history). | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
+| Parameter                | Purpose                                                                                                                                                         | Default / values                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history).                                                                         | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
 | `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` simulate (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit SQL, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
-| `chunk_size`             | Rows per chunk when processing large tables.                                            | Default `100000`.                                                                    |
-| `use_added_columns`      | Populate derived columns in history tables.                                             | Default `True` (boolean toggle).                                                     |
-| `add_tdb_columns`        | Add TerminusDB execution-date columns in history tables.                                | Default `True` (boolean toggle).                                                     |
-| `generate_script`        | Generate SQL script without executing (auto-enabled in `SCRIPT` mode).                 | Default `False` (boolean toggle).                                                    |
-| `parallel_max`           | Maximum number of parallel processes.                                                   | Default `10`.                                                                        |
-| `db_engine`              | Database engine.                                                                        | Default `"oracle"`; choices `"oracle"`, `"postgres"`.                                |
-| `log_level`              | Logging level.                                                                          | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
-| `schema`                 | Schema name (folder under `schemas/`).                                                  | Required on CLI; no persisted default.                                               |
-| `profile`                | Profile name (e.g., `dev`, `prod`).                                                     | Optional; default `null`.                                                            |
-| `ilm_config_file`        | YAML file with tables (bypass DB discovery).                                            | Optional; default `null`.                                                            |
-| `source_dsn`             | Source DSN / connection descriptor.                                                     | Default empty string.                                                                |
-| `source_username`        | Source username.                                                                        | Default empty string.                                                                |
-| `source_password`        | Source password stored in secrets.                                                      | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
-| `history_dsn`            | History DSN / connection descriptor.                                                    | Default empty string.                                                                |
-| `history_username`       | History username.                                                                       | Default empty string.                                                                |
-| `history_password`       | History password stored in secrets.                                                     | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
-| `admin_source_username`  | Admin source username.                                                                  | Default empty string.                                                                |
-| `admin_source_password`  | Admin source password stored in secrets.                                                | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
-| `admin_history_username` | Admin history username.                                                                 | Default empty string.                                                                |
-| `admin_history_password` | Admin history password stored in secrets.                                               | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
+| `chunk_size`             | Rows per chunk when processing large tables.                                                                                                                    | Default `100000`.                                                                    |
+| `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
+| `add_tdb_columns`        | Add TerminusDB execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
+| `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
+| `db_engine`              | Database engine.                                                                                                                                                | Default `"oracle"`; choices `"oracle"`, `"postgres"`.                                |
+| `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
+| `schema`                 | Schema name (folder under `schemas/`).                                                                                                                          | Required on CLI; no persisted default.                                               |
+| `profile`                | Profile name (e.g., `dev`, `prod`).                                                                                                                             | Optional; default `null`.                                                            |
+| `ilm_config_file`        | YAML file with tables (bypass DB discovery).                                                                                                                    | Optional; default `null`.                                                            |
+| `source_dsn`             | Source DSN / connection descriptor.                                                                                                                             | Default empty string.                                                                |
+| `source_username`        | Source username.                                                                                                                                                | Default empty string.                                                                |
+| `source_password`        | Source password stored in secrets.                                                                                                                              | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
+| `history_dsn`            | History DSN / connection descriptor.                                                                                                                            | Default empty string.                                                                |
+| `history_username`       | History username.                                                                                                                                               | Default empty string.                                                                |
+| `history_password`       | History password stored in secrets.                                                                                                                             | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
+| `admin_source_username`  | Admin source username.                                                                                                                                          | Default empty string.                                                                |
+| `admin_source_password`  | Admin source password stored in secrets.                                                                                                                        | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
+| `admin_history_username` | Admin history username.                                                                                                                                         | Default empty string.                                                                |
+| `admin_history_password` | Admin history password stored in secrets.                                                                                                                       | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
 
 #### Overrides matrix (CLI, env, YAML)
 
@@ -243,7 +243,6 @@ poetry run tdb-run --schema billing --profile prod --action SOURCE_ILM --set chu
 | `chunk_size`             | `--chunk-size`             | `TDB_CHUNK_SIZE`             | `config.<PROFILE>.yml: chunk_size`               |
 | `use_added_columns`      | `--use-added-columns`      | `TDB_USE_ADDED_COLS`         | `config.<PROFILE>.yml: use_added_columns`        |
 | `add_tdb_columns`        | `--add-tdb-columns`        | `TDB_ADD_TDB_COLUMNS`        | `config.<PROFILE>.yml: add_tdb_columns`          |
-| `generate_script`        | `--generate-script`        | `TDB_GENERATE_SCRIPT`        | `config.<PROFILE>.yml: generate_script`          |
 | `parallel_max`           | `--parallel-max`           | `TDB_PARALLEL_MAX`           | `config.<PROFILE>.yml: parallel_max`             |
 | `db_engine`              | `--db-engine`              | `TDB_DB_ENGINE`              | `config.<PROFILE>.yml: db_engine`                |
 | `log_level`              | `--log-level`              | `TDB_LOG_LEVEL`              | `config.<PROFILE>.yml: log_level`                |
@@ -301,7 +300,6 @@ Every key is commented; the default value and short help appear inline. Example:
 # chunk_size: 100000    # Rows per chunk when processing large tables
 # use_added_columns: True  # Populate derived columns in history tables
 # add_tdb_columns: True  # Add TerminusDB execution-date columns in history tables
-# generate_script: False  # Dry-run: generate SQL script without executing
 # parallel_max: 10      # Maximum number of parallel processes
 # db_engine: "oracle"   # Database engine
 # log_level: "INFO"     # Logging level

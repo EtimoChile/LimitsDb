@@ -32,7 +32,6 @@ class Config:
     chunk_size: Annotated[int, Help("Rows per chunk when processing large tables"), Cli("--chunk-size"), Env("TDB_CHUNK_SIZE")] = 100000
     use_added_columns: Annotated[bool, Help("Populate derived columns in history tables")] = True
     add_tdb_columns: Annotated[bool, Help("Add TerminusDB execution-date columns in history tables")] = True
-    generate_script: Annotated[bool, Help("Generate SQL script without executing (auto-enabled in SCRIPT mode)"), Cli("--generate-script"), Env("TDB_GENERATE_SCRIPT")] = False
     parallel_max: Annotated[int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("TDB_PARALLEL_MAX")] = 10
     db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine")] = "oracle"
     log_level: Annotated[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], Help("Logging level"), Cli("--log-level"), Env("TDB_LOG_LEVEL")] = "INFO"
