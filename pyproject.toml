@@ -52,16 +52,32 @@ based_on_style = "pep8"
 column_limit = 150
 coalesce_brackets = true
 dedent_closing_brackets = true
-join_multiple_lines = true
-split_before_first_argument = false
+join_multiple_lines = false
+split_before_first_argument = true
 split_before_named_assigns = false
 split_all_comma_separated_values = false
 split_arguments_when_comma_terminated = false
 blank_lines_around_top_level_definition = 1
 blank_line_before_nested_class_or_def = false
-split_penalty_after_opening_bracket = 1000
-split_penalty_for_added_line_split = 1000
+split_penalty_after_opening_bracket = 300
+split_penalty_for_added_line_split = 300
 disable_ending_comma_heuristic = true
+indent_width = 4
+continuation_indent_width = 4
+align_closing_bracket_with_visual_indent = false
 
 [tool.mypy]
 strict = true
+packages = ["terminusdb"]
+exclude = "^tests/"
+
+# para las libs externas sin stubs:
+[[tool.mypy.overrides]]
+module = [
+  "pytest",
+  "yaml",
+  "cryptography.*",
+  "platformdirs",
+  "oracledb",
+]
+ignore_missing_imports = true

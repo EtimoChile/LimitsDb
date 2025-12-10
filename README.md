@@ -97,6 +97,20 @@ poetry run pytest -q
 poetry run coverage run -m pytest -q && poetry run coverage report
 ```
 
+Install the Git hook so `yapf`, `flake8`, `mypy`, and `pytest` run automatically on commits:
+
+```bash
+poetry run pre-commit install
+# or, if you are using the active Python environment directly:
+python -m pre_commit install
+```
+
+You can lint/test everything locally without committing via:
+
+```bash
+poetry run pre-commit run --all-files
+```
+
 ## CLI Commands
 
 After `poetry install`, the following executables are available:

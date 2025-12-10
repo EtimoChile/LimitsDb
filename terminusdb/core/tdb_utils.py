@@ -84,9 +84,9 @@ def get_effective_credentials(cfg: Config, *, admin: bool = False, env: Optional
     user_key = f"{role}{env_part}_username"
     pwd_key = f"{role}{env_part}_password"
     dsn_key = f"{env_part}_dsn"
-    user = getattr(cfg, user_key, None)
-    pwd = getattr(cfg, pwd_key, None)
-    dsn = getattr(cfg, dsn_key, None)
+    user: Optional[str] = getattr(cfg, user_key, None)
+    pwd: Optional[str] = getattr(cfg, pwd_key, None)
+    dsn: Optional[str] = getattr(cfg, dsn_key, None)
     missing = [key for key, value in ((user_key, user), (pwd_key, pwd), (dsn_key, dsn)) if not value]
     if missing:
         raise ValueError(f"Missing {'/'.join(missing)} for action={cfg.action}")

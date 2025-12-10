@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/pyrightconfig.json",
+
+  "include": ["terminusdb"],
+  "exclude": ["tests", ".venv", "build", "dist", ".git", ".mypy_cache"],
+
+  "venvPath": ".",
+  "venv": ".venv",
+
+  "typeCheckingMode": "strict",
+
+  "reportMissingTypeStubs": "warning",
+  "reportUnusedImport": "warning"
+}

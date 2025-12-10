@@ -18,6 +18,9 @@ class ColumnDefinition:
     nullable: bool = True
     default: Optional[str] = None
 
+IndexMap = Dict[str, Dict[str, Any]]
+ColumnMetadata = Dict[str, ColumnDefinition]
+
 @dataclass(frozen=True)
 class IndexDefinition:
     """Generic index definition."""

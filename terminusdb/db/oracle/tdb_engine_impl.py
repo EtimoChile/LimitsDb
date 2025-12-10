@@ -5,7 +5,7 @@ import oracledb
 from terminusdb.core.tdb_params_config import Config
 from terminusdb.core.tdb_status import Status
 from terminusdb.core.tdb_utils import get_effective_credentials, indent_lines, join_wrapped, nvl
-from terminusdb.db.tdb_engines import ColumnDefinition, DatabaseEngine, DatabaseLinkDefinition, RoleDefinition, SequenceDefinition, TableDefinition, UserDefinition
+from terminusdb.db.tdb_engines import ColumnDefinition, ColumnMetadata, DatabaseEngine, DatabaseLinkDefinition, IndexMap, RoleDefinition, SequenceDefinition, TableDefinition, UserDefinition
 from terminusdb.core.tdb_logger import get_logger
 
 SUPPORTING_OBJECT_LIST = ["TYPE t_referencing_tables", "PROCEDURE check_save_status", "PROCEDURE check_referencing_tables"]
@@ -256,9 +256,8 @@ class OracleEngine(DatabaseEngine):
                 from all_tab_columns
                 where  owner = :1 and table_name = :2 and column_id is not null
                 order by column_id""", [owner, table_name])
-            for row in cast(
-                Iterable[Tuple[int, str, str, Optional[int], Optional[int], Optional[int], str, Optional[str], Optional[str], str]], cursor
-            ):
+            for row in cast(Iterable[Tuple[int, str, str, Optional[int], Optional[int], Optional[int], str, Optional[str], Optional[str], str]],
+                            cursor):
                 column_id, column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used = row
                 dtype = data_type.lower()
                 length: Optional[int] = None
@@ -1181,12 +1180,11 @@ end;"""
         cursor.execute(statement)  # type: ignore[arg-type]
 
     @staticmethod
-    def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:  # type: ignore[valid-type]
+    def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:
         return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name])
 
     @staticmethod
-    def _get_primary_key_info(cursor: oracledb.Cursor, owner: str,
-                              table_name: str) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:  # type: ignore[valid-type]
+    def _get_primary_key_info(cursor: oracledb.Cursor, owner: str, table_name: str) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:
         cursor.execute(  # type: ignore
             """
             SELECT constraint_name, index_name
@@ -1288,8 +1286,7 @@ end;"""
         return desired_indexes
 
     @staticmethod
-    def _choose_best_index_for_primary_key(indexes: Dict[str, Dict[str, Any]], column_metadata: Dict[str, ColumnDefinition],
-                                           ) -> Optional[Tuple[str, ...]]:
+    def _choose_best_index_for_primary_key(indexes: IndexMap, column_metadata: ColumnMetadata) -> Optional[Tuple[str, ...]]:
         candidates: List[Dict[str, Any]] = []
         for index_name, info in indexes.items():
             columns: Sequence[str] = info.get("columns", [])
