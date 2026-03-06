@@ -1,16 +1,15 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Debug terminusdb",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "terminusdb",
-            "justMyCode": false,
-            "console": "integratedTerminal",
-            "env": {
-                "POETRY_ACTIVE": "1"
-            }
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "tdb-run --schema gl --log DEBUG (Poetry venv)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "terminusdb.cli.tdb_run",
+      "args": ["--schema", "gl", "--log", "DEBUG"],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "subProcess": true
+    }
+  ]
 }

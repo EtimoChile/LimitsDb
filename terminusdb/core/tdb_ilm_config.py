@@ -89,7 +89,7 @@ def _ensure_list_of_mappings(obj: Any, where: str) -> List[Dict[str, Any]]:
     return out
 
 def load_rows_from_yaml(yaml_path: str) -> List[Dict[str, Any]]:
-    global _loaded_tables
+    _loaded_tables: Set[Tuple[str, str]] = set()
     with open(yaml_path, "r", encoding="utf-8") as f:
         data_any: Any = yaml.safe_load(f)
     data: Dict[str, Any] = _ensure_mapping(data_any, yaml_path)

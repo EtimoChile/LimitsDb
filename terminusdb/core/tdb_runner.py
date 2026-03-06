@@ -81,13 +81,9 @@ def _compute_plan_layers(graph: Dict[Tuple[str, str], Set[Tuple[str, str]]]) -> 
             remaining.remove(key)
     return layers
 
-def _collect_privilege_targets(tables_config: Dict[Tuple[str, str], Dict[str, Any]], owner_key: str) -> List[Tuple[str, str]]:
-    tables: Set[Tuple[str, str]] = set()
-    for table_cnf in tables_config.values():
-        if table_cnf.get("skip"):
-            continue
-        cond = table_cnf["conds"][0]
-        tables.add((cond[owner_key], cond["table_name"]))
+def _collect_privilege_targets(tables_conf_rows: List[Dict[str, Any]], owner_key: str, engine: DatabaseEngine) -> List[Tuple[str, str]]:
+    tables: Set[Tuple[str, str]] = set([(engine.get_identifier_str(r[owner_key]), engine.get_identifier_str(r["table_name"]))
+                                        for r in tables_conf_rows])  # type: ignore
     return sorted(tables)
 
 def _plan_mode(config: Config) -> int:
@@ -193,6 +189,31 @@ def _initialize_worker_logger(log_level: str) -> None:
     # resets the logger configuration. Re-apply the desired level so worker logs reach stdout.
     configure_logger(level=log_level)
     reconfigure_logger(level=log_level)
+
+def _log_where_predicates(tables_config: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
+    any_predicates = False
+    for table_info in tables_config.values():
+        query_expr = table_info.get("query_expr")
+        if not query_expr:
+            continue
+        if not any_predicates:
+            logger.info("WHERE predicates evaluated for ILM:")
+            any_predicates = True
+        logger.info("\n%s", query_expr)
+    if not any_predicates:
+        logger.info("There are no WHERE predicates calculated for ILM tables.")
+
+def _append_unique_name(other_columns: List[Dict[str, Any]], other_column: Dict[str, Any]) -> None:
+    """ Appends a column to the other_columns list if its name is not already present."""
+    if other_column["name"] not in {col["name"] for col in other_columns}:
+        other_columns.append(other_column)
+
+def _get_conf_rows(config: Config, engine: DatabaseEngine, connection: Any) -> List[Dict[str, Any]]:
+    if config.ilm_config_file:
+        tdb_conf_rows = load_rows_from_yaml(config.ilm_config_file)
+    else:
+        tdb_conf_rows = engine.load_config(connection)
+    return tdb_conf_rows
 
 def process_table(config: Config, owner: str, table_name: str, plsql_code: str,
                   process_date: str) -> Tuple[str, str, str, int, int, Optional[int], Optional[str]]:
@@ -346,10 +367,8 @@ def tdb_exec_ilm(
 def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, process_date: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
     logger.info("Processing table configuration...")
     tdb_ctl_status_rows: List[Dict[str, Any]] = []
-    if config.ilm_config_file:
-        tdb_conf_rows = load_rows_from_yaml(config.ilm_config_file)
-    else:
-        tdb_conf_rows = engine.load_config(connection)
+    tdb_conf_rows = _get_conf_rows(config, engine, connection)
+    if not config.ilm_config_file:
         tdb_ctl_status_rows = engine.get_status(connection, process_date)
     tables_config: Dict[Tuple[str, str], Dict[str, Any]] = {}
     # Populate tables_config with the raw rows and derive referencing tables from cnf_referencing_tables.
@@ -513,22 +532,23 @@ def tdb_run(config: Config) -> None:
             rc = _validate_environment(config, engine)
             raise SystemExit(rc)
         connection = engine.get_connection(config)
-        process_date = engine.get_system_date(connection).strftime('%Y%m%d')
-        tables_config = process_tables_cnf(connection, config, engine, process_date)
         table_privileges = ("SELECT", "INSERT", "UPDATE", "DELETE")
-        source_tables_for_privileges = _collect_privilege_targets(tables_config, "source_owner")
+        tables_conf_rows = _get_conf_rows(config, engine, connection)
+        source_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
         if source_tables_for_privileges and _credentials_present(config, admin=True, env="SOURCE"):
             source_admin_priv_conn = engine.get_connection(config, admin=True, env="SOURCE")
             try:
                 engine.ensure_table_privileges(source_admin_priv_conn, config.source_role_name, source_tables_for_privileges, table_privileges)
             finally:
                 engine.close_connection(source_admin_priv_conn)
+        process_date = engine.get_system_date(connection).strftime('%Y%m%d')
+        tables_config = process_tables_cnf(connection, config, engine, process_date)
         if config.generate_script:
             rc = generate_script_output(config, tables_config)
         else:
             admin_connection = engine.get_connection(config, admin=True)
             _ensure_history_tables(config, engine, admin_connection, tables_config)
-            history_tables_for_privileges = _collect_privilege_targets(tables_config, "history_owner")
+            history_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
             if history_tables_for_privileges and _credentials_present(config, admin=True, env="HISTORY"):
                 history_admin_priv_conn = engine.get_connection(config, admin=True, env="HISTORY")
                 try:
@@ -542,21 +562,3 @@ def tdb_run(config: Config) -> None:
             engine.close_connection(connection)
         if engine and admin_connection:
             engine.close_connection(admin_connection)
-
-def _log_where_predicates(tables_config: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
-    any_predicates = False
-    for table_info in tables_config.values():
-        query_expr = table_info.get("query_expr")
-        if not query_expr:
-            continue
-        if not any_predicates:
-            logger.info("WHERE predicates evaluated for ILM:")
-            any_predicates = True
-        logger.info("\n%s", query_expr)
-    if not any_predicates:
-        logger.info("There are no WHERE predicates calculated for ILM tables.")
-
-def _append_unique_name(other_columns: List[Dict[str, Any]], other_column: Dict[str, Any]) -> None:
-    """ Appends a column to the other_columns list if its name is not already present."""
-    if other_column["name"] not in {col["name"] for col in other_columns}:
-        other_columns.append(other_column)

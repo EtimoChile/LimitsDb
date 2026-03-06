@@ -60,20 +60,24 @@ def test_append_unique_and_get_next_ready():
 
 # yapf: disable
 def test_collect_privilege_targets():
-  tables_config = {
-      ("A", "T1"): {
-          "skip": False,
-          "conds": [{
-              "source_owner": "A",
-              "history_owner": "H",
-              "table_name": "T1"}]},
-      ("A", "T2"): {
-          "skip": True,
-          "conds": [{
-              "source_owner": "A",
-              "history_owner": "H",
-              "table_name": "T2"}]},
-  }
+  class DummyEngine:
+
+    def get_identifier_str(self, value):
+      return str(value).upper()
+
+  rows = [{
+      "source_owner": "a",
+      "history_owner": "h",
+      "table_name": "t1"
+  }, {
+      "source_owner": "A",
+      "history_owner": "H",
+      "table_name": "T1"
+  }, {
+      "source_owner": "A",
+      "history_owner": "H",
+      "table_name": "T2"
+  }, ]
   # yapf: enable
-  targets = tdb_runner._collect_privilege_targets(tables_config, "source_owner")
-  assert targets == [("A", "T1")]
+  targets = tdb_runner._collect_privilege_targets(rows, "source_owner", DummyEngine())
+  assert targets == [("A", "T1"), ("A", "T2")]
