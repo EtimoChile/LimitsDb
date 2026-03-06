@@ -1,16 +1,29 @@
 [project]
 name = "terminusdb"
 version = "0.5.0"
-description = "Do configuration-based ILM to a production and history DB"
-authors = [{ name = "Gustavo Cantizano", email = "gustavo.cantizano@etimo.cl" }]
+description = "Configuration-driven ILM (Information Lifecycle Management) for production and history databases"
 readme = "README.md"
-license = { text = "Proprietary" }
 requires-python = ">=3.12,<4.0"
+license = { file = "LICENSE" }
 
-# Include template/resource files in both wheel and sdist distributions
-dynamic = []
-# You can include all non-Python files you want distributed:
-include = ["terminusdb/resources/*"]
+authors = [
+  { name = "Gustavo Cantizano", email = "gustavo.cantizano@etimo.cl" }
+]
+
+maintainers = [
+  { name = "Inversiones Etimo SpA", email = "contacto@etimo.cl" }
+]
+
+keywords = ["database", "oracle", "ilm", "data lifecycle", "archiving"]
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Topic :: Database",
+  "Topic :: System :: Systems Administration",
+]
 
 dependencies = [
   "oracledb>=2.5.1,<3.0.0",
@@ -19,15 +32,14 @@ dependencies = [
   "platformdirs>=4.5.0,<5.0.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-  "pre-commit>=3.8.0,<4.0.0",
-  "flake8>=7.1.1",
-  "mypy>=1.14.1",
-  "yapf>=0.40.2",
-  "pytest>=8.3.0",
-  "coverage>=7.6.0",
-]
+[project.urls]
+Homepage = "https://github.com/etimochile/terminusdb"
+Repository = "https://github.com/etimochile/terminusdb"
+Issues = "https://github.com/etimochile/terminusdb/issues"
+
+[tool.poetry]
+# You can include all non-Python files you want distributed:
+include = ["terminusdb/resources/*"]
 
 [tool.poetry.group.dev.dependencies]
 pre-commit = "^3.8.0"

@@ -1,13 +1,12 @@
 TerminusDB
-Copyright © 2025 Inversiones Etimo SpA
+Copyright © 2025 Inversiones Etimo SpA and contributors
 
-This software is released under the Apache License 2.0 and may be used,
-modified, and redistributed freely — including for commercial purposes —
-under the terms of that license.
+This product includes software developed by Inversiones Etimo SpA.
 
-Inversiones Etimo SpA retains the exclusive right to produce, brand, and
-distribute proprietary or commercial editions of TerminusDB that may
-include additional features, services, or licensing terms.
+Licensed under the Apache License, Version 2.0.
+You may obtain a copy of the License at:
+
+http://www.apache.org/licenses/LICENSE-2.0
 
 Contact: contacto@etimo.cl
 Website: https://www.etimo.cl

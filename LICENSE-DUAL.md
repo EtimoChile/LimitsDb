@@ -2,7 +2,12 @@
 
 **Copyright © 2025 Inversiones Etimo SpA**
 
-TerminusDB is distributed under a **dual-licensing model** that balances open innovation with commercial flexibility.
+TerminusDB is distributed under an open-source license (Apache 2.0) with
+an optional commercial license offered by Inversiones Etimo SpA.
+
+The community edition is licensed under Apache License 2.0.
+Commercial licensing is available for organizations requiring enterprise
+features, support, or contractual guarantees.
 
 ---
 
@@ -15,15 +20,19 @@ This allows free use, modification, and redistribution under open-source conditi
 
 ## 💼 2. Commercial License
 
-For organizations that wish to:
+Organizations that require:
 
-- Integrate TerminusDB into **closed-source** or proprietary systems,
-- Receive **technical support or commercial warranties**,
-- Avoid open-source obligations under Apache 2.0,
+- Commercial support or service-level agreements (SLAs)
+- Contractual warranties or liability coverage
+- Certified enterprise distributions
+- Access to enterprise-only features or extensions
+- Redistribution of TerminusDB as part of a commercial product
 
-Inversiones Etimo SpA offers a **commercial license**.
+may obtain a commercial license from Inversiones Etimo SpA.
 
-The commercial license allows proprietary integration, priority support, and access to advanced modules or private builds.
+The commercial license provides priority support and may include access to
+advanced modules, enterprise distributions, or private builds not available
+in the community edition.
 
 📧 **Contact:** contacto@etimo.cl  
 🌐 **Website:** [https://www.etimo.cl](https://www.etimo.cl)
@@ -32,16 +41,19 @@ The commercial license allows proprietary integration, priority support, and acc
 
 ## ⚖️ 3. License Summary
 
-| Type       | Rights                                            | Obligations                                        |
-| ---------- | ------------------------------------------------- | -------------------------------------------------- |
-| Apache 2.0 | Free use, modification, distribution              | Attribution required                               |
-| Commercial | Closed-source use, redistribution rights, support | Requires signed license with Inversiones Etimo SpA |
+| Type       | Rights                                                                                     | Obligations                                                |
+| ---------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| Apache 2.0 | Free use, modification, and redistribution, including in proprietary software              | Preservation of copyright, license, and NOTICE             |
+| Commercial | Commercial support, enterprise distributions, advanced modules, and contractual warranties | Requires a commercial agreement with Inversiones Etimo SpA |
 
 ---
 
 ## 🔒 4. Copyright and Ownership
 
-All rights to TerminusDB are owned by **Inversiones Etimo SpA**.  
-Open-source distribution under Apache 2.0 does **not** imply transfer of ownership.
+Copyright © 2025 Inversiones Etimo SpA and contributors.
+
+TerminusDB is distributed under the Apache License 2.0 for the community
+edition. The copyright holder retains ownership of the original work.
+Open-source licensing does not transfer ownership of the software.
 
 ---
