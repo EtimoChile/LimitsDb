@@ -1,5 +1,5 @@
 [project]
-name = "terminusdb"
+name = "limitsdb"
 version = "0.5.0"
 description = "Configuration-driven ILM (Information Lifecycle Management) for production and history databases"
 readme = "README.md"
@@ -33,13 +33,15 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/etimochile/terminusdb"
-Repository = "https://github.com/etimochile/terminusdb"
-Issues = "https://github.com/etimochile/terminusdb/issues"
+Homepage = "https://github.com/etimochile/limitsdb"
+Repository = "https://github.com/etimochile/limitsdb"
+Issues = "https://github.com/etimochile/limitsdb/issues"
 
 [tool.poetry]
 # You can include all non-Python files you want distributed:
-include = ["terminusdb/resources/*"]
+include = [
+  { path = "limitsdb/resources/*.yml", format = ["sdist", "wheel"] },
+]
 
 [tool.poetry.group.dev.dependencies]
 pre-commit = "^3.8.0"
@@ -48,12 +50,13 @@ mypy = "^1.14.1"
 yapf = "^0.40.2"
 pytest = "^8.3.0"
 coverage = "^7.6.0"
+twine = "^6.2.0"
 
 [project.scripts]
-tdb-run = "terminusdb.cli.tdb_run:run_cli"
-tdb-init = "terminusdb.cli.tdb_init:run_cli"
-tdb-crypt = "terminusdb.cli.tdb_crypt:run_cli"
-tdb-impl = "terminusdb.cli.tdb_impl:run_cli"
+ldb-run = "limitsdb.cli.ldb_run:run_cli"
+ldb-init = "limitsdb.cli.ldb_init:run_cli"
+ldb-crypt = "limitsdb.cli.ldb_crypt:run_cli"
+ldb-impl = "limitsdb.cli.ldb_impl:run_cli"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
@@ -80,7 +83,7 @@ align_closing_bracket_with_visual_indent = false
 
 [tool.mypy]
 strict = true
-packages = ["terminusdb"]
+packages = ["limitsdb"]
 exclude = "^tests/"
 
 # para las libs externas sin stubs:

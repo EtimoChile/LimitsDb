@@ -2,10 +2,10 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "tdb-run --schema gl --log DEBUG (Poetry venv)",
+      "name": "ldb-run --schema gl --log DEBUG (Poetry venv)",
       "type": "debugpy",
       "request": "launch",
-      "module": "terminusdb.cli.tdb_run",
+      "module": "limitsdb.cli.ldb_run",
       "args": ["--schema", "gl", "--log", "DEBUG"],
       "console": "integratedTerminal",
       "justMyCode": true,

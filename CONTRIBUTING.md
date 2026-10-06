@@ -1,6 +1,6 @@
-# Contributing to TerminusDB
+# Contributing to LimitsDb
 
-Thank you for your interest in contributing to **TerminusDB**.
+Thank you for your interest in contributing to **LimitsDb**.
 
 This project is maintained by **Inversiones Etimo SpA** and welcomes
 community contributions that improve stability, usability, and functionality.
@@ -27,7 +27,7 @@ proposal with the maintainers.
 
 If you discover a bug or unexpected behavior, please open an issue and include:
 
-- TerminusDB version
+- LimitsDb version
 - Python version
 - Database engine and version
 - Steps to reproduce the issue
@@ -58,7 +58,7 @@ Small, focused pull requests are preferred.
 Clone the repository and install development dependencies:
 
 ```bash
-git clone https://github.com/<repo>/terminusdb.git
-cd terminusdb
+git clone https://github.com/<repo>/limitsdb.git
+cd limitsdb
 pip install -e .[dev]
 ```

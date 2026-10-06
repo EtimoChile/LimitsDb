@@ -1,8 +1,8 @@
-# TerminusDB Dual Licensing Model
+# LimitsDb Dual Licensing Model
 
 **Copyright © 2025 Inversiones Etimo SpA**
 
-TerminusDB is distributed under an open-source license (Apache 2.0) with
+LimitsDb is distributed under an open-source license (Apache 2.0) with
 an optional commercial license offered by Inversiones Etimo SpA.
 
 The community edition is licensed under Apache License 2.0.
@@ -13,7 +13,7 @@ features, support, or contractual guarantees.
 
 ## 🧾 1. Open Source License
 
-The default license for TerminusDB is the [Apache License 2.0](LICENSE).  
+The default license for LimitsDb is the [Apache License 2.0](LICENSE).
 This allows free use, modification, and redistribution under open-source conditions.
 
 ---
@@ -26,7 +26,7 @@ Organizations that require:
 - Contractual warranties or liability coverage
 - Certified enterprise distributions
 - Access to enterprise-only features or extensions
-- Redistribution of TerminusDB as part of a commercial product
+- Redistribution of LimitsDb as part of a commercial product
 
 may obtain a commercial license from Inversiones Etimo SpA.
 
@@ -52,7 +52,7 @@ in the community edition.
 
 Copyright © 2025 Inversiones Etimo SpA and contributors.
 
-TerminusDB is distributed under the Apache License 2.0 for the community
+LimitsDb is distributed under the Apache License 2.0 for the community
 edition. The copyright holder retains ownership of the original work.
 Open-source licensing does not transfer ownership of the software.
 

@@ -1,7 +1,7 @@
 import pytest
 
-from terminusdb.db.oracle.tdb_engine_impl import OracleEngine
-from terminusdb.db.tdb_engines import ColumnDefinition, IndexDefinition, TableDefinition
+from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
+from limitsdb.db.ldb_engines import ColumnDefinition, IndexDefinition, TableDefinition
 
 def test_get_date_condition_renders_expected_predicate():
   assert (OracleEngine.get_date_condition("TRUNC(process_date)", 6) == "(TRUNC(process_date) < add_months(l_process_date,-6))")
@@ -16,8 +16,8 @@ def test_identifier_formatting_and_quoting():
   assert OracleEngine._quote("Needs\"Quote") == '"Needs""Quote"'
   assert OracleEngine._quote_literal("Mc'Dowell") == "'Mc''Dowell'"
 
-def test_tdb_columns_expressions_return_expected_defaults():
-  assert OracleEngine.get_tdb_columns_expressions() == ("l_process_date", "sysdate")
+def test_ldb_columns_expressions_return_expected_defaults():
+  assert OracleEngine.get_ldb_columns_expressions() == ("l_process_date", "sysdate")
 
 def test_register_and_fetch_connection_env_round_trip():
   class DummyConnection:
@@ -96,17 +96,17 @@ def test_column_needs_update(existing: ColumnDefinition, desired: ColumnDefiniti
 def test_determine_process_date_column_returns_preferred_name():
   table = TableDefinition(
       owner="TEST", name="TABLE", columns=(
-          ColumnDefinition(name="ID", data_type="number"), ColumnDefinition(name="TDB_PROCESS_DATE", data_type="date"),
+          ColumnDefinition(name="ID", data_type="number"), ColumnDefinition(name="LDB_PROCESS_DATE", data_type="date"),
           ColumnDefinition(name="OTHER", data_type="varchar2"),
       ),
   )
 
-  assert OracleEngine._determine_process_date_column(table) == "TDB_PROCESS_DATE"
+  assert OracleEngine._determine_process_date_column(table) == "LDB_PROCESS_DATE"
 
 def test_prepare_desired_indexes_appends_process_date_when_missing():
   table = TableDefinition(
       owner="TEST", name="TABLE", columns=(
-          ColumnDefinition(name="ID", data_type="number"), ColumnDefinition(name="TDB_PROCESS_DATE", data_type="date"),
+          ColumnDefinition(name="ID", data_type="number"), ColumnDefinition(name="LDB_PROCESS_DATE", data_type="date"),
           ColumnDefinition(name="OTHER", data_type="varchar2"),
       ), primary_key=("ID", ),
       indexes=(IndexDefinition(name="IDX_PK", columns=("ID", )), IndexDefinition(name="IDX_OTHER", columns=("OTHER", ), unique=True),
@@ -115,7 +115,7 @@ def test_prepare_desired_indexes_appends_process_date_when_missing():
 
   desired_indexes = OracleEngine._prepare_desired_indexes(table)
 
-  assert desired_indexes == {"IDX_PK": (("ID", ), False), "IDX_OTHER": (("OTHER", "TDB_PROCESS_DATE"), True), }
+  assert desired_indexes == {"IDX_PK": (("ID", ), False), "IDX_OTHER": (("OTHER", "LDB_PROCESS_DATE"), True), }
 
 def test_choose_best_index_prioritizes_not_null_unique_and_distinct_keys():
   column_metadata = {
