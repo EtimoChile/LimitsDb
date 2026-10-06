@@ -33,9 +33,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   un entorno identificado.
 - La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-06 es
   de 68 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
-  sin hallazgos sobre los 23 módulos del paquete. Las dos pruebas iniciales de
-  integración Oracle se ejecutaron exitosamente sobre la base efímera de CI;
-  la suite ampliada recolecta cuatro casos y espera validación remota.
+  sin hallazgos sobre los 23 módulos del paquete. Las cuatro pruebas de
+  integración Oracle se ejecutaron exitosamente sobre la base efímera de CI,
+  incluidas recuperación tras DDL parcial y operaciones privilegiadas
+  idempotentes.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
@@ -57,7 +58,7 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   locales al job. Su primera ejecución real en GitHub terminó correctamente:
   descarga de imagen en 49 segundos, disponibilidad de Oracle unos 28 segundos
   después del arranque, 2.393 GiB de memoria y 5.4 GiB de disco libre al ejecutar
-  las pruebas.
+  las pruebas. La suite ampliada tardó 4.16 segundos y mantuvo 5.4 GiB libres.
 - Inversiones Etimo SpA mantiene el proyecto. Los términos aplicables se
   distribuyen en los archivos de licencia, notices y edición comercial de la
   raíz.
