@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -169,7 +169,7 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def generate_sql_block(config: Config, table_cnf: dict[str, Any], process_date: str) -> str:
+    def generate_sql_block(config: Config, table_cnf: Mapping[str, Any], process_date: str) -> str:
         """Generates a SQL/PL block to process a given table.
         Args:
             config: Configuration object.
@@ -260,7 +260,9 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_primary_key_columns(conn: Any, owner: str, table_name: str, table_cnf: dict[str, Any]) -> tuple[str, ...]:
+    def get_primary_key_columns(
+        conn: Any, owner: str, table_name: str, table_cnf: Mapping[str, Any]
+    ) -> tuple[str, ...]:
         """Returns the primary key columns for the specified table."""
         pass
 
@@ -284,7 +286,7 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def ensure_table_structure(conn: Any, table: TableDefinition, table_cnf: dict[str, Any]) -> None:
+    def ensure_table_structure(conn: Any, table: TableDefinition, table_cnf: Mapping[str, Any]) -> None:
         """Ensure that the provided table matches the expected structure."""
         pass
 

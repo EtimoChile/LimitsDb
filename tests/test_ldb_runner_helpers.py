@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from limitsdb.core import ldb_runner
+from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
 
 
@@ -89,8 +90,13 @@ def test_process_table_returns_recoverable_error_for_generic_failure(monkeypatch
             calls["closed"] = True
 
     monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: DummyEngine())
-    config = SimpleNamespace(
-        db_engine="oracle", action="SOURCE_ILM", source_username="user", source_password="pw", source_dsn="dsn"
+    config = Config(
+        schema="s",
+        db_engine="oracle",
+        action="SOURCE_ILM",
+        source_username="user",
+        source_password="pw",
+        source_dsn="dsn",
     )
 
     result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")

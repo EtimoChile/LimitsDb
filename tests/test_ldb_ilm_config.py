@@ -24,6 +24,9 @@ def test_normalize_and_duplicate_detection(tmp_path):
     assert rows[0]["id"] == 0
     assert rows[0]["retain_months_history"] == 2
     assert rows[1]["is_active"] == "Y"
+    normalized_keys = set(ldb_ilm_config.IlmRule.__annotations__) - {"cond_expr"}
+    assert normalized_keys <= rows[0].keys()
+    assert "cond_expr" not in rows[0]
 
     dup_content = {"tables": [{"source_owner": "SRC", "table_name": "T1"}, {"source_owner": "SRC", "table_name": "T1"}]}
     path.write_text(yaml.safe_dump(dup_content), encoding="utf-8")

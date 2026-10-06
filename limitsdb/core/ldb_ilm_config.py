@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import ItemsView, Mapping
-from typing import Any
+from typing import Any, NotRequired, TypedDict, cast
 
 import yaml
 
@@ -37,6 +37,33 @@ _VALID_TABLE_KEYS: set[str] = {
 _VALID_COND_KEYS: set[str] = _VALID_TABLE_KEYS | {"is_active"}
 
 
+class IlmRule(TypedDict):
+    """Normalized engine-neutral ILM rule consumed by the runner."""
+
+    id: int
+    source_owner: str
+    history_owner: str
+    table_name: str
+    retain_months_source: int | None
+    retain_months_history: int | None
+    exec_day: int | None
+    frecuency: str | None
+    is_active: str
+    purge_date_expr: str | None
+    additional_filter_expr: str | None
+    history_addtl_filter_expr: str | None
+    history_hint_expr: str | None
+    source_orphan_purge: str
+    orphan_check_column: str | None
+    has_lob_columns: str
+    referencing_tables: str | None
+    join_expr: str | None
+    hint_expr: str | None
+    long_columns: str | None
+    ctl_status: str | None
+    cond_expr: NotRequired[str]
+
+
 def _assert_valid_keys(keys: set[str], *, where: str, allowed: set[str]) -> None:
     """Raise if any key in `keys` is not present in `allowed`."""
     invalid = sorted(k for k in keys if k not in allowed)
@@ -50,7 +77,7 @@ def _normalize_bool(val: Any) -> Any:
     return "Y" if val else "N" if val is not None else None
 
 
-def normalize_table_row(table: dict[str, Any], cond: dict[str, Any]) -> dict[str, Any]:
+def normalize_table_row(table: dict[str, Any], cond: dict[str, Any]) -> IlmRule:
     global _id_counter
     row: dict[str, Any] = {}
     # Merge the table definition with the condition (excluding nested "conds").
@@ -85,7 +112,7 @@ def normalize_table_row(table: dict[str, Any], cond: dict[str, Any]) -> dict[str
             row[key] = None
     row["id"] = _id_counter
     _id_counter += 1
-    return row
+    return cast(IlmRule, row)
 
 
 def _ensure_mapping(obj: Any, where: str) -> dict[str, Any]:
@@ -127,13 +154,13 @@ def _ensure_list_of_mappings(obj: Any, where: str) -> list[dict[str, Any]]:
     return out
 
 
-def load_rows_from_yaml(yaml_path: str) -> list[dict[str, Any]]:
+def load_rows_from_yaml(yaml_path: str) -> list[IlmRule]:
     _loaded_tables: set[tuple[str, str]] = set()
     with open(yaml_path, encoding="utf-8") as f:
         data_any: Any = yaml.safe_load(f)
     data: dict[str, Any] = _ensure_mapping(data_any, yaml_path)
     _assert_valid_keys(set(data.keys()), where=f"{yaml_path} (root)", allowed=_VALID_ROOT_KEYS)
-    rows: list[dict[str, Any]] = []
+    rows: list[IlmRule] = []
     tables: list[dict[str, Any]] = _ensure_list_of_mappings(data.get("tables"), "tables")
     for idx, table in enumerate(tables):
         table_keys = set(table.keys()) - {"conds"}
@@ -161,12 +188,10 @@ def load_rows_from_yaml(yaml_path: str) -> list[dict[str, Any]]:
     return rows
 
 
-def resolve_and_load_ilm_rows(
-    *, schema: str, profile: str | None, config_dir: str | None = None
-) -> list[dict[str, Any]]:
+def resolve_and_load_ilm_rows(*, schema: str, profile: str | None, config_dir: str | None = None) -> list[IlmRule]:
     """Load merged ILM for schema/profile and return normalized rows."""
     ilm_dict: dict[str, Any] = load_ilm_config(schema=schema, profile=profile, explicit_config_dir=config_dir)
-    rows: list[dict[str, Any]] = []
+    rows: list[IlmRule] = []
     global _loaded_tables, _id_counter
     _loaded_tables = set()
     _id_counter = 0

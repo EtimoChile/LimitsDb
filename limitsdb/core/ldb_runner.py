@@ -1,8 +1,8 @@
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from operator import attrgetter
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
-from limitsdb.core.ldb_ilm_config import load_rows_from_yaml, resolve_and_load_ilm_rows
+from limitsdb.core.ldb_ilm_config import IlmRule, load_rows_from_yaml, resolve_and_load_ilm_rows
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
@@ -17,6 +17,24 @@ class _OtherColumn(TypedDict):
     name: str
     expr: str
     metadata: ColumnDefinition
+
+
+class ProcessedTableConfig(TypedDict, total=False):
+    """Mutable derived state for one table during planning and execution."""
+
+    conds: list[IlmRule]
+    referencing_tables: list[tuple[str, str]]
+    table_columns: list[str]
+    columns_metadata: dict[str, ColumnDefinition]
+    other_columns: list[_OtherColumn]
+    months_keep_history_max: int | None
+    skip: bool
+    query_expr: str
+    sql_block: str
+    metadata: Any
+
+
+TablesConfig = dict[tuple[str, str], ProcessedTableConfig]
 
 
 WorkerResult = tuple[str, str, str, int, int, int | None, str | None]
@@ -63,13 +81,13 @@ def _open_connection(
         return None
 
 
-def _load_offline_rows(config: Config) -> list[dict[str, Any]]:
-    if config.ilm_config_file:
-        return load_rows_from_yaml(config.ilm_config_file)
-    return resolve_and_load_ilm_rows(schema=config.schema, profile=config.profile)
+def _load_offline_rows(config: Config) -> list[IlmRule]:
+    if config.context.ilm_config_file:
+        return load_rows_from_yaml(config.context.ilm_config_file)
+    return resolve_and_load_ilm_rows(schema=config.context.schema, profile=config.context.profile)
 
 
-def _build_dependency_graph(rows: list[dict[str, Any]]) -> dict[tuple[str, str], set[tuple[str, str]]]:
+def _build_dependency_graph(rows: list[IlmRule]) -> dict[tuple[str, str], set[tuple[str, str]]]:
     graph: dict[tuple[str, str], set[tuple[str, str]]] = {}
     for row in rows:
         key = (row["source_owner"], row["table_name"])
@@ -111,7 +129,7 @@ def _compute_plan_layers(graph: dict[tuple[str, str], set[tuple[str, str]]]) -> 
 
 
 def _collect_privilege_targets(
-    tables_conf_rows: list[dict[str, Any]], owner_key: str, engine: DatabaseEngine
+    tables_conf_rows: list[IlmRule], owner_key: Literal["source_owner", "history_owner"], engine: DatabaseEngine
 ) -> list[tuple[str, str]]:
     tables: set[tuple[str, str]] = set(
         [
@@ -125,7 +143,7 @@ def _collect_privilege_targets(
 def _plan_mode(config: Config) -> int:
     rows = _load_offline_rows(config)
     if not rows:
-        logger.info("No active ILM tables found for schema %s.", config.schema)
+        logger.info("No active ILM tables found for schema %s.", config.context.schema)
         return 0
     graph = _build_dependency_graph(rows)
     layers = _compute_plan_layers(graph)
@@ -144,10 +162,10 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
     primary_conn: Any | None = None
     required_specs: list[tuple[str, bool, Literal["SOURCE", "HISTORY"] | None]] = []
     optional_specs: list[tuple[str, bool, Literal["SOURCE", "HISTORY"] | None]] = []
-    primary_env = "SOURCE" if config.action == "SOURCE_ILM" else "HISTORY"
+    primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
     required_specs.append((f"{primary_env} runtime", False, None))
     required_specs.append((f"{primary_env} admin", True, None))
-    if config.action == "SOURCE_ILM":
+    if config.execution.action == "SOURCE_ILM":
         required_specs.append(("HISTORY admin", True, "HISTORY"))
         optional_specs.append(("HISTORY runtime", False, "HISTORY"))
     else:
@@ -203,7 +221,7 @@ def _build_history_table_definition(
     config: Config,
     engine: DatabaseEngine,
     source_connection: Any,
-    table_cnf: dict[str, Any],
+    table_cnf: ProcessedTableConfig,
 ) -> TableDefinition:
     cnd0 = table_cnf["conds"][0]
     source_owner, history_owner, table_name = cnd0["source_owner"], cnd0["history_owner"], cnd0["table_name"]
@@ -213,7 +231,7 @@ def _build_history_table_definition(
     for other_column in table_cnf.get("other_columns", []):
         required_columns.append(other_column["metadata"])
     pk_columns = list(engine.get_primary_key_columns(source_connection, source_owner, table_name, table_cnf))
-    if config.add_ldb_columns:
+    if config.execution.add_ldb_columns:
         if "LDB_PROCESS_DATE" not in pk_columns:
             pk_columns.append("LDB_PROCESS_DATE")
     primary_key: tuple[str, ...] | None = tuple(pk_columns) if pk_columns else None
@@ -229,7 +247,7 @@ def _ensure_history_tables(
     config: Config,
     engine: DatabaseEngine,
     source_admin_connection: Any,
-    tables_config: dict[tuple[str, str], dict[str, Any]],
+    tables_config: TablesConfig,
 ) -> None:
     history_admin_connection: Any | None = None
     try:
@@ -252,7 +270,7 @@ def _initialize_worker_logger(log_level: str) -> None:
     reconfigure_logger(level=log_level)
 
 
-def _log_where_predicates(tables_config: dict[tuple[str, str], dict[str, Any]]) -> None:
+def _log_where_predicates(tables_config: TablesConfig) -> None:
     any_predicates = False
     for table_info in tables_config.values():
         query_expr = table_info.get("query_expr")
@@ -272,11 +290,11 @@ def _append_unique_name(other_columns: list[_OtherColumn], other_column: _OtherC
         other_columns.append(other_column)
 
 
-def _get_conf_rows(config: Config, engine: DatabaseEngine, connection: Any) -> list[dict[str, Any]]:
-    if config.ilm_config_file:
-        ldb_conf_rows = load_rows_from_yaml(config.ilm_config_file)
+def _get_conf_rows(config: Config, engine: DatabaseEngine, connection: Any) -> list[IlmRule]:
+    if config.context.ilm_config_file:
+        ldb_conf_rows = load_rows_from_yaml(config.context.ilm_config_file)
     else:
-        ldb_conf_rows = engine.load_config(connection)
+        ldb_conf_rows = cast(list[IlmRule], engine.load_config(connection))
     return ldb_conf_rows
 
 
@@ -287,7 +305,7 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
     conn: Any = None
     process_start: Any = None
     try:
-        engine = get_db_engine(config.db_engine)
+        engine = get_db_engine(config.connections.db_engine)
         conn = engine.get_connection(config)
         user, _, dsn = get_effective_credentials(config, admin=False)
         logger.info(f"Connected to {dsn} as {user}")
@@ -315,13 +333,13 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
             engine.close_connection(conn)
 
 
-def generate_script_output(config: Config, tables_config: dict[tuple[str, str], dict[str, Any]]) -> int:
+def generate_script_output(config: Config, tables_config: TablesConfig) -> int:
     print(
         f"""
 whenever oserror exit 1
 whenever sqlerror exit 1
 set echo on ver off trimspool on
-spool ldb_{config.schema}.log
+spool ldb_{config.context.schema}.log
 COLUMN process_date NEW_VALUE process_date
 SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
     """
@@ -356,8 +374,8 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
 
 
 def get_next_ready_table(
-    tables_config: dict[tuple[str, str], dict[str, Any]], active_tables: set[tuple[str, str]]
-) -> tuple[str, str, dict[str, Any]] | None:
+    tables_config: TablesConfig, active_tables: set[tuple[str, str]]
+) -> tuple[str, str, ProcessedTableConfig] | None:
     for (owner, table_name), table_cnf in tables_config.items():
         if table_cnf["skip"]:
             continue
@@ -381,7 +399,7 @@ def get_next_ready_table(
 
 def ldb_exec_ilm(
     config: Config,
-    tables_config: dict[tuple[str, str], dict[str, Any]],
+    tables_config: TablesConfig,
     process_date: str,
     engine: DatabaseEngine,
     connection: Any,
@@ -390,14 +408,14 @@ def ldb_exec_ilm(
     process_targets: dict[Future[WorkerResult], tuple[str, str]] = {}
     active_tables: set[tuple[str, str]] = set()
     with ProcessPoolExecutor(
-        max_workers=config.parallel_max,
+        max_workers=config.execution.parallel_max,
         initializer=_initialize_worker_logger,
-        initargs=(config.log_level,),
+        initargs=(config.execution.log_level,),
     ) as executor:
         process_launched = False
         while True:
             # While there is space in the pool, try to launch new processes
-            while len(processes) < config.parallel_max:
+            while len(processes) < config.execution.parallel_max:
                 cycle_launched = False
                 # Search for a process to launch
                 next_ready_table = get_next_ready_table(tables_config, active_tables)
@@ -460,17 +478,15 @@ def ldb_exec_ilm(
         return 1
 
 
-def process_tables_cnf(
-    connection: Any, config: Config, engine: DatabaseEngine, process_date: str
-) -> dict[tuple[str, str], dict[str, Any]]:
+def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, process_date: str) -> TablesConfig:
     logger.info("Processing table configuration...")
     ldb_ctl_status_rows: list[dict[str, Any]] = []
     ldb_conf_rows = _get_conf_rows(config, engine, connection)
-    if not config.ilm_config_file:
+    if not config.context.ilm_config_file:
         ldb_ctl_status_rows = engine.get_status(connection, process_date)
-    tables_config: dict[tuple[str, str], dict[str, Any]] = {}
+    tables_config: TablesConfig = {}
     # Populate tables_config with the raw rows and derive referencing tables from cnf_referencing_tables.
-    is_source_mode = config.action == "SOURCE_ILM"
+    is_source_mode = config.execution.action == "SOURCE_ILM"
     ldb_process_date_expr, ldb_insert_date_expr = engine.get_ldb_columns_expressions()
     for ldb_cnf_row in ldb_conf_rows:
         ldb_cnf_row["source_owner"] = engine.get_identifier_str(ldb_cnf_row["source_owner"])
@@ -497,7 +513,7 @@ def process_tables_cnf(
                 if ref_key not in tables_config:
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in ldb_conf_rows")
                 tables_config[ref_key]["referencing_tables"].append(key)
-    if not config.generate_script:
+    if not config.execution.generate_script:
         # Inject ctl_status values loaded from the database when resuming a run.
         for ldb_ctl_status_row in ldb_ctl_status_rows:
             key = (ldb_ctl_status_row["ctl_source_owner"], ldb_ctl_status_row["ctl_table_name"])
@@ -509,7 +525,7 @@ def process_tables_cnf(
     # Persist the resulting predicate in cond_expr so later stages can reuse it.
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
-        inherited_references: str = cnd0["referencing_tables"]
+        inherited_references = cnd0["referencing_tables"]
         added_conds = [("A", cond) for cond in table_cnf["conds"]]
         table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(
             connection, cnd0["source_owner"], cnd0["table_name"]
@@ -549,16 +565,16 @@ def process_tables_cnf(
             if retain_months_history and not retain_months_source:
                 raise ValueError(f"retain_months_history is required when cnf_retain_months_source is set for {key}")
             alias_prefix = al + "."
-            mod_alexp_uac = alias_prefix if is_source_mode or not config.use_added_columns else "A."
+            mod_alexp_uac = alias_prefix if is_source_mode or not config.execution.use_added_columns else "A."
             if addtl_expr:
                 cond_list.append(addtl_expr.replace("@", mod_alexp_uac))
             if purge_date_expr:
-                if is_source_mode or not config.use_added_columns or al == "A":
+                if is_source_mode or not config.execution.use_added_columns or al == "A":
                     cond_list.append(
-                        engine.get_date_condition(purge_date_expr.replace("@", alias_prefix), retain_months)
+                        engine.get_date_condition(purge_date_expr.replace("@", alias_prefix), cast(int, retain_months))
                     )
                 else:
-                    cond_list.append(engine.get_date_condition(f"A.ldb_date_{al}", retain_months_history))
+                    cond_list.append(engine.get_date_condition(f"A.ldb_date_{al}", cast(int, retain_months_history)))
             cd["cond_expr"] = " and ".join(cond_list)
             cd["history_addtl_filter_expr"] = addtl_expr
         # get the maximum cnf_retain_months_history from all added_conds
@@ -569,12 +585,12 @@ def process_tables_cnf(
             continue
         table_cnf["skip"] = False
         # get where expression from cond_expr of all added_conds joined by " or "
-        if config.action == "SOURCE_ILM" and not any(cd["cond_expr"] for _, cd in added_conds):
+        if config.execution.action == "SOURCE_ILM" and not any(cd["cond_expr"] for _, cd in added_conds):
             raise ValueError(f"At least one condition must be specified for SOURCE_ILM on table {key}")
         where_expr = "\n   or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
         other_columns: list[_OtherColumn] = []
         table_cnf["other_columns"] = other_columns
-        if config.use_added_columns and is_source_mode:
+        if config.execution.use_added_columns and is_source_mode:
             for al, cd in added_conds:
                 columns_metadata = tables_config[(cd["source_owner"], cd["table_name"])]["columns_metadata"]
                 if al != "A":
@@ -598,7 +614,7 @@ def process_tables_cnf(
                             "metadata": column_metadata,
                         }
                         _append_unique_name(other_columns, other_column)
-        if config.add_ldb_columns and is_source_mode:
+        if config.execution.add_ldb_columns and is_source_mode:
             other_columns.append(
                 {
                     "name": "LDB_PROCESS_DATE",
@@ -643,11 +659,11 @@ def ldb_run(config: Config) -> None:
     admin_connection: Any = None
     engine: DatabaseEngine | None = None
     try:
-        engine = get_db_engine(config.db_engine)
-        if config.mode == "PLAN":
+        engine = get_db_engine(config.connections.db_engine)
+        if config.execution.mode == "PLAN":
             rc = _plan_mode(config)
             raise SystemExit(rc)
-        if config.mode == "VALIDATE":
+        if config.execution.mode == "VALIDATE":
             rc = _validate_environment(config, engine)
             raise SystemExit(rc)
         connection = engine.get_connection(config)
@@ -658,13 +674,16 @@ def ldb_run(config: Config) -> None:
             source_admin_priv_conn = engine.get_connection(config, admin=True, env="SOURCE")
             try:
                 engine.ensure_table_privileges(
-                    source_admin_priv_conn, config.source_role_name, source_tables_for_privileges, table_privileges
+                    source_admin_priv_conn,
+                    config.administration.source_role_name,
+                    source_tables_for_privileges,
+                    table_privileges,
                 )
             finally:
                 engine.close_connection(source_admin_priv_conn)
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)
-        if config.generate_script:
+        if config.execution.generate_script:
             rc = generate_script_output(config, tables_config)
         else:
             admin_connection = engine.get_connection(config, admin=True)
@@ -675,7 +694,7 @@ def ldb_run(config: Config) -> None:
                 try:
                     engine.ensure_table_privileges(
                         history_admin_priv_conn,
-                        config.history_role_name,
+                        config.administration.history_role_name,
                         history_tables_for_privileges,
                         table_privileges,
                     )

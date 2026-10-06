@@ -1,25 +1,11 @@
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from limitsdb.core import ldb_utils
 from limitsdb.core.ldb_errors import SecretError
-
-
-class DummyConfig(SimpleNamespace):
-    action: str = "SOURCE_ILM"
-    source_username: str = "src"
-    source_password: str = "pw1"
-    source_dsn: str = "dsn1"
-    history_username: str = "hist"
-    history_password: str = "pw2"
-    history_dsn: str = "dsn2"
-    admin_source_username: str = "admin_src"
-    admin_source_password: str = "apw1"
-    admin_history_username: str = "admin_hist"
-    admin_history_password: str = "apw2"
+from limitsdb.core.ldb_params_config import Config
 
 
 def test_nvl_and_max_ignore_none():
@@ -37,7 +23,20 @@ def test_indent_and_wrap():
 
 
 def test_get_effective_credentials_variations():
-    cfg = DummyConfig()
+    cfg = Config(
+        schema="s",
+        mode="PLAN",
+        source_username="src",
+        source_password="pw1",
+        source_dsn="dsn1",
+        history_username="hist",
+        history_password="pw2",
+        history_dsn="dsn2",
+        admin_source_username="admin_src",
+        admin_source_password="apw1",
+        admin_history_username="admin_hist",
+        admin_history_password="apw2",
+    )
     assert ldb_utils.get_effective_credentials(cfg) == ("src", "pw1", "dsn1")
     cfg.action = "HISTORY_ILM"
     assert ldb_utils.get_effective_credentials(cfg) == ("hist", "pw2", "dsn2")

@@ -40,7 +40,7 @@ def run_cli() -> None:
         # Build final config and run
         cfg_dict = build_config({}, args)
         config = Config.from_dict(cfg_dict)
-        reconfigure_logger(level=config.log_level)
+        reconfigure_logger(level=config.execution.log_level)
         logger.debug("Effective config: %s", _mask_secrets(config.to_dict()))
         ldb_run(config)
     except (LimitsDbError, ValueError, KeyError) as exc:

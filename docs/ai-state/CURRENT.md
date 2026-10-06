@@ -31,9 +31,14 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - Las operaciones ILM pueden archivar, purgar, crear objetos y administrar
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
-- La suite reside en `tests/`. La baseline verificada el 2026-10-06 es de 56
+- La suite reside en `tests/`. La baseline verificada el 2026-10-06 es de 62
   pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina sin
   hallazgos sobre los 23 módulos del paquete.
+- La configuración pública conserva claves planas y precedencia sistema,
+  usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
+  tipadas e inmutables de ejecución, conexiones, administración y contexto; las
+  reglas ILM normalizadas y el estado derivado de tablas también tienen
+  contratos tipados. `PEND-004` está resuelto.
 - Los límites de configuración, secretos, validación, conexión y ejecución
   exponen errores de dominio encadenados. Los archivos de secretos inválidos
   detienen la operación sin sobrescribirse y los fallos de workers producen un
@@ -64,3 +69,7 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   CI.
 - `DEC-008`: traducir fallos en fronteras de subsistema a errores de dominio
   encadenados y permitir capturas amplias sólo en fronteras documentadas.
+- `DEC-009`: mantener plana la configuración pública y migrar internamente por
+  fases hacia contratos tipados e inmutables.
+- `DEC-010`: ejecutar la integración Oracle en una base efímera dentro de un
+  runner Linux de GitHub Actions, sin acceso externo a la base cloud persistente.

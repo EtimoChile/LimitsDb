@@ -8,6 +8,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -25,10 +26,78 @@ VALID_MODES: tuple[str, ...] = ("VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUT
 MODE_ALIASES: dict[str, str] = {"DRY_RUN": "PREVIEW"}
 MODES_REQUIRING_CONNECTIONS: set[str] = {"VALIDATE", "PREVIEW", "SCRIPT", "EXECUTE"}
 
+IlmAction = Literal["SOURCE_ILM", "HISTORY_ILM"]
+RuntimeMode = Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"]
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+DatabaseEngineName = Literal["oracle", "postgres"]
+
 
 def _normalize_mode(value: str) -> str:
     normalized = (value or "").upper()
     return MODE_ALIASES.get(normalized, normalized)
+
+
+@dataclass(frozen=True)
+class ExecutionConfig:
+    """Typed, immutable execution settings derived from the public flat config."""
+
+    action: IlmAction
+    mode: RuntimeMode
+    chunk_size: int
+    use_added_columns: bool
+    add_ldb_columns: bool
+    generate_script: bool
+    parallel_max: int
+    log_level: LogLevel
+
+
+@dataclass(frozen=True)
+class DatabaseEndpoint:
+    """Application connection values for one database environment."""
+
+    dsn: str | None
+    username: str | None
+    password: str | None
+
+
+@dataclass(frozen=True)
+class ConnectionConfig:
+    """Typed source/history connection settings."""
+
+    db_engine: DatabaseEngineName
+    source: DatabaseEndpoint
+    history: DatabaseEndpoint
+
+
+@dataclass(frozen=True)
+class AdministrativeCredentials:
+    """Administrative credentials for one database environment."""
+
+    username: str | None
+    password: str | None
+
+
+@dataclass(frozen=True)
+class AdministrationConfig:
+    """Typed settings used to provision users, roles, and database links."""
+
+    source: AdministrativeCredentials
+    history: AdministrativeCredentials
+    source_default_tablespace: str | None
+    history_default_tablespace: str | None
+    source_to_history_dblink_name: str
+    history_to_source_dblink_name: str
+    source_role_name: str
+    history_role_name: str
+
+
+@dataclass(frozen=True)
+class RuntimeContext:
+    """Identity and optional file override for one invocation."""
+
+    schema: str
+    profile: str | None
+    ilm_config_file: str | None
 
 
 # ------------------------------------------------------------------------------
@@ -153,6 +222,62 @@ class Config:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def execution(self) -> ExecutionConfig:
+        """Return the typed execution view without changing the public flat model."""
+        return ExecutionConfig(
+            action=self.action,
+            mode=cast(RuntimeMode, self.mode),
+            chunk_size=self.chunk_size,
+            use_added_columns=self.use_added_columns,
+            add_ldb_columns=self.add_ldb_columns,
+            generate_script=self.generate_script,
+            parallel_max=self.parallel_max,
+            log_level=self.log_level,
+        )
+
+    @property
+    def connections(self) -> ConnectionConfig:
+        """Return typed source/history endpoints without copying public keys."""
+        return ConnectionConfig(
+            db_engine=self.db_engine,
+            source=DatabaseEndpoint(
+                dsn=self.source_dsn,
+                username=self.source_username,
+                password=self.source_password,
+            ),
+            history=DatabaseEndpoint(
+                dsn=self.history_dsn,
+                username=self.history_username,
+                password=self.history_password,
+            ),
+        )
+
+    @property
+    def administration(self) -> AdministrationConfig:
+        """Return typed administrative settings without changing public keys."""
+        return AdministrationConfig(
+            source=AdministrativeCredentials(
+                username=self.admin_source_username,
+                password=self.admin_source_password,
+            ),
+            history=AdministrativeCredentials(
+                username=self.admin_history_username,
+                password=self.admin_history_password,
+            ),
+            source_default_tablespace=self.source_default_tablespace,
+            history_default_tablespace=self.history_default_tablespace,
+            source_to_history_dblink_name=self.source_to_history_dblink_name,
+            history_to_source_dblink_name=self.history_to_source_dblink_name,
+            source_role_name=self.source_role_name,
+            history_role_name=self.history_role_name,
+        )
+
+    @property
+    def context(self) -> RuntimeContext:
+        """Return the typed invocation context without changing public keys."""
+        return RuntimeContext(schema=self.schema, profile=self.profile, ilm_config_file=self.ilm_config_file)
 
 
 # ------------------------------------------------------------------------------

@@ -94,18 +94,19 @@ def get_effective_credentials(
     cfg: Config, *, admin: bool = False, env: Literal["SOURCE", "HISTORY"] | None = None
 ) -> tuple[str, str, str]:
     """Return (username, password, dsn) tuple according to action and admin flag."""
-    is_source = cfg.action == "SOURCE_ILM" if env is None else (env == "SOURCE")
+    is_source = cfg.execution.action == "SOURCE_ILM" if env is None else (env == "SOURCE")
     env_part = "source" if is_source else "history"
-    role = "admin_" if admin else ""
-    user_key = f"{role}{env_part}_username"
-    pwd_key = f"{role}{env_part}_password"
+    endpoint = cfg.connections.source if is_source else cfg.connections.history
+    credentials = cfg.administration.source if is_source else cfg.administration.history
+    user_key = f"{'admin_' if admin else ''}{env_part}_username"
+    pwd_key = f"{'admin_' if admin else ''}{env_part}_password"
     dsn_key = f"{env_part}_dsn"
-    user: str | None = getattr(cfg, user_key, None)
-    pwd: str | None = getattr(cfg, pwd_key, None)
-    dsn: str | None = getattr(cfg, dsn_key, None)
+    user = credentials.username if admin else endpoint.username
+    pwd = credentials.password if admin else endpoint.password
+    dsn = endpoint.dsn
     missing = [key for key, value in ((user_key, user), (pwd_key, pwd), (dsn_key, dsn)) if not value]
     if missing:
-        raise ValidationError(f"Missing {'/'.join(missing)} for action={cfg.action}")
+        raise ValidationError(f"Missing {'/'.join(missing)} for action={cfg.execution.action}")
     assert user is not None and pwd is not None and dsn is not None
     return user, pwd, dsn
 

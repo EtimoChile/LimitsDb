@@ -128,61 +128,63 @@ def run_cli() -> None:
         )
         cfg_dict = build_config({}, args)
         config = Config.from_dict(cfg_dict)
+        connections = config.connections
+        administration = config.administration
 
-        if not config.admin_source_username or not config.admin_source_password:
+        if not administration.source.username or not administration.source.password:
             raise ValueError("admin_source_username and admin_source_password are required")
-        if not config.admin_history_username or not config.admin_history_password:
+        if not administration.history.username or not administration.history.password:
             raise ValueError("admin_history_username and admin_history_password are required")
-        if not config.source_username or not config.source_password:
+        if not connections.source.username or not connections.source.password:
             raise ValueError("source_username and source_password are required")
-        if not config.history_username or not config.history_password:
+        if not connections.history.username or not connections.history.password:
             raise ValueError("history_username and history_password are required")
-        if not config.history_dsn:
+        if not connections.history.dsn:
             raise ValueError("history_dsn is required to create the database link")
-        if not config.source_dsn:
+        if not connections.source.dsn:
             raise ValueError("source_dsn is required to create the database link")
 
-        engine = get_db_engine(config.db_engine)
+        engine = get_db_engine(connections.db_engine)
     except (LimitsDbError, ValueError) as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
 
-    source_roles = [RoleDefinition(name=config.source_role_name)]
+    source_roles = [RoleDefinition(name=administration.source_role_name)]
     source_privileges = getattr(engine, "REQUIRED_SYSTEM_PRIVILEGES", ())
     history_privileges = getattr(engine, "REQUIRED_SYSTEM_PRIVILEGES", ())
 
     source_user = UserDefinition(
-        name=config.source_username,
-        password=config.source_password,
-        default_tablespace=config.source_default_tablespace or None,
-        roles=(config.source_role_name,),
-        roles_with_admin_option=(config.source_role_name,),
+        name=connections.source.username,
+        password=connections.source.password,
+        default_tablespace=administration.source_default_tablespace or None,
+        roles=(administration.source_role_name,),
+        roles_with_admin_option=(administration.source_role_name,),
         system_privileges=source_privileges,
     )
-    history_roles = [RoleDefinition(name=config.history_role_name)]
+    history_roles = [RoleDefinition(name=administration.history_role_name)]
     history_user = UserDefinition(
-        name=config.history_username,
-        password=config.history_password,
-        default_tablespace=config.history_default_tablespace or None,
-        roles=(config.history_role_name,),
-        roles_with_admin_option=(config.history_role_name,),
+        name=connections.history.username,
+        password=connections.history.password,
+        default_tablespace=administration.history_default_tablespace or None,
+        roles=(administration.history_role_name,),
+        roles_with_admin_option=(administration.history_role_name,),
         system_privileges=history_privileges,
     )
-    source_tables = _build_control_tables(config.source_username)
-    source_sequences = _build_sequences(config.source_username)
-    history_tables = _build_control_tables(config.history_username)
-    history_sequences = _build_sequences(config.history_username)
+    source_tables = _build_control_tables(connections.source.username)
+    source_sequences = _build_sequences(connections.source.username)
+    history_tables = _build_control_tables(connections.history.username)
+    history_sequences = _build_sequences(connections.history.username)
     source_db_link = DatabaseLinkDefinition(
-        name=config.source_to_history_dblink_name,
-        username=config.history_username,
-        password=config.history_password,
-        dsn=config.history_dsn,
+        name=administration.source_to_history_dblink_name,
+        username=connections.history.username,
+        password=connections.history.password,
+        dsn=connections.history.dsn,
     )
     history_db_link = DatabaseLinkDefinition(
-        name=config.history_to_source_dblink_name,
-        username=config.source_username,
-        password=config.source_password,
-        dsn=config.source_dsn,
+        name=administration.history_to_source_dblink_name,
+        username=connections.source.username,
+        password=connections.source.password,
+        dsn=connections.source.dsn,
     )
 
     summary: dict[str, list[str]] = {}
@@ -194,7 +196,7 @@ def run_cli() -> None:
         summary["source_tables"] = engine.ensure_tables(source_admin_conn, source_tables)
         summary["source_sequences"] = engine.ensure_sequences(source_admin_conn, source_sequences)
         summary["source_supporting_objects"] = engine.ensure_supporting_objects(
-            source_admin_conn, config.source_username
+            source_admin_conn, connections.source.username
         )
     finally:
         engine.close_connection(source_admin_conn)
@@ -206,7 +208,7 @@ def run_cli() -> None:
         summary["history_tables"] = engine.ensure_tables(history_admin_conn, history_tables)
         summary["history_sequences"] = engine.ensure_sequences(history_admin_conn, history_sequences)
         summary["history_supporting_objects"] = engine.ensure_supporting_objects(
-            history_admin_conn, config.history_username
+            history_admin_conn, connections.history.username
         )
     finally:
         engine.close_connection(history_admin_conn)

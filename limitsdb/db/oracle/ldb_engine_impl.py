@@ -1,5 +1,5 @@
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, ClassVar, Literal, cast
 
@@ -387,7 +387,7 @@ class OracleEngine(DatabaseEngine):
         raise ValueError(f"Unsupported column data type: {column.data_type}")
 
     @staticmethod
-    def generate_sql_block(config: Config, table_cnf: dict[str, Any], process_date: str) -> str:
+    def generate_sql_block(config: Config, table_cnf: Mapping[str, Any], process_date: str) -> str:
         """Generates a PL/SQL block for table processing with optional chunking and LOB handling.
         Args:
             config: Configuration object.
@@ -395,11 +395,13 @@ class OracleEngine(DatabaseEngine):
             process_date: Process date in 'YYYYMMDD' format.
         Returns:
             PL/SQL block as string."""
+        execution = config.execution
+        administration = config.administration
         cnd0 = table_cnf["conds"][0]
         source_owner, history_owner, table_name = cnd0["source_owner"], cnd0["history_owner"], cnd0["table_name"]
         history_hint_expr = cnd0.get("history_hint_expr")
         hint_expr = cnd0["hint_expr"]
-        if config.action == "HISTORY_ILM":
+        if execution.action == "HISTORY_ILM":
             hint_expr = nvl(history_hint_expr, hint_expr)
         has_lob_columns = cnd0["has_lob_columns"] == "Y"
         other_columns, referencing_tables = table_cnf["other_columns"], table_cnf["referencing_tables"]
@@ -411,21 +413,21 @@ class OracleEngine(DatabaseEngine):
             table_cnf["months_keep_history_max"],
         )
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
-        source_ilm = config.action == "SOURCE_ILM"
-        if config.add_ldb_columns:
+        source_ilm = execution.action == "SOURCE_ILM"
+        if execution.add_ldb_columns:
             gend_cols = ["LDB_PROCESS_DATE", "LDB_INSERT_DATE"]
             gend_vals = ["l_process_date", "sysdate"]
         else:
             gend_cols = gend_vals = []
         ins_cols = join_wrapped(", ", table_columns + other_cols_alias + gend_cols, 200)
         ins_vals = join_wrapped(", ", [f"r_rec(i).{col}" for col in table_columns + other_cols_alias] + gend_vals, 200)
-        if config.generate_script:
+        if execution.generate_script:
             process_date = "&process_date"
         plsql = f"""declare
     l_source_owner varchar2(50) := '{source_owner}';
     l_history_owner varchar2(50) := '{history_owner}';
-    l_action varchar2(10) := '{config.action}';
-    l_mode varchar2(10) := '{config.mode}';
+    l_action varchar2(10) := '{execution.action}';
+    l_mode varchar2(10) := '{execution.mode}';
     l_message varchar2(200) := case
         when l_mode = 'EXECUTE' then null
         when l_mode = 'SCRIPT' then 'SCRIPT'
@@ -437,13 +439,13 @@ class OracleEngine(DatabaseEngine):
     l_referencing_tables t_referencing_tables := t_referencing_tables({referencing_tables});
     l_process_start date;
     l_record_count pls_integer := 0;
-    l_plsql clob := {"null" if config.generate_script else ":plsql_code"};
+    l_plsql clob := {"null" if execution.generate_script else ":plsql_code"};
     l_sqlcode number := null;
     l_out_message varchar2(200) := null;"""
         if not has_lob_columns:
             cols_expr = ", ".join(["A.*", *other_cols_exprs])
             plsql += f"""
-    l_chunk_size pls_integer := {config.chunk_size}; l_chunk_start date;
+    l_chunk_size pls_integer := {execution.chunk_size}; l_chunk_start date;
     cursor c_records is
         select /*+ {hint_expr} */ A.rowid{", " + cols_expr if source_ilm else ""}
         {indent_lines(query_expr, 8)};
@@ -453,7 +455,7 @@ begin
     l_process_start := sysdate;
     check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
     if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;"""
-        if source_ilm or not config.use_added_columns:
+        if source_ilm or not execution.use_added_columns:
             plsql += """
     check_referencing_tables(l_referencing_tables, l_process_date); commit;"""
         if not has_lob_columns or not source_ilm:
@@ -466,11 +468,11 @@ begin
         if r_rec.count <= 0 then
             exit;
         end if;"""
-            if config.mode in ("EXECUTE", "SCRIPT"):
+            if execution.mode in ("EXECUTE", "SCRIPT"):
                 if source_ilm and nvl(months_keep_history_max, 1) > 0:
                     plsql += f"""
         for i in 1 .. r_rec.count loop
-            insert into {OracleEngine._format_identifier(history_owner)}.{OracleEngine._format_identifier(table_name)}@{OracleEngine._format_identifier(config.source_to_history_dblink_name)}
+            insert into {OracleEngine._format_identifier(history_owner)}.{OracleEngine._format_identifier(table_name)}@{OracleEngine._format_identifier(administration.source_to_history_dblink_name)}
             ({indent_lines(ins_cols, 12)})
             values ({indent_lines(ins_vals, 12)});
         end loop;"""
@@ -485,10 +487,10 @@ begin
     close c_records;"""
         else:
             cols_select = ", ".join([f"a.{col}" for col in table_columns] + other_cols_exprs + gend_vals)
-            if config.mode in ("EXECUTE", "SCRIPT"):
+            if execution.mode in ("EXECUTE", "SCRIPT"):
                 if source_ilm and nvl(months_keep_history_max, 0) > 0:
                     plsql += f"""
-    insert into {OracleEngine._format_identifier(history_owner)}.{OracleEngine._format_identifier(table_name)}@{OracleEngine._format_identifier(config.source_to_history_dblink_name)}({indent_lines(ins_cols, 4)})
+    insert into {OracleEngine._format_identifier(history_owner)}.{OracleEngine._format_identifier(table_name)}@{OracleEngine._format_identifier(administration.source_to_history_dblink_name)}({indent_lines(ins_cols, 4)})
     select /*+ {hint_expr} */ {indent_lines(cols_select, 4)}
     {indent_lines(query_expr, 4)};"""
                 plsql += f"""
@@ -622,7 +624,7 @@ end;"""
                     owner,
                     table_name,
                     datetime.strptime(process_date, "%Y%m%d").date(),
-                    config.action,
+                    config.execution.action,
                     Status.ERROR,
                     process_start,
                     None,
@@ -783,7 +785,7 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition, table_cnf: dict[str, Any]) -> None:
+    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition, table_cnf: Mapping[str, Any]) -> None:
         cursor: oracledb.Cursor | None = None
         fmttd_owner = OracleEngine._format_identifier(table.owner)
         fmttd_table_name = OracleEngine._format_identifier(table.name)
@@ -893,7 +895,7 @@ end;"""
 
     @staticmethod
     def get_primary_key_columns(
-        conn: oracledb.Connection, owner: str, table_name: str, table_cnf: dict[str, Any]
+        conn: oracledb.Connection, owner: str, table_name: str, table_cnf: Mapping[str, Any]
     ) -> tuple[str, ...]:
         cursor: oracledb.Cursor | None = None
         try:

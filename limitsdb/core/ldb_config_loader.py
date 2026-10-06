@@ -13,7 +13,7 @@ from limitsdb.core.ldb_crypto import decrypt as _DECRYPT
 from limitsdb.core.ldb_crypto import is_encrypted as _IS_ENC
 from limitsdb.core.ldb_errors import ConfigurationError, SecretError
 from limitsdb.core.ldb_logger import get_logger
-from limitsdb.core.ldb_utils import resolve_schema_file, secret_keys_from_config
+from limitsdb.core.ldb_utils import get_config_roots, resolve_schema_file, secret_keys_from_config
 
 logger = get_logger("config_loader")
 
@@ -60,7 +60,10 @@ def _read_env_overrides(prefix: str = "LDB_") -> dict[str, Any]:
     for k, v in os.environ.items():
         if not k.startswith(prefix):
             continue
-        key = k[len(prefix) :].lower().replace("__", ".").replace("_", ".")
+        # A single underscore belongs to the public flat key (for example,
+        # LDB_CHUNK_SIZE -> chunk_size). A double underscore is reserved for
+        # a future/nested key (LDB_GROUP__VALUE -> group.value).
+        key = k[len(prefix) :].lower().replace("__", ".")
         # basic typing
         if v.lower() in ("true", "false"):
             out[key] = v.lower() == "true"
@@ -77,6 +80,17 @@ def _read_env_overrides(prefix: str = "LDB_") -> dict[str, Any]:
             pass
         out[key] = v
     return out
+
+
+def _automatic_config_paths(*, schema: str, profile: str | None, explicit_config_dir: str | None) -> list[Path]:
+    """Return existing runtime-config layers from lowest to highest priority."""
+    filename = f"config.{profile}.yml" if profile else "config.yml"
+    if explicit_config_dir:
+        roots = [Path(explicit_config_dir)]
+    else:
+        user_root, system_root = get_config_roots()
+        roots = [system_root, user_root]
+    return [path for root in roots if (path := root / "schemas" / schema / filename).exists()]
 
 
 def _apply_dot_set(cfg: dict[str, Any], key: str, value: Any) -> None:
@@ -112,26 +126,31 @@ def load_runtime_config(
     If enforce_encrypted_secrets=True, plaintext secrets are rejected.
     """
     cfg: dict[str, Any] = {}
-    # 1) system/user dirs (or explicit)
-    config_file = resolve_schema_file(
-        schema=schema,
-        profile=profile,
-        explicit_config_dir=explicit_config_dir,
-        explicit_file=explicit_config_file,
-        prefix_name="config",
-        extension_name="yml",
-        description="configuration file",
-    )
-    if config_file:
+    # 1-2) System then user config, or the single explicitly selected root.
+    for config_path in _automatic_config_paths(schema=schema, profile=profile, explicit_config_dir=explicit_config_dir):
+        cfg = _deep_merge(cfg, _load_yaml(config_path))
+    # 3) Explicit config file is an overlay, not a replacement for the
+    # automatically discovered layers.
+    if explicit_config_file:
+        config_file = resolve_schema_file(
+            schema=schema,
+            profile=profile,
+            explicit_config_dir=explicit_config_dir,
+            explicit_file=explicit_config_file,
+            prefix_name="config",
+            extension_name="yml",
+            description="configuration file",
+        )
+        assert config_file is not None
         cfg = _deep_merge(cfg, _load_yaml(Path(config_file)))
-    # 5) ENV
+    # 4) ENV
     env_over = _read_env_overrides()
     if env_over:
         cfg = _apply_overrides(cfg, env_over)
-    # 6) CLI --set
+    # 5) CLI --set
     if cli_sets:
         cfg = _apply_overrides(cfg, cli_sets)
-    # 7) Secrets (user > system), strictly enforced
+    # 6) Secrets (user > system), strictly enforced
     secrets: dict[str, Any] = {}
     secrets_path = resolve_schema_file(
         schema=schema,

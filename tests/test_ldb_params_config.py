@@ -1,3 +1,4 @@
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,99 @@ def test_normalize_and_config_validation():
         ldb_params_config.Config(schema="", source_dsn="d", source_username="u", source_password="p")
     with pytest.raises(ValueError):
         ldb_params_config.Config(schema="s", source_dsn="", source_username="u", source_password="p")
+
+
+def test_flat_config_contract_and_compatibility_behaviour():
+    cfg = ldb_params_config.Config.from_dict(
+        {
+            "schema": "s",
+            "mode": "DRY_RUN",
+            "source_dsn": "dsn",
+            "source_username": "user",
+            "source_password": "secret",
+            "admin_source_username": "admin",
+        }
+    )
+
+    assert cfg.mode == "PREVIEW"
+    assert cfg.to_dict()["admin_source_username"] == "admin"
+    assert "execution" not in cfg.to_dict()
+    with pytest.raises(ValueError, match="Unknown configuration keys"):
+        ldb_params_config.Config.from_dict({"schema": "s", "unexpected": True})
+
+
+def test_plan_is_offline_and_script_enables_generation():
+    plan = ldb_params_config.Config(schema="s", mode="PLAN")
+    script = ldb_params_config.Config(
+        schema="s", mode="SCRIPT", source_dsn="dsn", source_username="user", source_password="secret"
+    )
+
+    assert plan.source_dsn == ""
+    assert script.generate_script is True
+
+
+def test_history_action_validates_only_history_connection():
+    cfg = ldb_params_config.Config(
+        schema="s",
+        action="HISTORY_ILM",
+        history_dsn="dsn",
+        history_username="user",
+        history_password="secret",
+    )
+    assert cfg.action == "HISTORY_ILM"
+
+    with pytest.raises(ValueError, match="history_dsn"):
+        ldb_params_config.Config(schema="s", action="HISTORY_ILM")
+
+
+def test_typed_execution_and_connection_views_preserve_flat_contract():
+    cfg = ldb_params_config.Config(
+        schema="s",
+        mode="SCRIPT",
+        chunk_size=250,
+        source_dsn="dsn",
+        source_username="user",
+        source_password="secret",
+    )
+
+    assert cfg.execution == ldb_params_config.ExecutionConfig(
+        action="SOURCE_ILM",
+        mode="SCRIPT",
+        chunk_size=250,
+        use_added_columns=True,
+        add_ldb_columns=True,
+        generate_script=True,
+        parallel_max=10,
+        log_level="INFO",
+    )
+    assert cfg.connections.source == ldb_params_config.DatabaseEndpoint(dsn="dsn", username="user", password="secret")
+    assert cfg.to_dict()["chunk_size"] == 250
+    assert "execution" not in cfg.to_dict()
+
+    with pytest.raises(FrozenInstanceError):
+        cfg.execution.chunk_size = 500  # type: ignore[misc]
+
+
+def test_typed_administration_and_context_views_preserve_flat_contract():
+    cfg = ldb_params_config.Config(
+        schema="s",
+        profile="prod",
+        mode="PLAN",
+        ilm_config_file="ilm.prod.yml",
+        admin_source_username="source_admin",
+        admin_source_password="source_secret",
+        source_default_tablespace="SOURCE_DATA",
+        source_role_name="SOURCE_ROLE",
+    )
+
+    assert cfg.administration.source == ldb_params_config.AdministrativeCredentials(
+        username="source_admin", password="source_secret"
+    )
+    assert cfg.administration.source_default_tablespace == "SOURCE_DATA"
+    assert cfg.administration.source_role_name == "SOURCE_ROLE"
+    assert cfg.context == ldb_params_config.RuntimeContext(schema="s", profile="prod", ilm_config_file="ilm.prod.yml")
+    assert "administration" not in cfg.to_dict()
+    assert "context" not in cfg.to_dict()
 
 
 def test_parse_cli_sets_and_build_config(monkeypatch: pytest.MonkeyPatch):
