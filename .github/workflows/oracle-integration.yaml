@@ -2,6 +2,16 @@ name: Oracle Integration
 
 on:
   workflow_dispatch:
+  push:
+    branches: [development, main]
+    paths:
+      - ".github/workflows/oracle-integration.yaml"
+      - "limitsdb/core/ldb_runner.py"
+      - "limitsdb/db/ldb_engines.py"
+      - "limitsdb/db/oracle/**"
+      - "tests/integration/**"
+      - "pyproject.toml"
+      - "poetry.lock"
   pull_request:
     branches: [development, main]
     paths:
