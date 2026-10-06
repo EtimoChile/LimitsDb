@@ -62,21 +62,6 @@ def _execute_cleanup_ddl(connection: oracledb.Connection, statement: str, *, mis
         cursor.close()
 
 
-def test_oracle_transaction_rollback_is_real(oracle_connection: oracledb.Connection):
-    table_name = "LDBT_TX_ROLLBACK"
-    _drop_table_if_present(oracle_connection, table_name)
-    cursor = oracle_connection.cursor()
-    try:
-        cursor.execute(f"CREATE TABLE {table_name} (id NUMBER PRIMARY KEY)")
-        cursor.execute(f"INSERT INTO {table_name} (id) VALUES (1)")
-        oracle_connection.rollback()
-        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-        assert cursor.fetchone()[0] == 0
-    finally:
-        cursor.close()
-        _drop_table_if_present(oracle_connection, table_name)
-
-
 def test_oracle_engine_table_ensure_is_idempotent(oracle_connection: oracledb.Connection):
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
     table_name = "LDBT_ENGINE_TABLE"

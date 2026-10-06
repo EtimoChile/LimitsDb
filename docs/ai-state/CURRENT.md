@@ -33,10 +33,11 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   un entorno identificado.
 - La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-06 es
   de 68 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
-  sin hallazgos sobre los 23 módulos del paquete. Las cuatro pruebas de
-  integración Oracle se ejecutaron exitosamente sobre la base efímera de CI,
-  incluidas recuperación tras DDL parcial y operaciones privilegiadas
-  idempotentes.
+  sin hallazgos sobre los 23 módulos del paquete. Los tres casos vigentes de
+  integración ejecutan métodos del adaptador `OracleEngine` y pasaron sobre la
+  base efímera de CI; cubren idempotencia, recuperación tras DDL parcial y
+  operaciones privilegiadas. No se conservan pruebas del comportamiento propio
+  del proveedor sin intervención de LimitsDb.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
