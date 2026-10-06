@@ -7,7 +7,11 @@ _configured = False
 _lock = threading.RLock()
 
 # Un único formato legible (sin JSON, sin ambientes)
-_FORMAT = logging.Formatter(fmt="%(asctime)s [%(levelname)s] %(processName)s-%(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S", )
+_FORMAT = logging.Formatter(
+    fmt="%(asctime)s [%(levelname)s] %(processName)s-%(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
 
 def configure_logger(level: str = "INFO", base_name: str = _base_name) -> logging.Logger:
     """Configura el logger base una sola vez (handlers/format)."""
@@ -32,6 +36,7 @@ def configure_logger(level: str = "INFO", base_name: str = _base_name) -> loggin
                 h.setFormatter(_FORMAT)
         return base
 
+
 def get_logger(name: str = _base_name) -> logging.Logger:
     """Devuelve el logger base o un hijo ('limitsdb.<name>')."""
     if not _configured:
@@ -39,6 +44,7 @@ def get_logger(name: str = _base_name) -> logging.Logger:
     if name == _base_name or name == "":
         return logging.getLogger(_base_name)
     return logging.getLogger(f"{_base_name}.{name}")
+
 
 def reconfigure_logger(level: str = "INFO") -> None:
     """Ajusta el nivel del logger base y sus handlers."""

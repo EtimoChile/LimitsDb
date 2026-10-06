@@ -175,6 +175,8 @@ cython_debug/
 # But keep shared project settings
 !.vscode/settings.json
 !.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/markdown-preview.css
 structure.txt
 limitsdb.zip
 *.yml

@@ -45,9 +45,8 @@ include = [
 
 [tool.poetry.group.dev.dependencies]
 pre-commit = "^3.8.0"
-flake8 = "^7.1.1"
 mypy = "^1.14.1"
-yapf = "^0.40.2"
+ruff = "^0.16.10"
 pytest = "^8.3.0"
 coverage = "^7.6.0"
 twine = "^6.2.0"
@@ -62,24 +61,19 @@ ldb-impl = "limitsdb.cli.ldb_impl:run_cli"
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.yapf]
-based_on_style = "pep8"
-column_limit = 150
-coalesce_brackets = true
-dedent_closing_brackets = true
-join_multiple_lines = false
-split_before_first_argument = true
-split_before_named_assigns = false
-split_all_comma_separated_values = false
-split_arguments_when_comma_terminated = false
-blank_lines_around_top_level_definition = 1
-blank_line_before_nested_class_or_def = false
-split_penalty_after_opening_bracket = 300
-split_penalty_for_added_line_split = 300
-disable_ending_comma_heuristic = true
-indent_width = 4
-continuation_indent_width = 4
-align_closing_bracket_with_visual_indent = false
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
 
 [tool.mypy]
 strict = true

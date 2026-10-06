@@ -1,0 +1,42 @@
+/* Use the available editor width instead of VS Code's narrow reading column. */
+:root {
+  --limitsdb-markdown-gutter: clamp(16px, 2.5vw, 48px);
+}
+
+body.vscode-body,
+.markdown-body,
+#preview {
+  box-sizing: border-box;
+  width: 100% !important;
+  max-width: none !important;
+  margin-inline: 0 !important;
+}
+
+body.vscode-body {
+  padding-inline: var(--limitsdb-markdown-gutter) !important;
+}
+
+/* Let the browser size columns from their content and the full viewport. */
+body.vscode-body table,
+.markdown-body table,
+#preview table {
+  width: 100% !important;
+  max-width: none !important;
+  table-layout: auto !important;
+}
+
+body.vscode-body th,
+body.vscode-body td,
+.markdown-body th,
+.markdown-body td,
+#preview th,
+#preview td {
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+@media (max-width: 720px) {
+  :root {
+    --limitsdb-markdown-gutter: 12px;
+  }
+}

@@ -1,14 +1,31 @@
-from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Literal, Set, cast
 import re
+from collections.abc import Iterable, Sequence
+from datetime import datetime
+from typing import Any, ClassVar, Literal, cast
+
 import oracledb
+
+from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
 from limitsdb.core.ldb_utils import get_effective_credentials, indent_lines, join_wrapped, nvl
-from limitsdb.db.ldb_engines import ColumnDefinition, ColumnMetadata, DatabaseEngine, DatabaseLinkDefinition, IndexMap, RoleDefinition, SequenceDefinition, TableDefinition, UserDefinition
-from limitsdb.core.ldb_logger import get_logger
+from limitsdb.db.ldb_engines import (
+    ColumnDefinition,
+    ColumnMetadata,
+    DatabaseEngine,
+    DatabaseLinkDefinition,
+    IndexMap,
+    RoleDefinition,
+    SequenceDefinition,
+    TableDefinition,
+    UserDefinition,
+)
 
-SUPPORTING_OBJECT_LIST = ["TYPE t_referencing_tables", "PROCEDURE check_save_status", "PROCEDURE check_referencing_tables"]
+SUPPORTING_OBJECT_LIST = [
+    "TYPE t_referencing_tables",
+    "PROCEDURE check_save_status",
+    "PROCEDURE check_referencing_tables",
+]
 CHECK_SAVE_STATUS_PROC = """
 CREATE OR REPLACE PROCEDURE check_save_status(
     p_owner            IN VARCHAR2,
@@ -168,22 +185,38 @@ END check_referencing_tables;
 """
 logger = get_logger("oracle.engine")
 
+
 class OracleEngine(DatabaseEngine):
     """Oracle DB engine with methods for connection, configuration loading, and PL/SQL generation."""
 
     # states and class constants
-    _connection_envs: Dict[int, str] = {}
-    REQUIRED_SYSTEM_PRIVILEGES: Tuple[str, ...] = (
-        "CREATE SESSION", "ALTER SESSION", "CREATE TABLE", "CREATE PROCEDURE", "CREATE TYPE", "CREATE DATABASE LINK", "CREATE SEQUENCE", "RESUMABLE",
-        "ALTER USER", "CREATE SYNONYM", "CREATE VIEW", "CREATE ROLE", "CREATE TRIGGER", "CREATE MATERIALIZED VIEW", "QUERY REWRITE"
+    _connection_envs: ClassVar[dict[int, str]] = {}
+    REQUIRED_SYSTEM_PRIVILEGES: tuple[str, ...] = (
+        "CREATE SESSION",
+        "ALTER SESSION",
+        "CREATE TABLE",
+        "CREATE PROCEDURE",
+        "CREATE TYPE",
+        "CREATE DATABASE LINK",
+        "CREATE SEQUENCE",
+        "RESUMABLE",
+        "ALTER USER",
+        "CREATE SYNONYM",
+        "CREATE VIEW",
+        "CREATE ROLE",
+        "CREATE TRIGGER",
+        "CREATE MATERIALIZED VIEW",
+        "QUERY REWRITE",
     )
-    _REGULAR_IDENTIFIER = re.compile(r'[A-Z_#$][A-Z0-9_#$]*')  #only DD uppercase identifiers are unquoted
+    _REGULAR_IDENTIFIER = re.compile(r"[A-Z_#$][A-Z0-9_#$]*")  # only DD uppercase identifiers are unquoted
     _PREFIXED_IDENTIFIER = re.compile(r'@("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)')
-    _PRIVATE_DDL_MARK = re.compile(r'##(.*?)##')
+    _PRIVATE_DDL_MARK = re.compile(r"##(.*?)##")
 
     # public API
     @staticmethod
-    def get_connection(config: Config, *, admin: bool = False, env: Optional[Literal["SOURCE", "HISTORY"]] = None) -> oracledb.Connection:
+    def get_connection(
+        config: Config, *, admin: bool = False, env: Literal["SOURCE", "HISTORY"] | None = None
+    ) -> oracledb.Connection:
         """Returns an Oracle connection using provided config.
         Args:
             config: Database config object.
@@ -192,9 +225,9 @@ class OracleEngine(DatabaseEngine):
             An active oracledb.Connection."""
         try:
             user, password, dsn = get_effective_credentials(config, admin=admin, env=env)
-            connection = oracledb.connect(user=user, password=password, dsn=dsn)  # type: ignore
+            connection = oracledb.connect(user=user, password=password, dsn=dsn)
             OracleEngine._register_connection_env(connection, env)
-            return connection
+            return cast(oracledb.Connection, connection)
         except Exception:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
             raise
@@ -212,24 +245,25 @@ class OracleEngine(DatabaseEngine):
             logger.critical("Failed to close Oracle DB connection.", exc_info=True)
 
     @staticmethod
-    def load_config(conn: oracledb.Connection) -> List[Dict[str, Any]]:
+    def load_config(conn: oracledb.Connection) -> list[dict[str, Any]]:
         """Loads configuration from ldb_conf.
         Args:
             conn: Active Oracle connection.
         Returns:
             List of configuration rows."""
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            cursor.execute( # type: ignore
+            cursor.execute(
                 """SELECT cnf_id, cnf_source_owner, cnf_history_owner, cnf_table_name, cnf_retain_months_source,
                        cnf_retain_months_history, cnf_exec_day, cnf_frecuency, cnf_is_active, cnf_purge_date_expr,
                        cnf_additional_filter_expr, cnf_history_addtl_filter_expr, cnf_source_orphan_purge, cnf_orphan_check_column, cnf_has_lob_columns,
                        cnf_referencing_tables, cnf_join_expr, cnf_hint_expr, cnf_history_hint_expr, cnf_long_columns, null ctl_status
                 FROM ldb_conf
-                WHERE cnf_is_active = 'Y'""")
-            cols = [cast(str, col[0]).lower().removeprefix("cnf_") for col in cursor.description]  # type: ignore
-            return [dict(zip(cols, row)) for row in cursor.fetchall()]  # type: ignore
+                WHERE cnf_is_active = 'Y'"""
+            )
+            cols = [cast(str, col[0]).lower().removeprefix("cnf_") for col in cursor.description]
+            return [dict(zip(cols, row, strict=True)) for row in cursor.fetchall()]
         except Exception:
             logger.critical("Failed to load configuration from Oracle.", exc_info=True)
             raise
@@ -238,7 +272,9 @@ class OracleEngine(DatabaseEngine):
                 cursor.close()
 
     @staticmethod
-    def get_table_columns(conn: oracledb.Connection, owner: str, table_name: str) -> Tuple[List[str], Dict[str, ColumnDefinition]]:
+    def get_table_columns(
+        conn: oracledb.Connection, owner: str, table_name: str
+    ) -> tuple[list[str], dict[str, ColumnDefinition]]:
         """Retrieves column names and metadata for a given table.
         Args:
             conn: Active Oracle connection.
@@ -246,21 +282,36 @@ class OracleEngine(DatabaseEngine):
             table_name: Table name.
         Returns:
             Tuple containing a list of column names and a dict of column metadata."""
-        cursor: Optional[oracledb.Cursor] = None
-        columns: List[str] = []
-        metadata: Dict[str, ColumnDefinition] = {}
+        cursor: oracledb.Cursor | None = None
+        columns: list[str] = []
+        metadata: dict[str, ColumnDefinition] = {}
         try:
             cursor = conn.cursor()
-            cursor.execute( # type: ignore
+            cursor.execute(
                 """select column_id, column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used
                 from all_tab_columns
                 where  owner = :1 and table_name = :2 and column_id is not null
-                order by column_id""", [owner, table_name])
-            for row in cast(Iterable[Tuple[int, str, str, Optional[int], Optional[int], Optional[int], str, Optional[str], Optional[str], str]],
-                            cursor):
-                column_id, column_name, data_type, data_length, data_precision, data_scale, nullable, data_default, char_length, char_used = row
+                order by column_id""",
+                [owner, table_name],
+            )
+            for row in cast(
+                Iterable[tuple[int, str, str, int | None, int | None, int | None, str, str | None, str | None, str]],
+                cursor,
+            ):
+                (
+                    column_id,
+                    column_name,
+                    data_type,
+                    data_length,
+                    data_precision,
+                    data_scale,
+                    nullable,
+                    data_default,
+                    char_length,
+                    char_used,
+                ) = row
                 dtype = data_type.lower()
-                length: Optional[int] = None
+                length: int | None = None
                 if dtype in ("varchar2", "varchar", "char"):
                     if char_used == "C" and char_length is not None:
                         length = int(char_length)
@@ -269,7 +320,13 @@ class OracleEngine(DatabaseEngine):
                 precision = int(data_precision) if data_precision is not None else None
                 scale = int(data_scale) if data_scale is not None else None
                 metadata[column_name] = ColumnDefinition(
-                    name=column_name, data_type=dtype, id=column_id, length=length, precision=precision, scale=scale, nullable=(nullable == "Y"),
+                    name=column_name,
+                    data_type=dtype,
+                    id=column_id,
+                    length=length,
+                    precision=precision,
+                    scale=scale,
+                    nullable=(nullable == "Y"),
                     default=data_default.strip() if isinstance(data_default, str) else None,
                 )
                 columns.append(column_name)
@@ -289,13 +346,13 @@ class OracleEngine(DatabaseEngine):
         return f"({date_expr} < add_months(l_process_date,-{months_keep_src}))"
 
     @staticmethod
-    def get_identifiers_from_expression(expression: str) -> Set[str]:
-        """ Returns a set of @prefixxed identifiers found in the given expression.
+    def get_identifiers_from_expression(expression: str) -> set[str]:
+        """Returns a set of @prefixxed identifiers found in the given expression.
         Args:
             expression: The expression string to process.
         Returns:
             A set of identifier strings found in the expression."""
-        identifiers: Set[str] = set()
+        identifiers: set[str] = set()
         for match in OracleEngine._PREFIXED_IDENTIFIER.finditer(expression):
             ident = match.group(1)
             if ident.startswith('"') and ident.endswith('"'):
@@ -329,7 +386,7 @@ class OracleEngine(DatabaseEngine):
         raise ValueError(f"Unsupported column data type: {column.data_type}")
 
     @staticmethod
-    def generate_sql_block(config: Config, table_cnf: Dict[str, Any], process_date: str) -> str:
+    def generate_sql_block(config: Config, table_cnf: dict[str, Any], process_date: str) -> str:
         """Generates a PL/SQL block for table processing with optional chunking and LOB handling.
         Args:
             config: Configuration object.
@@ -343,11 +400,15 @@ class OracleEngine(DatabaseEngine):
         hint_expr = cnd0["hint_expr"]
         if config.action == "HISTORY_ILM":
             hint_expr = nvl(history_hint_expr, hint_expr)
-        has_lob_columns = cnd0["has_lob_columns"] == 'Y'
+        has_lob_columns = cnd0["has_lob_columns"] == "Y"
         other_columns, referencing_tables = table_cnf["other_columns"], table_cnf["referencing_tables"]
         other_cols_alias = [col["name"] for col in other_columns]
         other_cols_exprs = [col["expr"] for col in other_columns]
-        query_expr, table_columns, months_keep_history_max = table_cnf["query_expr"], table_cnf["table_columns"], table_cnf["months_keep_history_max"]
+        query_expr, table_columns, months_keep_history_max = (
+            table_cnf["query_expr"],
+            table_cnf["table_columns"],
+            table_cnf["months_keep_history_max"],
+        )
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
         source_ilm = config.action == "SOURCE_ILM"
         if config.add_ldb_columns:
@@ -375,11 +436,11 @@ class OracleEngine(DatabaseEngine):
     l_referencing_tables t_referencing_tables := t_referencing_tables({referencing_tables});
     l_process_start date;
     l_record_count pls_integer := 0;
-    l_plsql clob := {'null' if config.generate_script else ':plsql_code'};
+    l_plsql clob := {"null" if config.generate_script else ":plsql_code"};
     l_sqlcode number := null;
     l_out_message varchar2(200) := null;"""
         if not has_lob_columns:
-            cols_expr = ", ".join(["A.*"] + other_cols_exprs)
+            cols_expr = ", ".join(["A.*", *other_cols_exprs])
             plsql += f"""
     l_chunk_size pls_integer := {config.chunk_size}; l_chunk_start date;
     cursor c_records is
@@ -404,7 +465,7 @@ begin
         if r_rec.count <= 0 then
             exit;
         end if;"""
-            if (config.mode in ("EXECUTE", "SCRIPT")):
+            if config.mode in ("EXECUTE", "SCRIPT"):
                 if source_ilm and nvl(months_keep_history_max, 1) > 0:
                     plsql += f"""
         for i in 1 .. r_rec.count loop
@@ -459,10 +520,10 @@ end;"""
             conn: Active Oracle connection.
         Returns:
             Current system date as Python date."""
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT SYSDATE FROM dual")  # type: ignore
+            cursor.execute("SELECT SYSDATE FROM dual")
             sysdate: datetime = cursor.fetchone()[0]
             return sysdate
         except Exception:
@@ -478,32 +539,34 @@ end;"""
         Args:
             conn: Active Oracle connection.
             plsql_code: The PL/SQL block to execute."""
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            cursor.setinputsizes(plsql_code=oracledb.CLOB)  # type: ignore
-            cursor.execute(plsql_code, {"plsql_code": plsql_code})  # type: ignore
+            cursor.setinputsizes(plsql_code=oracledb.CLOB)
+            cursor.execute(plsql_code, {"plsql_code": plsql_code})
         finally:
             if cursor:
                 cursor.close()
 
     @staticmethod
-    def get_status(conn: oracledb.Connection, process_date: str) -> List[Dict[str, Any]]:
+    def get_status(conn: oracledb.Connection, process_date: str) -> list[dict[str, Any]]:
         """Loads status from ldb_ctl for the given process date.
         Args:
             conn: Active Oracle connection.
             process_date: Date in 'YYYYMMDD' format.
         Returns:
             List of status rows."""
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            cursor.execute( # type: ignore
+            cursor.execute(
                 """SELECT ctl_owner, ctl_table_name, ctl_status
                 FROM ldb_ctl
-                WHERE ctl_process_date = TO_DATE(:1, 'YYYYMMDD')""", [process_date])
-            cols = [col[0].lower() for col in cursor.description]  # type: ignore
-            return [dict(zip(cols, row)) for row in cursor.fetchall()]  # type: ignore
+                WHERE ctl_process_date = TO_DATE(:1, 'YYYYMMDD')""",
+                [process_date],
+            )
+            cols = [col[0].lower() for col in cursor.description]
+            return [dict(zip(cols, row, strict=True)) for row in cursor.fetchall()]
         finally:
             if cursor:
                 cursor.close()
@@ -518,13 +581,14 @@ end;"""
             process_date: Target process date in 'YYYYMMDD'.
         Returns:
             Number of rows processed or 0 if none found or mismatched date."""
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            cursor.execute( # type: ignore
+            cursor.execute(
                 """SELECT ctl_rows_processed
                 FROM ldb_ctl WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD')""",
-                [owner, table_name, process_date])
+                [owner, table_name, process_date],
+            )
             result = cursor.fetchone()
             return result[0] if result else 0
         except Exception:
@@ -536,17 +600,23 @@ end;"""
 
     @staticmethod
     def save_error_status(
-        conn: oracledb.Connection, config: Config, owner: str, table_name: str, process_date: str, process_start: datetime, message: str,
-        plsql_code: str
+        conn: oracledb.Connection,
+        config: Config,
+        owner: str,
+        table_name: str,
+        process_date: str,
+        process_start: datetime,
+        message: str,
+        plsql_code: str,
     ) -> None:
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
             process_end = OracleEngine.get_system_date(conn)
-            sqlcode = cursor.var(oracledb.NUMBER)  # type: ignore
-            out_message = cursor.var(oracledb.STRING)  # type: ignore
-            cursor.callproc( # type: ignore
-                'check_save_status',
+            sqlcode = cursor.var(oracledb.NUMBER)
+            out_message = cursor.var(oracledb.STRING)
+            cursor.callproc(
+                "check_save_status",
                 [
                     owner,
                     table_name,
@@ -560,8 +630,8 @@ end;"""
                     0,
                     plsql_code,
                     sqlcode,
-                    out_message
-                ]
+                    out_message,
+                ],
             )
             conn.commit()
         except Exception:
@@ -571,7 +641,9 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def all_status_tend(conn: oracledb.Connection, tables_config: Dict[Tuple[str, str], Any], process_date: str) -> bool:
+    def all_status_tend(
+        conn: oracledb.Connection, tables_config: dict[tuple[str, str], Any], process_date: str
+    ) -> bool:
         """Checks if all referenced tables have status "Status.TABLE_END" in ldb_ctl.
         Args:
             conn: Active Oracle connection.
@@ -579,17 +651,18 @@ end;"""
             process_date: Processing date in 'YYYYMMDD' format.
         Returns:
             True if all tables have status "Status.TABLE_END" for the given process date, False otherwise."""
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
             for (owner, table_name), table_cnf in tables_config.items():
                 if table_cnf["skip"]:
                     continue
-                cursor.execute( # type: ignore
+                cursor.execute(
                     f"""SELECT ctl_status FROM ldb_ctl
                     WHERE ctl_owner = :1 AND ctl_table_name = :2
                     AND ctl_process_date = TO_DATE(:3, 'YYYYMMDD') AND ctl_status = '{Status.TABLE_END}'""",
-                    [owner, table_name, process_date])
+                    [owner, table_name, process_date],
+                )
                 if not cursor.fetchone():
                     return False
             return True
@@ -598,11 +671,11 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def ensure_users(conn: oracledb.Connection, users: Sequence[UserDefinition]) -> List[str]:
-        created: List[str] = []
+    def ensure_users(conn: oracledb.Connection, users: Sequence[UserDefinition]) -> list[str]:
+        created: list[str] = []
         if not users:
             return created
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         changed = False
         try:
             cursor = conn.cursor()
@@ -622,9 +695,13 @@ end;"""
                     created.append(fmttd_username)
                     changed = True
                     if not user.default_tablespace:
-                        tablespace_for_quota = OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
+                        tablespace_for_quota = (
+                            OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
+                        )
                 else:
-                    tablespace_for_quota = OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
+                    tablespace_for_quota = (
+                        OracleEngine._get_user_default_tablespace(cursor, user.name) or database_default_tablespace
+                    )
                 admin_option_roles = set(OracleEngine._format_identifier(r) for r in user.roles_with_admin_option)
                 for role in user.roles:
                     fmttd_role_name = OracleEngine._format_identifier(role)
@@ -658,11 +735,11 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_tables(conn: oracledb.Connection, tables: Sequence[TableDefinition]) -> List[str]:
-        created: List[str] = []
+    def ensure_tables(conn: oracledb.Connection, tables: Sequence[TableDefinition]) -> list[str]:
+        created: list[str] = []
         if not tables:
             return created
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         changed = False
         try:
             cursor = conn.cursor()
@@ -704,8 +781,8 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition, table_cnf: Dict[str, Any]) -> None:
-        cursor: Optional[oracledb.Cursor] = None
+    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition, table_cnf: dict[str, Any]) -> None:
+        cursor: oracledb.Cursor | None = None
         fmttd_owner = OracleEngine._format_identifier(table.owner)
         fmttd_table_name = OracleEngine._format_identifier(table.name)
         logger.debug(f"Ensuring structure for table {table.owner}.{table.name} conn: {conn}")
@@ -728,11 +805,13 @@ end;"""
                             sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} MODIFY ({column_definition})"
                             OracleEngine._execute_ddl(conn, cursor, sql)
             existing_indexes = OracleEngine._get_table_indexes(cursor, fmttd_owner, fmttd_table_name)
-            desired_pk = tuple((table.primary_key or ()))
+            desired_pk = tuple(table.primary_key or ())
             fmttd_desired_pk = tuple(OracleEngine._format_identifier(col) for col in desired_pk)
-            existing_pk_name, existing_pk_cols, existing_pk_index = OracleEngine._get_primary_key_info(cursor, table.owner, table.name)
+            existing_pk_name, existing_pk_cols, existing_pk_index = OracleEngine._get_primary_key_info(
+                cursor, table.owner, table.name
+            )
             fmttd_existing_pk_cols = tuple(OracleEngine._format_identifier(col) for col in existing_pk_cols)
-            fmttd_existing_pk_index = (OracleEngine._format_identifier(existing_pk_index) if existing_pk_index else None)
+            fmttd_existing_pk_index = OracleEngine._format_identifier(existing_pk_index) if existing_pk_index else None
             desired_constraint_name = f"{table.name}_PK"
             fmttd_desired_constraint_name = OracleEngine._format_identifier(desired_constraint_name)
             if desired_pk:
@@ -763,7 +842,9 @@ end;"""
                     recreate_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_constraint_name} PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
                     OracleEngine._execute_ddl(conn, cursor, recreate_pk_sql)
             elif fmttd_existing_pk_cols and existing_pk_name:
-                drop_unexpected_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {existing_pk_name}"
+                drop_unexpected_pk_sql = (
+                    f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {existing_pk_name}"
+                )
                 OracleEngine._execute_ddl(conn, cursor, drop_unexpected_pk_sql)
                 index_to_drop = fmttd_existing_pk_index or existing_pk_name
                 if index_to_drop:
@@ -809,14 +890,16 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def get_primary_key_columns(conn: oracledb.Connection, owner: str, table_name: str, table_cnf: Dict[str, Any]) -> Tuple[str, ...]:
-        cursor: Optional[oracledb.Cursor] = None
+    def get_primary_key_columns(
+        conn: oracledb.Connection, owner: str, table_name: str, table_cnf: dict[str, Any]
+    ) -> tuple[str, ...]:
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
             _, columns, _ = OracleEngine._get_primary_key_info(cursor, owner, table_name)
             if columns:
                 return tuple(col for col in columns)
-            cursor.execute( # type: ignore
+            cursor.execute(
                 """
                 SELECT i.index_name, i.uniqueness, c.column_name, s.distinct_keys
                 FROM dba_indexes i JOIN dba_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name
@@ -828,9 +911,18 @@ end;"""
                 owner=owner,
                 table_name=table_name,
             )
-            indexes: Dict[str, Dict[str, Any]] = {}
-            for index_name, uniqueness, column_name, distinct_keys in cast(Iterable[Tuple[str, str, str, Optional[int]]], cursor):
-                index_info = indexes.setdefault(index_name, {"columns": [], "unique": uniqueness == "UNIQUE", "distinct_keys": None, })
+            indexes: dict[str, dict[str, Any]] = {}
+            for index_name, uniqueness, column_name, distinct_keys in cast(
+                Iterable[tuple[str, str, str, int | None]], cursor
+            ):
+                index_info = indexes.setdefault(
+                    index_name,
+                    {
+                        "columns": [],
+                        "unique": uniqueness == "UNIQUE",
+                        "distinct_keys": None,
+                    },
+                )
                 index_info["columns"].append(column_name)
                 if distinct_keys is not None:
                     try:
@@ -856,11 +948,11 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def ensure_roles(conn: oracledb.Connection, roles: Sequence[RoleDefinition]) -> List[str]:
-        created: List[str] = []
+    def ensure_roles(conn: oracledb.Connection, roles: Sequence[RoleDefinition]) -> list[str]:
+        created: list[str] = []
         if not roles:
             return created
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         changed = False
         try:
             cursor = conn.cursor()
@@ -884,11 +976,11 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_sequences(conn: oracledb.Connection, sequences: Sequence[SequenceDefinition]) -> List[str]:
-        created: List[str] = []
+    def ensure_sequences(conn: oracledb.Connection, sequences: Sequence[SequenceDefinition]) -> list[str]:
+        created: list[str] = []
         if not sequences:
             return created
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         changed = False
         try:
             cursor = conn.cursor()
@@ -929,11 +1021,11 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_database_links(conn: oracledb.Connection, links: Sequence[DatabaseLinkDefinition]) -> List[str]:
-        created: List[str] = []
+    def ensure_database_links(conn: oracledb.Connection, links: Sequence[DatabaseLinkDefinition]) -> list[str]:
+        created: list[str] = []
         if not links:
             return created
-        cursor: Optional[oracledb.Cursor] = None
+        cursor: oracledb.Cursor | None = None
         changed = False
         try:
             cursor = conn.cursor()
@@ -960,9 +1052,11 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_table_privileges(conn: oracledb.Connection, role: str, tables: Sequence[Tuple[str, str]], privileges: Sequence[str]) -> List[str]:
-        cursor: Optional[oracledb.Cursor] = None
-        granted: List[str] = []
+    def ensure_table_privileges(
+        conn: oracledb.Connection, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[str]:
+        cursor: oracledb.Cursor | None = None
+        granted: list[str] = []
         changed = False
         if not tables:
             return granted
@@ -974,7 +1068,9 @@ end;"""
                 fmttd_table_name = OracleEngine._format_identifier(table_name)
                 for privilege in privileges:
                     privilege_upper = privilege.upper()
-                    if OracleEngine._role_has_table_priv(cursor, role.upper(), owner.upper(), table_name.upper(), privilege_upper):
+                    if OracleEngine._role_has_table_priv(
+                        cursor, role.upper(), owner.upper(), table_name.upper(), privilege_upper
+                    ):
                         continue
                     sql = f"GRANT {privilege_upper} ON {fmttd_owner}.{fmttd_table_name} TO {fmt_role}"
                     OracleEngine._execute_ddl(conn, cursor, sql)
@@ -992,11 +1088,11 @@ end;"""
         return granted
 
     @staticmethod
-    def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> List[str]:
-        cursor: Optional[oracledb.Cursor] = None
+    def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> list[str]:
+        cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(owner)}")  # type: ignore[arg-type]
+            cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(owner)}")
             for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
                 OracleEngine._execute_ddl(conn, cursor, statement)
             return SUPPORTING_OBJECT_LIST
@@ -1009,7 +1105,7 @@ end;"""
 
     @staticmethod
     def get_identifier_str(identifier: str) -> str:
-        """ Returns the identifier string required to query dictionary views.
+        """Returns the identifier string required to query dictionary views.
         Args:
             indentifier: The identifier string to process.
         Returns:
@@ -1021,8 +1117,8 @@ end;"""
         return identifier.upper()
 
     @staticmethod
-    def get_ldb_columns_expressions() -> Tuple[str, str]:
-        """ Returns the expressions for the LDB process date and insert date columns.
+    def get_ldb_columns_expressions() -> tuple[str, str]:
+        """Returns the expressions for the LDB process date and insert date columns.
         Returns:
             A tuple containing the process date expression and insert date expression.
         """
@@ -1038,7 +1134,7 @@ end;"""
 
     # format / expressions helpers
     @staticmethod
-    def _format_identifier(name: Optional[str]) -> str:
+    def _format_identifier(name: str | None) -> str:
         """Formats an Oracle identifier, quoting if necessary.
         Args:
             name: The identifier name as appears data dictionary.
@@ -1052,7 +1148,7 @@ end;"""
 
     @staticmethod
     def _quote(identifier: str) -> str:
-        escaped = identifier.replace("\"", "\"\"")
+        escaped = identifier.replace('"', '""')
         return f'"{escaped}"'
 
     @staticmethod
@@ -1062,67 +1158,77 @@ end;"""
 
     # metadata and privilege helpers
     @staticmethod
-    def _object_exists(cursor: oracledb.Cursor, query: str, params: Sequence[Any]) -> bool:  # type: ignore[valid-type]
-        cursor.execute(query, params)  # type: ignore[arg-type]
+    def _object_exists(cursor: oracledb.Cursor, query: str, params: Sequence[Any]) -> bool:
+        cursor.execute(query, tuple(params))
         return cursor.fetchone() is not None
 
     @staticmethod
-    def _user_has_role(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2", [username, role])
-
-    @staticmethod
-    def _user_has_role_with_admin_option(cursor: oracledb.Cursor, username: str, role: str) -> bool:  # type: ignore[valid-type]
+    def _user_has_role(cursor: oracledb.Cursor, username: str, role: str) -> bool:
         return OracleEngine._object_exists(
-            cursor, "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2 AND admin_option = 'YES'", [username, role]
+            cursor, "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2", [username, role]
         )
 
     @staticmethod
-    def _user_has_sys_priv(cursor: oracledb.Cursor, username: str, privilege: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_sys_privs WHERE grantee = :1 AND privilege = :2", [username, privilege])
+    def _user_has_role_with_admin_option(cursor: oracledb.Cursor, username: str, role: str) -> bool:
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_role_privs WHERE grantee = :1 AND granted_role = :2 AND admin_option = 'YES'",
+            [username, role],
+        )
 
     @staticmethod
-    def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:  # type: ignore[valid-type]
+    def _user_has_sys_priv(cursor: oracledb.Cursor, username: str, privilege: str) -> bool:
         return OracleEngine._object_exists(
-            cursor, """
+            cursor, "SELECT 1 FROM dba_sys_privs WHERE grantee = :1 AND privilege = :2", [username, privilege]
+        )
+
+    @staticmethod
+    def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:
+        return OracleEngine._object_exists(
+            cursor,
+            """
             SELECT 1
               FROM dba_tab_privs
              WHERE grantee = :grantee
                AND owner = :owner
                AND table_name = :table_name
                AND privilege = :privilege
-            """, [role, owner, table_name, privilege],
+            """,
+            [role, owner, table_name, privilege],
         )
 
     @staticmethod
-    def _role_exists(cursor: oracledb.Cursor, role: str) -> bool:  # type: ignore[valid-type]
+    def _role_exists(cursor: oracledb.Cursor, role: str) -> bool:
         return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_roles WHERE role = :1", [role])
 
     @staticmethod
-    def _user_exists(cursor: oracledb.Cursor, username: str) -> bool:  # type: ignore[valid-type]
+    def _user_exists(cursor: oracledb.Cursor, username: str) -> bool:
         return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_users WHERE username = :1", [username])
 
     @staticmethod
-    def _get_database_default_tablespace(cursor: oracledb.Cursor) -> Optional[str]:  # type: ignore[valid-type]
-        cursor.execute("SELECT property_value FROM database_properties WHERE property_name = 'DEFAULT_PERMANENT_TABLESPACE'")  # type: ignore
+    def _get_database_default_tablespace(cursor: oracledb.Cursor) -> str | None:
+        cursor.execute(
+            "SELECT property_value FROM database_properties WHERE property_name = 'DEFAULT_PERMANENT_TABLESPACE'"
+        )
         row = cursor.fetchone()
         if row and row[0]:
             return str(row[0])
         return None
 
     @staticmethod
-    def _get_user_default_tablespace(cursor: oracledb.Cursor, username: str) -> Optional[str]:  # type: ignore[valid-type]
-        cursor.execute("SELECT default_tablespace FROM dba_users WHERE username = :username", username=username)  # type: ignore
+    def _get_user_default_tablespace(cursor: oracledb.Cursor, username: str) -> str | None:
+        cursor.execute("SELECT default_tablespace FROM dba_users WHERE username = :username", username=username)
         row = cursor.fetchone()
         if row and row[0]:
             return str(row[0])
         return None
 
     @staticmethod
-    def _ensure_unlimited_quota(cursor: oracledb.Cursor, username: str, tablespace: Optional[str]) -> bool:  # type: ignore[valid-type]
+    def _ensure_unlimited_quota(cursor: oracledb.Cursor, username: str, tablespace: str | None) -> bool:
         if not tablespace:
             return False
         tablespace_name = OracleEngine._format_identifier(tablespace)
-        cursor.execute( # type: ignore
+        cursor.execute(
             """
             SELECT max_bytes
               FROM dba_ts_quotas
@@ -1140,34 +1246,46 @@ end;"""
         return True
 
     @staticmethod
-    def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_tables WHERE owner = :1 AND table_name = :2", [owner, table_name], )
-
-    @staticmethod
-    def _index_exists(cursor: oracledb.Cursor, owner: str, index_name: str) -> bool:  # type: ignore[valid-type]
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM dba_indexes WHERE owner = :1 AND index_name = :2", [owner, index_name], )
-
-    @staticmethod
-    def _constraint_exists(cursor: oracledb.Cursor, owner: str, constraint_name: str) -> bool:  # type: ignore[valid-type]
+    def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:
         return OracleEngine._object_exists(
-            cursor, "SELECT 1 FROM dba_constraints WHERE owner = :1 AND constraint_name = :2", [owner, constraint_name],
+            cursor,
+            "SELECT 1 FROM dba_tables WHERE owner = :1 AND table_name = :2",
+            [owner, table_name],
         )
 
     @staticmethod
-    def _sequence_exists(cursor: oracledb.Cursor, owner: str, sequence_name: str) -> bool:  # type: ignore[valid-type]
+    def _index_exists(cursor: oracledb.Cursor, owner: str, index_name: str) -> bool:
         return OracleEngine._object_exists(
-            cursor, "SELECT 1 FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = :2", [owner, sequence_name],
+            cursor,
+            "SELECT 1 FROM dba_indexes WHERE owner = :1 AND index_name = :2",
+            [owner, index_name],
         )
 
     @staticmethod
-    def _register_connection_env(conn: oracledb.Connection, env: Optional[str]) -> None:
+    def _constraint_exists(cursor: oracledb.Cursor, owner: str, constraint_name: str) -> bool:
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_constraints WHERE owner = :1 AND constraint_name = :2",
+            [owner, constraint_name],
+        )
+
+    @staticmethod
+    def _sequence_exists(cursor: oracledb.Cursor, owner: str, sequence_name: str) -> bool:
+        return OracleEngine._object_exists(
+            cursor,
+            "SELECT 1 FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = :2",
+            [owner, sequence_name],
+        )
+
+    @staticmethod
+    def _register_connection_env(conn: oracledb.Connection, env: str | None) -> None:
         if env:
             OracleEngine._connection_envs[id(conn)] = env
         else:
             OracleEngine._connection_envs.pop(id(conn), None)
 
     @staticmethod
-    def _get_connection_env(conn: oracledb.Connection) -> Optional[str]:
+    def _get_connection_env(conn: oracledb.Connection) -> str | None:
         return OracleEngine._connection_envs.get(id(conn))
 
     @staticmethod
@@ -1177,24 +1295,27 @@ end;"""
             log_statement = log_statement[:100] + " ... [truncated]"
         statement = OracleEngine._PRIVATE_DDL_MARK.sub(lambda m: m.group(1), statement)
         logger.info("Executing %s DDL: %s", OracleEngine._get_connection_env(conn), " ".join(log_statement.split()))
-        cursor.execute(statement)  # type: ignore[arg-type]
+        cursor.execute(statement)
 
     @staticmethod
     def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:
         return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name])
 
     @staticmethod
-    def _get_primary_key_info(cursor: oracledb.Cursor, owner: str, table_name: str) -> Tuple[Optional[str], Tuple[str, ...], Optional[str]]:
-        cursor.execute(  # type: ignore
+    def _get_primary_key_info(
+        cursor: oracledb.Cursor, owner: str, table_name: str
+    ) -> tuple[str | None, tuple[str, ...], str | None]:
+        cursor.execute(
             """
             SELECT constraint_name, index_name
               FROM dba_constraints
              WHERE owner = :1
                AND table_name = :2
                AND constraint_type = 'P'
-            """, [owner, table_name]
+            """,
+            [owner, table_name],
         )
-        cursor.execute(  # type: ignore
+        cursor.execute(
             """
             SELECT constraint_name, index_name
               FROM dba_constraints
@@ -1208,11 +1329,11 @@ end;"""
         if not row:
             return None, (), None
         constraint_name, index_name = row
-        cursor.execute( # type: ignore
+        cursor.execute(
             "SELECT column_name FROM dba_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
             [owner, constraint_name],
         )
-        columns = tuple(r[0] for r in cast(Iterable[Tuple[str]], cursor))
+        columns = tuple(r[0] for r in cast(Iterable[tuple[str]], cursor))
         return constraint_name, columns, index_name
 
     @staticmethod
@@ -1247,9 +1368,10 @@ end;"""
         return False
 
     @staticmethod
-    def _get_table_indexes(cursor: oracledb.Cursor, owner: str,
-                           table_name: str) -> Dict[str, Tuple[Tuple[str, ...], bool]]:  # type: ignore[valid-type]
-        cursor.execute(  # type: ignore[arg-type]
+    def _get_table_indexes(
+        cursor: oracledb.Cursor, owner: str, table_name: str
+    ) -> dict[str, tuple[tuple[str, ...], bool]]:
+        cursor.execute(
             """
             SELECT i.index_name, i.uniqueness, c.column_name
               FROM dba_indexes i JOIN dba_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name WHERE i.owner = :owner
@@ -1259,14 +1381,14 @@ end;"""
             owner=owner,
             table_name=table_name,
         )
-        indexes: Dict[str, Dict[str, Any]] = {}
-        for index_name, uniqueness, column_name in cast(Iterable[Tuple[str, str, str]], cursor):
+        indexes: dict[str, dict[str, Any]] = {}
+        for index_name, uniqueness, column_name in cast(Iterable[tuple[str, str, str]], cursor):
             index_info = indexes.setdefault(index_name, {"columns": [], "unique": uniqueness == "UNIQUE"})
             index_info["columns"].append(column_name)
         return {name: (tuple(info["columns"]), bool(info["unique"])) for name, info in indexes.items()}
 
     @staticmethod
-    def _determine_process_date_column(table: TableDefinition) -> Optional[str]:
+    def _determine_process_date_column(table: TableDefinition) -> str | None:
         available_columns = {column.name for column in table.columns}
         for candidate in ("LDB_PROCESS_DATE", "LDB_PROCESS_DATE"):
             if candidate in available_columns:
@@ -1274,25 +1396,29 @@ end;"""
         return None
 
     @staticmethod
-    def _prepare_desired_indexes(table: TableDefinition, ) -> Dict[str, Tuple[Tuple[str, ...], bool]]:
-        desired_pk = tuple((table.primary_key or ()))
+    def _prepare_desired_indexes(
+        table: TableDefinition,
+    ) -> dict[str, tuple[tuple[str, ...], bool]]:
+        desired_pk = tuple(table.primary_key or ())
         process_date_column = OracleEngine._determine_process_date_column(table)
-        desired_indexes: Dict[str, Tuple[Tuple[str, ...], bool]] = {}
+        desired_indexes: dict[str, tuple[tuple[str, ...], bool]] = {}
         for index in table.indexes:
             columns = tuple(index.columns)
-            if (process_date_column and process_date_column not in columns and (not desired_pk or columns != desired_pk)):
-                columns = columns + (process_date_column, )
+            if process_date_column and process_date_column not in columns and (not desired_pk or columns != desired_pk):
+                columns = (*columns, process_date_column)
             desired_indexes[index.name] = (columns, index.unique)
         return desired_indexes
 
     @staticmethod
-    def _choose_best_index_for_primary_key(indexes: IndexMap, column_metadata: ColumnMetadata) -> Optional[Tuple[str, ...]]:
-        candidates: List[Dict[str, Any]] = []
+    def _choose_best_index_for_primary_key(
+        indexes: IndexMap, column_metadata: ColumnMetadata
+    ) -> tuple[str, ...] | None:
+        candidates: list[dict[str, Any]] = []
         for index_name, info in indexes.items():
             columns: Sequence[str] = info.get("columns", [])
             if not columns:
                 continue
-            column_defs: List[ColumnDefinition] = []
+            column_defs: list[ColumnDefinition] = []
             for col in columns:
                 column_def = column_metadata.get(col)
                 if column_def is None:
@@ -1301,13 +1427,15 @@ end;"""
                 column_defs.append(column_def)
             if not column_defs:
                 continue
-            candidates.append({
-                "name": index_name,
-                "columns": tuple(col.name for col in column_defs),
-                "unique": bool(info.get("unique")),
-                "distinct_keys": info.get("distinct_keys"),
-                "all_not_null": all(not col.nullable for col in column_defs),
-            })
+            candidates.append(
+                {
+                    "name": index_name,
+                    "columns": tuple(col.name for col in column_defs),
+                    "unique": bool(info.get("unique")),
+                    "distinct_keys": info.get("distinct_keys"),
+                    "all_not_null": all(not col.nullable for col in column_defs),
+                }
+            )
         if not candidates:
             return None
 
@@ -1323,10 +1451,17 @@ end;"""
             except (TypeError, ValueError):
                 return -1
 
-        def choose(candidate_list: List[Dict[str, Any]]) -> Optional[Tuple[str, ...]]:
+        def choose(candidate_list: list[dict[str, Any]]) -> tuple[str, ...] | None:
             if not candidate_list:
                 return None
-            ordered = sorted(candidate_list, key=lambda item: (-score(item.get("distinct_keys")), len(item["columns"]), item["name"], ), )
+            ordered = sorted(
+                candidate_list,
+                key=lambda item: (
+                    -score(item.get("distinct_keys")),
+                    len(item["columns"]),
+                    item["name"],
+                ),
+            )
             best = ordered[0]
             return tuple(best["columns"])
 
@@ -1342,13 +1477,14 @@ end;"""
         return choose(non_unique)
 
     @staticmethod
-    def _drop_constraints_by_type(cursor: oracledb.Cursor, owner: str, table_name: str,
-                                  constraint_types: Sequence[str]) -> List[str]:  # type: ignore[valid-type]
-        dropped: List[str] = []
+    def _drop_constraints_by_type(
+        cursor: oracledb.Cursor, owner: str, table_name: str, constraint_types: Sequence[str]
+    ) -> list[str]:
+        dropped: list[str] = []
         if not constraint_types:
             return dropped
         type_list = ", ".join(f"'{constraint_type}'" for constraint_type in constraint_types)
-        cursor.execute(  # type: ignore[arg-type]
+        cursor.execute(
             f"""
             SELECT constraint_name
               FROM dba_constraints
@@ -1361,7 +1497,7 @@ end;"""
         )
         fmttd_owner = OracleEngine._format_identifier(owner)
         fmttd_table_name = OracleEngine._format_identifier(table_name)
-        for constraint_name, in cast(Iterable[Tuple[str]], cursor):
+        for (constraint_name,) in cast(Iterable[tuple[str]], cursor):
             fmttd_constraint_name = OracleEngine._format_identifier(constraint_name)
             sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {fmttd_constraint_name}"
             OracleEngine._execute_ddl(cursor.connection, cursor, sql)

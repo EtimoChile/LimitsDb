@@ -1,18 +1,25 @@
 # limitsdb/core/ldb_config_loader.py
 from __future__ import annotations
-import os, json
+
+import json
+import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, cast
+from typing import Any, cast
+
 import yaml
-from limitsdb.core.ldb_crypto import (is_encrypted as _IS_ENC, decrypt as _DECRYPT)
+
+from limitsdb.core.ldb_crypto import decrypt as _DECRYPT
+from limitsdb.core.ldb_crypto import is_encrypted as _IS_ENC
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_utils import resolve_schema_file, secret_keys_from_config
 
 logger = get_logger("config_loader")
 
+
 # --- utils --------------------------------------------------------------------
-def _deep_merge(a: Mapping[str, Any], b: Mapping[str, Any]) -> Dict[str, Any]:
-    res: Dict[str, Any] = dict(a)
+def _deep_merge(a: Mapping[str, Any], b: Mapping[str, Any]) -> dict[str, Any]:
+    res: dict[str, Any] = dict(a)
     for k, v in b.items():
         av = res.get(k)
         if isinstance(av, Mapping) and isinstance(v, Mapping):
@@ -21,7 +28,8 @@ def _deep_merge(a: Mapping[str, Any], b: Mapping[str, Any]) -> Dict[str, Any]:
             res[k] = v
     return res
 
-def _load_yaml(path: Path) -> Dict[str, Any]:
+
+def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
@@ -29,18 +37,19 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     if data is None:
         return {}
     if isinstance(data, dict):
-        return cast(Dict[str, Any], data)
+        return cast(dict[str, Any], data)
     raise TypeError(f"YAML root must be a mapping (dict) in {path}")
 
-def _read_env_overrides(prefix: str = "LDB_") -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
+
+def _read_env_overrides(prefix: str = "LDB_") -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for k, v in os.environ.items():
         if not k.startswith(prefix):
             continue
-        key = k[len(prefix):].lower().replace("__", ".").replace("_", ".")
+        key = k[len(prefix) :].lower().replace("__", ".").replace("_", ".")
         # basic typing
         if v.lower() in ("true", "false"):
-            out[key] = (v.lower() == "true")
+            out[key] = v.lower() == "true"
             continue
         try:
             out[key] = int(v)
@@ -55,7 +64,8 @@ def _read_env_overrides(prefix: str = "LDB_") -> Dict[str, Any]:
         out[key] = v
     return out
 
-def _apply_dot_set(cfg: Dict[str, Any], key: str, value: Any) -> None:
+
+def _apply_dot_set(cfg: dict[str, Any], key: str, value: Any) -> None:
     cur = cfg
     parts = key.split(".")
     for p in parts[:-1]:
@@ -64,27 +74,39 @@ def _apply_dot_set(cfg: Dict[str, Any], key: str, value: Any) -> None:
         cur = cur[p]
     cur[parts[-1]] = value
 
-def _apply_overrides(cfg: Dict[str, Any], kvs: Dict[str, Any]) -> Dict[str, Any]:
+
+def _apply_overrides(cfg: dict[str, Any], kvs: dict[str, Any]) -> dict[str, Any]:
     out = dict(cfg)
     for k, v in kvs.items():
         _apply_dot_set(out, k, v)
     return out
 
+
 # --- loaders ------------------------------------------------------------------
 def load_runtime_config(
-    *, schema: str, profile: Optional[str], cli_sets: Dict[str, Any], explicit_config_file: Optional[str] = None,
-    explicit_config_dir: Optional[str] = None, enforce_encrypted_secrets: bool = True
-) -> Dict[str, Any]:
+    *,
+    schema: str,
+    profile: str | None,
+    cli_sets: dict[str, Any],
+    explicit_config_file: str | None = None,
+    explicit_config_dir: str | None = None,
+    enforce_encrypted_secrets: bool = True,
+) -> dict[str, Any]:
     """
     config_file → ENV LDB_* → --set
     Then inject **decrypted** secrets from schemas/<schema>/secrets*.json.
     If enforce_encrypted_secrets=True, plaintext secrets are rejected.
     """
-    cfg: Dict[str, Any] = {}
+    cfg: dict[str, Any] = {}
     # 1) system/user dirs (or explicit)
     config_file = resolve_schema_file(
-        schema=schema, profile=profile, explicit_config_dir=explicit_config_dir, explicit_file=explicit_config_file, prefix_name="config",
-        extension_name="yml", description="configuration file"
+        schema=schema,
+        profile=profile,
+        explicit_config_dir=explicit_config_dir,
+        explicit_file=explicit_config_file,
+        prefix_name="config",
+        extension_name="yml",
+        description="configuration file",
     )
     if config_file:
         cfg = _deep_merge(cfg, _load_yaml(Path(config_file)))
@@ -96,10 +118,15 @@ def load_runtime_config(
     if cli_sets:
         cfg = _apply_overrides(cfg, cli_sets)
     # 7) Secrets (user > system), strictly enforced
-    secrets: Dict[str, Any] = {}
+    secrets: dict[str, Any] = {}
     secrets_path = resolve_schema_file(
-        schema=schema, profile=profile, explicit_config_dir=explicit_config_dir, explicit_file=None, prefix_name="secrets", extension_name="json",
-        description="secrets file"
+        schema=schema,
+        profile=profile,
+        explicit_config_dir=explicit_config_dir,
+        explicit_file=None,
+        prefix_name="secrets",
+        extension_name="json",
+        description="secrets file",
     )
     if secrets_path:
         secrets = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
@@ -118,12 +145,18 @@ def load_runtime_config(
     # minimal defaults
     return cfg
 
-def load_ilm_config(*, schema: str, profile: Optional[str], explicit_config_dir: Optional[str] = None) -> Dict[str, Any]:
+
+def load_ilm_config(*, schema: str, profile: str | None, explicit_config_dir: str | None = None) -> dict[str, Any]:
     """Load ILM config from schema/profile layers."""
-    ilm: Dict[str, Any] = {}
+    ilm: dict[str, Any] = {}
     ilm_config_path = resolve_schema_file(
-        schema=schema, profile=profile, explicit_config_dir=explicit_config_dir, explicit_file=None, prefix_name="ilm", extension_name="yml",
-        description="ILM configuration file"
+        schema=schema,
+        profile=profile,
+        explicit_config_dir=explicit_config_dir,
+        explicit_file=None,
+        prefix_name="ilm",
+        extension_name="yml",
+        description="ILM configuration file",
     )
     if ilm_config_path:
         ilm = _load_yaml(Path(ilm_config_path))

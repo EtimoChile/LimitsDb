@@ -55,10 +55,21 @@ Small, focused pull requests are preferred.
 
 ## Development Setup
 
-Clone the repository and install development dependencies:
+Clone the repository and install development dependencies with Poetry 2.5.1 or
+newer:
 
 ```bash
 git clone https://github.com/<repo>/limitsdb.git
 cd limitsdb
-pip install -e .[dev]
+poetry install --with dev
+poetry run pre-commit install
+```
+
+Before opening a pull request, run the same checks enforced by CI:
+
+```bash
+poetry run ruff format --check .
+poetry run ruff check .
+poetry run mypy limitsdb
+poetry run pytest
 ```

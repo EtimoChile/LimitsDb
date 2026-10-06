@@ -4,26 +4,21 @@ default_language_version:
 repos:
   - repo: local
     hooks:
-      - id: yapf
-        name: yapf
-        entry: poetry run yapf
+      - id: ruff-check
+        name: ruff check
+        entry: poetry run ruff check --fix
         language: system
-        types_or: [python]
-        args: ["-i"]
-
-  - repo: https://github.com/pycqa/flake8
-    rev: 7.1.1
-    hooks:
-      - id: flake8
-
-  - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.389  # o la última versión estable
-    hooks:
-      - id: pyright
-        additional_dependencies: []
-
-  - repo: local
-    hooks:
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: poetry run ruff format
+        language: system
+        types_or: [python, pyi]
+      - id: mypy
+        name: mypy strict
+        entry: poetry run mypy limitsdb
+        language: system
+        pass_filenames: false
       - id: pytest
         name: pytest
         entry: poetry run pytest

@@ -84,14 +84,10 @@ Spin up a minimal end-to-end run with the built-in scaffolding tools:
 
 ## Development & Testing
 
-To run the test suite, install the development dependencies (pytest, coverage, linters) either with Poetry or pip:
+Install the development dependencies with Poetry 2.5.1 or newer:
 
 ```bash
-# Using Poetry
 poetry install --with dev
-
-# Or with pip directly
-python -m pip install -r requirements-dev.txt
 ```
 
 Then execute the tests (optionally collecting coverage):
@@ -101,7 +97,7 @@ poetry run pytest -q
 poetry run coverage run -m pytest -q && poetry run coverage report
 ```
 
-Install the Git hook so `yapf`, `flake8`, `mypy`, and `pytest` run automatically on commits:
+Install the Git hook so Ruff, mypy, and pytest run automatically on commits:
 
 ```bash
 poetry run pre-commit install
@@ -114,6 +110,10 @@ You can lint/test everything locally without committing via:
 ```bash
 poetry run pre-commit run --all-files
 ```
+
+Pull requests and pushes to `development` or `main` run the same quality gates
+in GitHub Actions, then build and validate the distributions and install the
+wheel in a clean environment.
 
 ## CLI Commands
 
@@ -353,9 +353,10 @@ Booleans accept `true/false`, `1/0`, `on/off` (case-insensitive).
 Format, lint, type-check:
 
 ```bash
-poetry run yapf . --recursive
-poetry run flake8
-poetry run mypy .
+poetry run ruff format .
+poetry run ruff check .
+poetry run mypy limitsdb
+poetry run pytest
 ```
 
 Add dependencies:

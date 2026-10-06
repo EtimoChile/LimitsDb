@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-05
-last-updated: 2026-10-05
+last-reviewed: 2026-10-06
+last-updated: 2026-10-06
 ---
 
 # Estado vigente
@@ -31,9 +31,13 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - Las operaciones ILM pueden archivar, purgar, crear objetos y administrar
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
-- La suite reside en `tests/`. La baseline verificada el 2026-10-05 es de 48
-  pruebas exitosas. `flake8` también termina sin hallazgos; `mypy` mantiene la
-  deuda registrada en `PEND-001`.
+- La suite reside en `tests/`. La baseline verificada el 2026-10-06 es de 48
+  pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina sin
+  hallazgos sobre los 22 módulos del paquete.
+- El workflow `.github/workflows/quality.yaml` ejecuta en Python 3.12 las
+  barreras de formato, lint, tipado, pruebas, pre-commit, construcción,
+  verificación de distribuciones e instalación limpia del wheel. La publicación
+  autorizada desde versiones etiquetadas permanece pendiente.
 - Inversiones Etimo SpA mantiene el proyecto. Los términos aplicables se
   distribuyen en los archivos de licencia, notices y edición comercial de la
   raíz.
@@ -49,3 +53,8 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   herramientas son puentes mínimos.
 - `DEC-005`: usar `LimitsDb`, `limitsdb` y `ldb` / `LDB` como identidad y
   prefijos públicos del proyecto.
+- `DEC-006`: mantener Python 3.12 como implementación del ciclo actual y no
+  iniciar una reescritura a Java sin evidencia nueva y una decisión sucesora.
+- `DEC-007`: unificar formato y lint con Ruff a 120 columnas, mantener `mypy`
+  estricto como autoridad de tipado y reproducir los controles en pre-commit y
+  CI.

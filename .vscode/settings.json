@@ -1,19 +1,21 @@
 {
   "python.analysis.extraPaths": ["."],
   "python.defaultInterpreterPath": ".venv/Scripts/python.exe",  // en Windows
-  "python.analysis.typeCheckingMode": "strict",
-  "editor.formatOnSave": true,
-  "editor.codeActionsOnSave": {
-    "source.organizeImports": "always",
-    "source.fixAll": "always"
-  },
+  "python.analysis.typeCheckingMode": "basic",
+  "markdown.styles": [
+    ".vscode/markdown-preview.css"
+  ],
   "files.exclude": {
     "**/__pycache__/": true
   },
   "[python]": {
     "editor.formatOnSaveMode": "file",
-    "editor.formatOnSave": false,
-    "editor.defaultFormatter": "eeyore.yapf",
-    "editor.formatOnType": false
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnType": false,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
   }
 }

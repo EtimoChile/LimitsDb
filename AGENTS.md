@@ -64,7 +64,7 @@ artificiales.
 - No cambiar a la vez comportamiento, formato de configuración y documentación
   sin pruebas que demuestren la migración o compatibilidad prevista.
 - Preservar Python `>=3.12,<4.0`, tipado estricto y las convenciones declaradas
-  en `pyproject.toml`, `.flake8` y `.pre-commit-config.yaml`, salvo decisión
+  en `pyproject.toml` y `.pre-commit-config.yaml`, salvo decisión
   explícita que actualice esos contratos.
 
 ## Seguridad, secretos y datos
@@ -92,7 +92,8 @@ Aplicar una verificación proporcional al cambio. La secuencia completa es:
 ```bash
 poetry run pytest
 poetry run mypy limitsdb
-poetry run flake8 limitsdb tests
+poetry run ruff check .
+poetry run ruff format --check .
 poetry run pre-commit run --all-files
 poetry build
 poetry run twine check dist/*

@@ -1,20 +1,27 @@
 from __future__ import annotations
-import base64, os, stat
+
+import base64
+import os
+import stat
 from pathlib import Path
-from typing import Optional
+
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 LDB_DIR = Path(os.path.expanduser("~/.limitsdb"))
 KEY_PATH = LDB_DIR / "ldb.key"
 
+
 def _b64e(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).decode("ascii")
+
 
 def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s.encode("ascii"))
 
+
 def _ensure_dir() -> None:
     LDB_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _chmod600(path: Path) -> None:
     try:
@@ -22,8 +29,10 @@ def _chmod600(path: Path) -> None:
     except Exception:
         pass
 
+
 def _generate_aes256_key() -> bytes:
     return AESGCM.generate_key(256)
+
 
 def load_or_create_key() -> bytes:
     env = os.getenv("LDB_MASTER_KEY")
@@ -56,17 +65,20 @@ def load_or_create_key() -> bytes:
     _chmod600(KEY_PATH)
     return key
 
-def encrypt(plaintext: str, key: Optional[bytes] = None) -> str:
+
+def encrypt(plaintext: str, key: bytes | None = None) -> str:
     key = key or load_or_create_key()
     aes = AESGCM(key)
     nonce = os.urandom(12)
     ct = aes.encrypt(nonce, plaintext.encode("utf-8"), associated_data=None)
     return f"enc:v1:aes256gcm:{_b64e(nonce)}:{_b64e(ct)}"
 
+
 def is_encrypted(val: str) -> bool:
     return val.startswith("enc:v1:aes256gcm:")
 
-def decrypt(token: str, key: Optional[bytes] = None) -> str:
+
+def decrypt(token: str, key: bytes | None = None) -> str:
     if not is_encrypted(token):
         raise ValueError("Attempted to decrypt a non-encrypted token.")
     key = key or load_or_create_key()
