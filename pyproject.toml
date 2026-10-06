@@ -80,6 +80,12 @@ strict = true
 packages = ["limitsdb"]
 exclude = "^tests/"
 
+[tool.pytest.ini_options]
+addopts = "-m 'not oracle_integration'"
+markers = [
+  "oracle_integration: requires an explicitly configured disposable Oracle database",
+]
+
 # para las libs externas sin stubs:
 [[tool.mypy.overrides]]
 module = [

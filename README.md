@@ -115,6 +115,25 @@ Pull requests and pushes to `development` or `main` run the same quality gates
 in GitHub Actions, then build and validate the distributions and install the
 wheel in a clean environment.
 
+Changes that affect the Oracle adapter, runner, or integration suite also run a
+separate Oracle integration workflow. It starts an Oracle Database Free
+container inside the Linux runner, uses only credentials local to that job, and
+destroys the database when the job finishes. The workflow does not connect to a
+shared or production database.
+
+The integration tests are excluded from the default test command. To run them
+against an explicitly disposable Oracle instance:
+
+```bash
+LDB_ORACLE_TEST_DSN=localhost:1521/FREEPDB1 \
+LDB_ORACLE_TEST_USER=system \
+LDB_ORACLE_TEST_PASSWORD=<test-only-password> \
+poetry run pytest -m oracle_integration
+```
+
+Never point these tests at an operational or shared database: they create and
+drop objects whose names begin with `LDBT_`.
+
 ## CLI Commands
 
 After `poetry install`, the following executables are available:

@@ -31,9 +31,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - Las operaciones ILM pueden archivar, purgar, crear objetos y administrar
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
-- La suite reside en `tests/`. La baseline verificada el 2026-10-06 es de 62
-  pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina sin
-  hallazgos sobre los 23 módulos del paquete.
+- La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-06 es
+  de 68 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
+  sin hallazgos sobre los 23 módulos del paquete. Dos pruebas de integración
+  Oracle se recolectan por separado y requieren una base desechable explícita.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
@@ -42,11 +43,17 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - Los límites de configuración, secretos, validación, conexión y ejecución
   exponen errores de dominio encadenados. Los archivos de secretos inválidos
   detienen la operación sin sobrescribirse y los fallos de workers producen un
-  resultado recuperable identificado por tabla.
+  resultado recuperable identificado por tabla. El coordinador reintenta en la
+  misma corrida un fallo parcial sólo si aumentó el contador procesado; sin
+  progreso lo convierte en `SKIPPED`.
 - El workflow `.github/workflows/quality.yaml` ejecuta en Python 3.12 las
   barreras de formato, lint, tipado, pruebas, pre-commit, construcción,
   verificación de distribuciones e instalación limpia del wheel. La publicación
   autorizada desde versiones etiquetadas permanece pendiente.
+- El workflow `.github/workflows/oracle-integration.yaml` levanta Oracle Free
+  efímero en un runner Linux para cambios relevantes y ejecución manual, con
+  imagen fijada por digest y credenciales locales al job; su primera ejecución
+  real en GitHub permanece pendiente.
 - Inversiones Etimo SpA mantiene el proyecto. Los términos aplicables se
   distribuyen en los archivos de licencia, notices y edición comercial de la
   raíz.

@@ -212,3 +212,85 @@ def test_choose_best_index_prioritizes_not_null_unique_and_distinct_keys():
     }
 
     assert OracleEngine._choose_best_index_for_primary_key(indexes, column_metadata) == ("A", "B")
+
+
+def test_ensure_tables_commits_changes_and_is_idempotent(monkeypatch: pytest.MonkeyPatch):
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class DummyConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = DummyCursor()
+            self.commits = 0
+            self.rollbacks = 0
+
+        def cursor(self):
+            return self.cursor_instance
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    conn = DummyConnection()
+    exists = iter((False, True))
+    executed = []
+    monkeypatch.setattr(OracleEngine, "_table_exists", lambda cursor, owner, table_name: next(exists))
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: executed.append(statement))
+    table = TableDefinition(owner="OWNER", name="ITEMS", columns=(ColumnDefinition(name="ID", data_type="integer"),))
+
+    first = OracleEngine.ensure_tables(conn, (table,))  # type: ignore[arg-type]
+    second = OracleEngine.ensure_tables(conn, (table,))  # type: ignore[arg-type]
+
+    assert first == ["owner.items"]
+    assert second == []
+    assert executed == ["CREATE TABLE owner.items (\n        id NUMBER(10)\n    )"]
+    assert conn.commits == 1
+    assert conn.rollbacks == 0
+    assert conn.cursor_instance.closed is True
+
+
+def test_ensure_tables_rolls_back_and_chains_ddl_failure(monkeypatch: pytest.MonkeyPatch):
+    cause = RuntimeError("DDL failed")
+
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class DummyConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = DummyCursor()
+            self.commits = 0
+            self.rollbacks = 0
+
+        def cursor(self):
+            return self.cursor_instance
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    conn = DummyConnection()
+    monkeypatch.setattr(OracleEngine, "_table_exists", lambda cursor, owner, table_name: False)
+    monkeypatch.setattr(
+        OracleEngine, "_execute_ddl", lambda connection, cursor, statement: (_ for _ in ()).throw(cause)
+    )
+    table = TableDefinition(owner="OWNER", name="ITEMS", columns=(ColumnDefinition(name="ID", data_type="integer"),))
+
+    with pytest.raises(ExecutionError) as caught:
+        OracleEngine.ensure_tables(conn, (table,))  # type: ignore[arg-type]
+
+    assert caught.value.__cause__ is cause
+    assert conn.commits == 0
+    assert conn.rollbacks == 1
+    assert conn.cursor_instance.closed is True
