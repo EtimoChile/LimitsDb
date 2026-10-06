@@ -1,7 +1,36 @@
+from types import SimpleNamespace
+
 import pytest
 
+from limitsdb.core.ldb_errors import DatabaseConnectionError, ExecutionError
 from limitsdb.db.ldb_engines import ColumnDefinition, IndexDefinition, TableDefinition
+from limitsdb.db.oracle import ldb_engine_impl
 from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
+
+
+def test_connection_failure_is_chained_domain_error(monkeypatch: pytest.MonkeyPatch):
+    cause = RuntimeError("driver failure")
+    monkeypatch.setattr(ldb_engine_impl.oracledb, "connect", lambda **kwargs: (_ for _ in ()).throw(cause))
+    config = SimpleNamespace(action="SOURCE_ILM", source_username="user", source_password="secret", source_dsn="dsn")
+
+    with pytest.raises(DatabaseConnectionError) as caught:
+        OracleEngine.get_connection(config)  # type: ignore[arg-type]
+
+    assert caught.value.__cause__ is cause
+    assert "secret" not in str(caught.value)
+
+
+def test_rows_processed_failure_is_not_reported_as_zero():
+    cause = RuntimeError("query failure")
+
+    class DummyConnection:
+        def cursor(self):
+            raise cause
+
+    with pytest.raises(ExecutionError) as caught:
+        OracleEngine.get_rows_processed(DummyConnection(), "OWNER", "TABLE", "20261006")  # type: ignore[arg-type]
+
+    assert caught.value.__cause__ is cause
 
 
 def test_get_date_condition_renders_expected_predicate():

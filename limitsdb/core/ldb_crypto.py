@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import os
 import stat
 from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from limitsdb.core.ldb_errors import SecretError
 
 LDB_DIR = Path(os.path.expanduser("~/.limitsdb"))
 KEY_PATH = LDB_DIR / "ldb.key"
@@ -26,8 +29,8 @@ def _ensure_dir() -> None:
 def _chmod600(path: Path) -> None:
     try:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except Exception:
-        pass
+    except OSError as exc:
+        raise SecretError(f"Unable to restrict permissions on key file {path}") from exc
 
 
 def _generate_aes256_key() -> bytes:
@@ -43,21 +46,21 @@ def load_or_create_key() -> bytes:
             k = base64.b64decode(env)
             if len(k) == 32:
                 return k
-        except Exception:
+        except (binascii.Error, ValueError):
             pass
         if len(env) == 32:
             return env.encode("utf-8")
-        raise ValueError("Invalid LDB_MASTER_KEY: use hex(64) / base64(32B) / raw(32B).")
+        raise SecretError("Invalid LDB_MASTER_KEY: use hex(64) / base64(32B) / raw(32B).")
 
     _ensure_dir()
     if KEY_PATH.exists():
         data = KEY_PATH.read_bytes()
         try:
             key = base64.b64decode(data)
-        except Exception:
+        except (binascii.Error, ValueError):
             key = data
         if len(key) != 32:
-            raise ValueError("Invalid key at ~/.limitsdb/ldb.key (expected 32 bytes).")
+            raise SecretError(f"Invalid key at {KEY_PATH} (expected 32 bytes).")
         return key
 
     key = _generate_aes256_key()
@@ -80,7 +83,7 @@ def is_encrypted(val: str) -> bool:
 
 def decrypt(token: str, key: bytes | None = None) -> str:
     if not is_encrypted(token):
-        raise ValueError("Attempted to decrypt a non-encrypted token.")
+        raise SecretError("Attempted to decrypt a non-encrypted token.")
     key = key or load_or_create_key()
     _, _, _, nonce_b64, ct_b64 = token.split(":", 4)
     aes = AESGCM(key)

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from limitsdb.core import ldb_runner
 from limitsdb.core.ldb_status import Status
 
@@ -56,3 +58,42 @@ def test_collect_privilege_targets():
     ]
     targets = ldb_runner._collect_privilege_targets(rows, "source_owner", DummyEngine())
     assert targets == [("A", "T1"), ("A", "T2")]
+
+
+def test_exception_details_supports_oracle_and_generic_errors():
+    oracle_error = SimpleNamespace(code=942, message="table missing")
+    assert ldb_runner._exception_details(Exception(oracle_error)) == (942, "table missing")
+    assert ldb_runner._exception_details(RuntimeError("worker stopped")) == (None, "worker stopped")
+
+
+def test_process_table_returns_recoverable_error_for_generic_failure(monkeypatch):
+    calls = {"saved": False, "closed": False}
+
+    class DummyEngine:
+        def get_connection(self, config):
+            return object()
+
+        def get_system_date(self, conn):
+            return "start"
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            return 3
+
+        def sql_block_run(self, conn, plsql_code):
+            raise RuntimeError("worker stopped")
+
+        def save_error_status(self, *args):
+            calls["saved"] = True
+
+        def close_connection(self, conn):
+            calls["closed"] = True
+
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: DummyEngine())
+    config = SimpleNamespace(
+        db_engine="oracle", action="SOURCE_ILM", source_username="user", source_password="pw", source_dsn="dsn"
+    )
+
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+
+    assert result == ("OWNER", "TABLE", Status.ERROR, 3, 3, None, "worker stopped")
+    assert calls == {"saved": True, "closed": True}

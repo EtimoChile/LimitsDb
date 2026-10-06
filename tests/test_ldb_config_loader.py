@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from limitsdb.core import ldb_config_loader
+from limitsdb.core.ldb_errors import ConfigurationError, SecretError
 
 
 def test_deep_merge_and_overrides():
@@ -67,3 +68,45 @@ def test_load_runtime_config_plaintext_allowed(tmp_path: Path, monkeypatch: pyte
     assert cfg["source_password"] == "plain"
     with pytest.raises(ValueError):
         ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={}, explicit_config_dir=None)
+
+
+def test_invalid_configuration_preserves_parser_cause(tmp_path: Path):
+    path = tmp_path / "config.yml"
+    path.write_text("broken: [", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError) as caught:
+        ldb_config_loader._load_yaml(path)
+
+    assert caught.value.__cause__ is not None
+    assert str(path) in str(caught.value)
+
+
+def test_invalid_secrets_are_not_treated_as_empty(tmp_path: Path):
+    path = tmp_path / "secrets.json"
+    path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(SecretError) as caught:
+        ldb_config_loader._load_secrets(path)
+
+    assert isinstance(caught.value.__cause__, json.JSONDecodeError)
+
+
+def test_decryption_failure_names_secret_without_exposing_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    secrets_file = tmp_path / "secrets.json"
+    token = "enc:v1:aes256gcm:sensitive-token"
+    secrets_file.write_text(json.dumps({"source_password": token}), encoding="utf-8")
+    monkeypatch.setattr(
+        ldb_config_loader,
+        "resolve_schema_file",
+        lambda **kwargs: None if kwargs["prefix_name"] == "config" else str(secrets_file),
+    )
+    monkeypatch.setattr(ldb_config_loader, "secret_keys_from_config", lambda: ["source_password"])
+    monkeypatch.setattr(ldb_config_loader, "_IS_ENC", lambda value: True)
+    monkeypatch.setattr(ldb_config_loader, "_DECRYPT", lambda value: (_ for _ in ()).throw(RuntimeError("bad tag")))
+
+    with pytest.raises(SecretError) as caught:
+        ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={})
+
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "source_password" in str(caught.value)
+    assert token not in str(caught.value)

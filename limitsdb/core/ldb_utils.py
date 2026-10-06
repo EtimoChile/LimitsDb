@@ -18,6 +18,7 @@ from platformdirs import PlatformDirs  # requerido
 if TYPE_CHECKING:
     from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_crypto import encrypt, is_encrypted, load_or_create_key
+from limitsdb.core.ldb_errors import SecretError, ValidationError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_meta import CliOnly, Help, Secret
 
@@ -104,7 +105,7 @@ def get_effective_credentials(
     dsn: str | None = getattr(cfg, dsn_key, None)
     missing = [key for key, value in ((user_key, user), (pwd_key, pwd), (dsn_key, dsn)) if not value]
     if missing:
-        raise ValueError(f"Missing {'/'.join(missing)} for action={cfg.action}")
+        raise ValidationError(f"Missing {'/'.join(missing)} for action={cfg.action}")
     assert user is not None and pwd is not None and dsn is not None
     return user, pwd, dsn
 
@@ -213,9 +214,12 @@ def write_or_update_secrets(schema: str, profile: str | None, config_root: str |
     current: dict[str, Any] = {}
     if p.exists():
         try:
-            current = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            current = {}
+            loaded: Any = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise SecretError(f"Unable to read secrets file at {p}: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise SecretError(f"Secrets root must be a mapping (object) in {p}")
+        current = loaded
     keys = secret_keys_from_config()
     if overwrite:
         current = {k: "" for k in keys}
@@ -233,9 +237,12 @@ def encrypt_secrets_in_place(schema: str, profile: str | None, config_root: str 
     if not p.exists():
         return None
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+        loaded: Any = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SecretError(f"Unable to read secrets file at {p}: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise SecretError(f"Secrets root must be a mapping (object) in {p}")
+    data: dict[str, Any] = loaded
     updated = False
     for k in secret_keys_from_config():
         v = data.get(k)

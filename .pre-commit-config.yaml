@@ -16,11 +16,11 @@ repos:
         types_or: [python, pyi]
       - id: mypy
         name: mypy strict
-        entry: poetry run mypy limitsdb
+        entry: poetry run python -m mypy limitsdb
         language: system
         pass_filenames: false
       - id: pytest
         name: pytest
-        entry: poetry run pytest
+        entry: poetry run python -m pytest
         language: system
         pass_filenames: false

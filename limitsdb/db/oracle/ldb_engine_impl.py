@@ -5,6 +5,7 @@ from typing import Any, ClassVar, Literal, cast
 
 import oracledb
 
+from limitsdb.core.ldb_errors import ConfigurationError, DatabaseConnectionError, ExecutionError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
@@ -223,14 +224,14 @@ class OracleEngine(DatabaseEngine):
             admin: Whether to use admin credentials.
         Returns:
             An active oracledb.Connection."""
+        user, password, dsn = get_effective_credentials(config, admin=admin, env=env)
         try:
-            user, password, dsn = get_effective_credentials(config, admin=admin, env=env)
             connection = oracledb.connect(user=user, password=password, dsn=dsn)
             OracleEngine._register_connection_env(connection, env)
             return cast(oracledb.Connection, connection)
-        except Exception:
+        except Exception as exc:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
-            raise
+            raise DatabaseConnectionError("Failed to connect to Oracle database") from exc
 
     @staticmethod
     def close_connection(conn: oracledb.Connection) -> None:
@@ -264,9 +265,9 @@ class OracleEngine(DatabaseEngine):
             )
             cols = [cast(str, col[0]).lower().removeprefix("cnf_") for col in cursor.description]
             return [dict(zip(cols, row, strict=True)) for row in cursor.fetchall()]
-        except Exception:
+        except Exception as exc:
             logger.critical("Failed to load configuration from Oracle.", exc_info=True)
-            raise
+            raise ConfigurationError("Failed to load ILM configuration from Oracle") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -526,9 +527,9 @@ end;"""
             cursor.execute("SELECT SYSDATE FROM dual")
             sysdate: datetime = cursor.fetchone()[0]
             return sysdate
-        except Exception:
+        except Exception as exc:
             logger.critical("Failed to retrieve system date from Oracle.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to retrieve system date from Oracle") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -591,9 +592,9 @@ end;"""
             )
             result = cursor.fetchone()
             return result[0] if result else 0
-        except Exception:
+        except Exception as exc:
             logger.critical(f"Unexpected error in get_rows_processed for {owner}.{table_name}:", exc_info=True)
-            return 0
+            raise ExecutionError(f"Failed to read rows processed for {owner}.{table_name}") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -634,8 +635,9 @@ end;"""
                 ],
             )
             conn.commit()
-        except Exception:
+        except Exception as exc:
             logger.critical(f"Unexpected error in process_table for {owner}.{table_name}:", exc_info=True)
+            raise ExecutionError(f"Failed to save error status for {owner}.{table_name}") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -725,10 +727,10 @@ end;"""
                     changed = True
             if changed:
                 conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure users.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle users") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -771,10 +773,10 @@ end;"""
                     changed = True
             if changed:
                 conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure tables.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle tables") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -881,10 +883,10 @@ end;"""
                     logger.info("Dropping unmanaged index %s on %s.%s", fmttd_index_name, fmttd_owner, fmttd_table_name)
                     drop_unmanaged_index_sql = f"DROP INDEX {fmttd_owner}.{fmttd_index_name}"
                     OracleEngine._execute_ddl(conn, cursor, drop_unmanaged_index_sql)
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure table structure.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle table structure") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -966,10 +968,10 @@ end;"""
                 changed = True
             if changed:
                 conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure roles.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle roles") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -1011,10 +1013,10 @@ end;"""
                 changed = True
             if changed:
                 conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure sequences.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle sequences") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -1042,10 +1044,10 @@ end;"""
                 changed = True
             if changed:
                 conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure database links.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle database links") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -1078,10 +1080,10 @@ end;"""
                     changed = True
             if changed:
                 conn.commit()
-        except Exception:
+        except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure table privileges.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle table privileges") from exc
         finally:
             if cursor:
                 cursor.close()
@@ -1096,9 +1098,9 @@ end;"""
             for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
                 OracleEngine._execute_ddl(conn, cursor, statement)
             return SUPPORTING_OBJECT_LIST
-        except Exception:
+        except Exception as exc:
             logger.critical("Failed to ensure supporting PL/SQL objects.", exc_info=True)
-            raise
+            raise ExecutionError("Failed to ensure Oracle supporting PL/SQL objects") from exc
         finally:
             if cursor:
                 cursor.close()

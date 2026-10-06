@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from limitsdb.core.ldb_crypto import load_or_create_key
+from limitsdb.core.ldb_errors import LimitsDbError
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
 from limitsdb.core.ldb_params_config import Config, build_config, parse_args
 from limitsdb.core.ldb_runner import ldb_run
@@ -31,21 +32,18 @@ def run_cli() -> None:
             reconfigure_logger(level=args.log_level)
         # Ensure encryption key exists and auto-encrypt secrets if user left cleartext.
         load_or_create_key()
-        try:
-            encrypt_secrets_in_place(
-                schema=args.schema,
-                profile=getattr(args, "profile", None),
-                config_root=getattr(args, "config_dir", None),
-            )
-        except Exception:  # pragma: no cover - log and continue
-            logger.warning("Auto-encrypt failed; continuing. Loader will enforce encrypted secrets.", exc_info=True)
+        encrypt_secrets_in_place(
+            schema=args.schema,
+            profile=getattr(args, "profile", None),
+            config_root=getattr(args, "config_dir", None),
+        )
         # Build final config and run
         cfg_dict = build_config({}, args)
         config = Config.from_dict(cfg_dict)
         reconfigure_logger(level=config.log_level)
         logger.debug("Effective config: %s", _mask_secrets(config.to_dict()))
         ldb_run(config)
-    except (ValueError, KeyError) as exc:
+    except (LimitsDbError, ValueError, KeyError) as exc:
         logger.error("%s", exc)
         logger.error(exc, exc_info=True)
         raise SystemExit(1) from exc

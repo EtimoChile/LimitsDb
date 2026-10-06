@@ -31,9 +31,13 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - Las operaciones ILM pueden archivar, purgar, crear objetos y administrar
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
-- La suite reside en `tests/`. La baseline verificada el 2026-10-06 es de 48
+- La suite reside en `tests/`. La baseline verificada el 2026-10-06 es de 56
   pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina sin
-  hallazgos sobre los 22 módulos del paquete.
+  hallazgos sobre los 23 módulos del paquete.
+- Los límites de configuración, secretos, validación, conexión y ejecución
+  exponen errores de dominio encadenados. Los archivos de secretos inválidos
+  detienen la operación sin sobrescribirse y los fallos de workers producen un
+  resultado recuperable identificado por tabla.
 - El workflow `.github/workflows/quality.yaml` ejecuta en Python 3.12 las
   barreras de formato, lint, tipado, pruebas, pre-commit, construcción,
   verificación de distribuciones e instalación limpia del wheel. La publicación
@@ -58,3 +62,5 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - `DEC-007`: unificar formato y lint con Ruff a 120 columnas, mantener `mypy`
   estricto como autoridad de tipado y reproducir los controles en pre-commit y
   CI.
+- `DEC-008`: traducir fallos en fronteras de subsistema a errores de dominio
+  encadenados y permitir capturas amplias sólo en fronteras documentadas.

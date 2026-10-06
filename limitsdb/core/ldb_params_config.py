@@ -14,6 +14,7 @@ from typing import (
 )
 
 from limitsdb.core.ldb_config_loader import load_runtime_config
+from limitsdb.core.ldb_errors import ValidationError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_meta import Cli, CliOnly, Env, Help, Secret
 from limitsdb.core.ldb_utils import resolve_schema_file  # markers for Annotated metadata
@@ -117,27 +118,29 @@ class Config:
     def __post_init__(self) -> None:
         normalized_mode = _normalize_mode(self.mode)
         if normalized_mode not in VALID_MODES:
-            raise ValueError(f"invalid mode: {self.mode}")
+            raise ValidationError(f"invalid mode: {self.mode}")
         self.mode = normalized_mode  # type: ignore[assignment]
         if self.mode == "SCRIPT":
             self.generate_script = True
         requires_connections = self.mode in MODES_REQUIRING_CONNECTIONS
         if not self.schema:
-            raise ValueError("schema is required")
+            raise ValidationError("schema is required")
         if self.db_engine not in ("oracle", "postgres"):
-            raise ValueError(f"invalid db_engine: {self.db_engine}")
+            raise ValidationError(f"invalid db_engine: {self.db_engine}")
         if (
             requires_connections
             and self.action == "SOURCE_ILM"
             and (not self.source_dsn or not self.source_username or not self.source_password)
         ):
-            raise ValueError("source_dsn, source_username and source_password are required for SOURCE_ILM action")
+            raise ValidationError("source_dsn, source_username and source_password are required for SOURCE_ILM action")
         if (
             requires_connections
             and self.action == "HISTORY_ILM"
             and (not self.history_dsn or not self.history_username or not self.history_password)
         ):
-            raise ValueError("history_dsn, history_username and history_password are required for HISTORY_ILM action")
+            raise ValidationError(
+                "history_dsn, history_username and history_password are required for HISTORY_ILM action"
+            )
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Config:
@@ -145,7 +148,7 @@ class Config:
         known = {field.name for field in fields(cls)}
         unknown = set(d) - known
         if unknown:
-            raise ValueError(f"Unknown configuration keys: {sorted(unknown)}")
+            raise ValidationError(f"Unknown configuration keys: {sorted(unknown)}")
         return cls(**d)
 
     def to_dict(self) -> dict[str, Any]:

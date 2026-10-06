@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from limitsdb.core.ldb_crypto import load_or_create_key
+from limitsdb.core.ldb_errors import LimitsDbError
 from limitsdb.core.ldb_logger import configure_logger, get_logger
 from limitsdb.core.ldb_utils import encrypt_secrets_in_place
 
@@ -34,7 +35,7 @@ def run_cli() -> None:
             logger.info("Secrets updated: %s", updated)
         else:
             logger.info("No secrets to update (file missing or already encrypted).")
-    except ValueError as exc:
+    except (LimitsDbError, ValueError) as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
 

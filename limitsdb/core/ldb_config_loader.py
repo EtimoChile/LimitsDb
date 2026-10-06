@@ -11,6 +11,7 @@ import yaml
 
 from limitsdb.core.ldb_crypto import decrypt as _DECRYPT
 from limitsdb.core.ldb_crypto import is_encrypted as _IS_ENC
+from limitsdb.core.ldb_errors import ConfigurationError, SecretError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_utils import resolve_schema_file, secret_keys_from_config
 
@@ -32,13 +33,26 @@ def _deep_merge(a: Mapping[str, Any], b: Mapping[str, Any]) -> dict[str, Any]:
 def _load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    text = path.read_text(encoding="utf-8")
-    data: Any = yaml.safe_load(text)
+    try:
+        text = path.read_text(encoding="utf-8")
+        data: Any = yaml.safe_load(text)
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ConfigurationError(f"Unable to read YAML configuration at {path}: {exc}") from exc
     if data is None:
         return {}
     if isinstance(data, dict):
         return cast(dict[str, Any], data)
-    raise TypeError(f"YAML root must be a mapping (dict) in {path}")
+    raise ConfigurationError(f"YAML root must be a mapping (dict) in {path}")
+
+
+def _load_secrets(path: Path) -> dict[str, Any]:
+    try:
+        data: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SecretError(f"Unable to read secrets file at {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SecretError(f"Secrets root must be a mapping (object) in {path}")
+    return cast(dict[str, Any], data)
 
 
 def _read_env_overrides(prefix: str = "LDB_") -> dict[str, Any]:
@@ -129,18 +143,21 @@ def load_runtime_config(
         description="secrets file",
     )
     if secrets_path:
-        secrets = json.loads(Path(secrets_path).read_text(encoding="utf-8"))
+        secrets = _load_secrets(Path(secrets_path))
     if secrets:
         for k in secret_keys_from_config():
             val = secrets.get(k)
             if val is None or val == "":
                 continue
             if isinstance(val, str) and _IS_ENC(val):
-                cfg[k] = _DECRYPT(val)
+                try:
+                    cfg[k] = _DECRYPT(val)
+                except Exception as exc:
+                    raise SecretError(f"Unable to decrypt secret '{k}' at {secrets_path}") from exc
             else:
                 if enforce_encrypted_secrets:
                     where = f" at {secrets_path}" if secrets_path else ""
-                    raise ValueError(f"Secret '{k}' must be encrypted (enc:v1:aes256gcm:...){where}")
+                    raise SecretError(f"Secret '{k}' must be encrypted (enc:v1:aes256gcm:...){where}")
                 cfg[k] = val  # only if you explicitly disabled enforcement
     # minimal defaults
     return cfg

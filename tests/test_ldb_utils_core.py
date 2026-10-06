@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from limitsdb.core import ldb_utils
+from limitsdb.core.ldb_errors import SecretError
 
 
 class DummyConfig(SimpleNamespace):
@@ -83,3 +84,16 @@ def test_init_schema_encrypts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     assert cfg.exists() and ilm.exists() and sec.exists()
     assert calls == {"key": True, "enc": True}
     assert ex.exists()
+
+
+def test_invalid_existing_secrets_are_not_overwritten(tmp_path: Path):
+    secrets_path = tmp_path / "schemas" / "s" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True)
+    secrets_path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(SecretError):
+        ldb_utils.write_or_update_secrets("s", None, str(tmp_path))
+    with pytest.raises(SecretError):
+        ldb_utils.encrypt_secrets_in_place("s", None, str(tmp_path))
+
+    assert secrets_path.read_text(encoding="utf-8") == "{broken"

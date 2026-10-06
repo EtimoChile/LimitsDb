@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from limitsdb.core.ldb_crypto import load_or_create_key
+from limitsdb.core.ldb_errors import LimitsDbError
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
 from limitsdb.core.ldb_params_config import Config, build_config
 from limitsdb.core.ldb_utils import encrypt_secrets_in_place
@@ -120,17 +121,11 @@ def run_cli() -> None:
         reconfigure_logger(level=args.log_level)
 
         load_or_create_key()
-        try:
-            encrypt_secrets_in_place(
-                schema=args.schema,
-                profile=getattr(args, "profile", None),
-                config_root=getattr(args, "config_dir", None),
-            )
-        except Exception:  # pragma: no cover - log and continue
-            logger.warning(
-                "Auto-encrypt failed; continuing. Loader will enforce encrypted secrets.",
-                exc_info=True,
-            )
+        encrypt_secrets_in_place(
+            schema=args.schema,
+            profile=getattr(args, "profile", None),
+            config_root=getattr(args, "config_dir", None),
+        )
         cfg_dict = build_config({}, args)
         config = Config.from_dict(cfg_dict)
 
@@ -148,7 +143,7 @@ def run_cli() -> None:
             raise ValueError("source_dsn is required to create the database link")
 
         engine = get_db_engine(config.db_engine)
-    except ValueError as exc:
+    except (LimitsDbError, ValueError) as exc:
         logger.error("%s", exc)
         raise SystemExit(1) from exc
 

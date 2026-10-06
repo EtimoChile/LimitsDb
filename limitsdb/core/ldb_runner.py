@@ -19,6 +19,21 @@ class _OtherColumn(TypedDict):
     metadata: ColumnDefinition
 
 
+WorkerResult = tuple[str, str, str, int, int, int | None, str | None]
+
+
+def _exception_details(exc: Exception) -> tuple[int | None, str]:
+    """Extract stable error details without assuming an Oracle exception shape."""
+    detail: Any = exc.args[0] if len(exc.args) == 1 else exc
+    code = getattr(detail, "code", None)
+    message = getattr(detail, "message", None)
+    if not isinstance(code, int):
+        code = None
+    if not isinstance(message, str) or not message:
+        message = str(exc) or type(exc).__name__
+    return code, message
+
+
 def _credentials_present(config: Config, *, admin: bool, env: Literal["SOURCE", "HISTORY"] | None) -> bool:
     try:
         get_effective_credentials(config, admin=admin, env=env)
@@ -265,38 +280,39 @@ def _get_conf_rows(config: Config, engine: DatabaseEngine, connection: Any) -> l
     return ldb_conf_rows
 
 
-def process_table(
-    config: Config, owner: str, table_name: str, plsql_code: str, process_date: str
-) -> tuple[str, str, str, int, int, int | None, str | None]:
+def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> WorkerResult:
     logger.info(f"Processing table {owner}.{table_name}...")
     prev_rows_processed = 0
-    engine = get_db_engine(config.db_engine)
+    engine: DatabaseEngine | None = None
     conn: Any = None
+    process_start: Any = None
     try:
+        engine = get_db_engine(config.db_engine)
         conn = engine.get_connection(config)
         user, _, dsn = get_effective_credentials(config, admin=False)
         logger.info(f"Connected to {dsn} as {user}")
         process_start = engine.get_system_date(conn)
-        try:
-            logger.info(f"Executing ILM for {owner}.{table_name}...")
-            prev_rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-            engine.sql_block_run(conn, plsql_code)
-            rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-            return (owner, table_name, Status.TABLE_END, prev_rows_processed, rows_processed, None, None)
-        except Exception as e:
-            (error,) = e.args
+        logger.info(f"Executing ILM for {owner}.{table_name}...")
+        prev_rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
+        engine.sql_block_run(conn, plsql_code)
+        rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
+        return (owner, table_name, Status.TABLE_END, prev_rows_processed, rows_processed, None, None)
+    except Exception as exc:
+        sqlcode, message = _exception_details(exc)
+        rows_processed = prev_rows_processed
+        logger.error("Worker failed for %s.%s: %s", owner, table_name, message, exc_info=True)
+        if engine is not None and conn is not None and process_start is not None:
             try:
                 rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
                 engine.save_error_status(
-                    conn, config, owner, table_name, process_date, process_start, error.message, plsql_code
+                    conn, config, owner, table_name, process_date, process_start, message, plsql_code
                 )
             except Exception:
-                logger.critical(f"Error getting rows processed for {owner}.{table_name}:", exc_info=True)
-                rows_processed = 0
-            return (owner, table_name, Status.ERROR, prev_rows_processed, rows_processed, error.code, error.message)
+                logger.critical("Failed to persist recovery evidence for %s.%s", owner, table_name, exc_info=True)
+        return (owner, table_name, Status.ERROR, prev_rows_processed, rows_processed, sqlcode, message)
     finally:
-        if conn:
-            conn.close()
+        if engine is not None and conn is not None:
+            engine.close_connection(conn)
 
 
 def generate_script_output(config: Config, tables_config: dict[tuple[str, str], dict[str, Any]]) -> int:
@@ -370,7 +386,8 @@ def ldb_exec_ilm(
     engine: DatabaseEngine,
     connection: Any,
 ) -> int:
-    processes: list[Future[tuple[str, str, str, int, int, int | None, str | None]]] = []
+    processes: list[Future[WorkerResult]] = []
+    process_targets: dict[Future[WorkerResult], tuple[str, str]] = {}
     active_tables: set[tuple[str, str]] = set()
     with ProcessPoolExecutor(
         max_workers=config.parallel_max,
@@ -391,6 +408,7 @@ def ldb_exec_ilm(
                         process_table, config, owner, table_name, table_info["sql_block"], process_date
                     )
                     processes.append(future)
+                    process_targets[future] = (owner, table_name)
                     active_tables.add((owner, table_name))
                     table_info["conds"][0]["ctl_status"] = Status.TABLE_START
                     cycle_launched = True
@@ -402,9 +420,17 @@ def ldb_exec_ilm(
             if processes:
                 # Wait for some process to finish
                 for completed_future in as_completed(processes):
-                    owner, table_name, status, prev_rows_processed, rows_processed, sqlcode, message = (
-                        completed_future.result()
-                    )
+                    owner, table_name = process_targets[completed_future]
+                    try:
+                        owner, table_name, status, prev_rows_processed, rows_processed, sqlcode, message = (
+                            completed_future.result()
+                        )
+                    except Exception as exc:
+                        sqlcode, detail = _exception_details(exc)
+                        status = Status.ERROR
+                        prev_rows_processed = rows_processed = 0
+                        message = f"Worker process failed: {detail}"
+                        logger.error("Worker process failed for %s.%s", owner, table_name, exc_info=True)
                     logger.debug(f"Process for table {owner}.{table_name} completed with status {status}")
                     cdr = tables_config[(owner, table_name)]["conds"][0]
                     if status == Status.ERROR and rows_processed == prev_rows_processed:
@@ -419,6 +445,7 @@ def ldb_exec_ilm(
                         logger.error(f"  Error {sqlcode}: {message}")
                     active_tables.remove((owner, table_name))
                     processes.remove(completed_future)
+                    del process_targets[completed_future]
                     break
             else:
                 break

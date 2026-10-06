@@ -385,6 +385,13 @@ poetry update
 - Unexpected key in config  
   The loader is strict—unknown keys raise an error. Fix typos or remove unused entries.
 
+- Invalid or unreadable secrets file
+  LimitsDb stops before database work and leaves the file unchanged. Repair the JSON or key, then rerun `ldb-crypt`.
+
+Low-level configuration, secret, connection, validation, and execution failures are exposed as domain errors while
+preserving their original cause. See [exception handling](docs/exception-handling.md) for the boundary contract and
+broad-catch inventory.
+
 ## License
 
 LimitsDb is released under the **Apache License 2.0**.
