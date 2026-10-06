@@ -27,10 +27,8 @@ jobs:
     env:
       # gvenzl/oracle-free:23.26.2-slim-faststart, pinned to an immutable multi-platform digest.
       ORACLE_IMAGE: ghcr.io/gvenzl/oracle-free@sha256:5e340d72c5cd93b5ce8bab6c128b8f37a5ec485d5d9d98dc2cdc5353fe640f96
-      ORACLE_PASSWORD: LimitsDb_CI_2026
       LDB_ORACLE_TEST_DSN: localhost:1521/FREEPDB1
       LDB_ORACLE_TEST_USER: system
-      LDB_ORACLE_TEST_PASSWORD: LimitsDb_CI_2026
 
     steps:
       - name: Check out repository
@@ -46,6 +44,14 @@ jobs:
 
       - name: Install project and development dependencies
         run: poetry install --with dev --no-interaction
+
+      - name: Generate ephemeral Oracle password
+        shell: bash
+        run: |
+          oracle_password="LdbCI_$(openssl rand -hex 16)"
+          echo "::add-mask::$oracle_password"
+          echo "ORACLE_PASSWORD=$oracle_password" >> "$GITHUB_ENV"
+          echo "LDB_ORACLE_TEST_PASSWORD=$oracle_password" >> "$GITHUB_ENV"
 
       - name: Pull Oracle Free image
         shell: bash
