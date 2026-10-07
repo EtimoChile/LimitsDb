@@ -37,10 +37,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   integración ejecutan métodos del adaptador `OracleEngine` y pasaron sobre la
   base efímera de CI; cubren idempotencia, recuperación tras DDL parcial y
   operaciones privilegiadas. No se conservan pruebas del comportamiento propio
-  del proveedor sin intervención de LimitsDb. Un cuarto caso E2E vigente crea
-  esquemas separados mediante `ldb-impl`, ejecuta `SOURCE_ILM` y `HISTORY_ILM`
-  sobre filas controladas y espera validación remota tras corregir el
-  enrutamiento al esquema histórico y la capacidad del identificador de acción.
+  del proveedor sin intervención de LimitsDb. El cuarto caso E2E crea esquemas
+  separados mediante `ldb-impl`, ejecuta `SOURCE_ILM` y `HISTORY_ILM` sobre
+  filas controladas y verifica datos y auditoría; los cuatro casos pasaron en
+  GitHub sobre el commit `170e6af`.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
