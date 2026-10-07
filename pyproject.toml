@@ -86,6 +86,17 @@ markers = [
   "oracle_integration: requires an explicitly configured disposable Oracle database",
 ]
 
+[tool.coverage.run]
+source = ["limitsdb"]
+branch = true
+relative_files = true
+parallel = true
+concurrency = ["multiprocessing"]
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+
 # para las libs externas sin stubs:
 [[tool.mypy.overrides]]
 module = [

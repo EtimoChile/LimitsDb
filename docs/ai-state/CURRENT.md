@@ -83,6 +83,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   descarga de imagen en 49 segundos, disponibilidad de Oracle unos 28 segundos
   después del arranque, 2.393 GiB de memoria y 5.4 GiB de disco libre al ejecutar
   las pruebas. La suite ampliada tardó 4.16 segundos y mantuvo 5.4 GiB libres.
+  El workflow también mide cobertura combinada de líneas y ramas para la suite
+  local y la E2E, incluidos subprocesses CLI y workers, y conserva informes de
+  texto, XML y HTML durante 14 días; la primera baseline combinada aún debe
+  verificarse en GitHub antes de definir un umbral.
 - Inversiones Etimo SpA mantiene el proyecto. Los términos aplicables se
   distribuyen en los archivos de licencia, notices y edición comercial de la
   raíz.
@@ -119,3 +123,5 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   configuración persistente del ambiente y excluirlos de CLI, entorno y `--set`.
 - `DEC-014`: aceptar sólo Oracle hasta que exista otro adaptador y rechazar
   PostgreSQL tempranamente en configuración, CLI y carga de motor.
+- `DEC-015`: medir conjuntamente cobertura local y Oracle E2E, incluidos los
+  procesos hijos, y verificar la baseline antes de imponer un umbral.

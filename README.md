@@ -128,6 +128,11 @@ An independent table exercises a second worker concurrently. The test verifies
 dependency-safe movement and purge results, multiple worker processes, and the
 resulting audit records. It then repeats both actions for the same process date
 and verifies that completed tables launch no workers or duplicate audit results.
+The same job measures branch and line coverage across the local and Oracle E2E
+suites, including the CLI subprocesses and multiprocessing workers. Its GitHub
+Actions summary shows the combined result, and the complete text, XML, HTML,
+and Coverage data files are retained as a workflow artifact for 14 days. No
+minimum coverage percentage is enforced until a combined baseline is verified.
 
 The integration tests are excluded from the default test command. To run them
 against an explicitly disposable Oracle instance:

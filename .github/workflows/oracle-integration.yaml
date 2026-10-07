@@ -45,6 +45,13 @@ jobs:
       - name: Install project and development dependencies
         run: poetry install --with dev --no-interaction
 
+      - name: Run local tests with coverage
+        shell: bash
+        run: |
+          poetry run coverage erase
+          mkdir -p .coverage-data/local .coverage-data/oracle
+          COVERAGE_FILE=.coverage-data/local/.coverage poetry run coverage run -m pytest -q
+
       - name: Generate ephemeral Oracle password
         shell: bash
         run: |
@@ -106,8 +113,37 @@ jobs:
           docker stats limitsdb-oracle --no-stream
           df -h /
 
-      - name: Run Oracle integration tests
-        run: poetry run pytest -m oracle_integration -q
+      - name: Run Oracle integration tests with coverage
+        shell: bash
+        run: COVERAGE_FILE=.coverage-data/oracle/.coverage poetry run coverage run -m pytest -m oracle_integration -q
+
+      - name: Build combined coverage report
+        shell: bash
+        run: |
+          poetry run coverage combine .coverage-data/local .coverage-data/oracle
+          poetry run coverage report -m | tee coverage.txt
+          poetry run coverage xml -o coverage.xml
+          poetry run coverage html -d htmlcov
+
+          {
+            echo "### Combined local and Oracle E2E coverage"
+            echo '```text'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-coverage-${{ github.run_id }}
+          path: |
+            .coverage
+            coverage.txt
+            coverage.xml
+            htmlcov/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Show Oracle logs on failure
         if: failure()
