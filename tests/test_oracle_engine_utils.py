@@ -99,6 +99,7 @@ def test_generated_source_insert_does_not_duplicate_limitsdb_columns():
     assert "(ID, CREATED_AT, LDB_PROCESS_DATE, LDB_INSERT_DATE)" in block
     assert "values (r_rec(i).ID, r_rec(i).CREATED_AT, r_rec(i).LDB_PROCESS_DATE, r_rec(i).LDB_INSERT_DATE)" in block
     assert "LDB_PROCESS_DATE, LDB_INSERT_DATE, LDB_PROCESS_DATE" not in block
+    assert "'TEND', l_process_start, null, sysdate, l_message, 0, null" in block
 
 
 def test_register_and_fetch_connection_env_round_trip():

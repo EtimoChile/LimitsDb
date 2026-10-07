@@ -501,8 +501,9 @@ begin
                 plsql += f"""
     select /*+ {hint_expr} */ count(*) into l_record_count
     {indent_lines(query_expr, 4)};"""
+        table_end_rows = "l_record_count" if has_lob_columns else "0"
         plsql += f"""
-    check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, l_record_count, null, l_sqlcode, l_out_message);
+    check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, {table_end_rows}, null, l_sqlcode, l_out_message);
     commit;
 exception
     when others then
