@@ -24,6 +24,11 @@ def test_normalize_and_config_validation():
         ldb_params_config.Config(schema="s", source_dsn="", source_username="u", source_password="p")
 
 
+def test_postgres_is_rejected_until_an_adapter_exists():
+    with pytest.raises(ValueError, match="unsupported db_engine: postgres; supported engines: oracle"):
+        ldb_params_config.Config(schema="s", mode="PLAN", db_engine="postgres")  # type: ignore[arg-type]
+
+
 def test_flat_config_contract_and_compatibility_behaviour():
     cfg = ldb_params_config.Config.from_dict(
         {
@@ -169,6 +174,9 @@ def test_argparser_choices_requirements(monkeypatch: pytest.MonkeyPatch):
         parser.parse_args([])
     parsed = parser.parse_args(["--schema", "s", "--mode", "DRY_RUN"])
     assert parsed.mode == "DRY_RUN"
+    assert parser.parse_args(["--schema", "s", "--db-engine", "oracle"]).db_engine == "oracle"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--schema", "s", "--db-engine", "postgres"])
 
 
 def test_schema_can_be_bootstrapped_from_registered_environment(monkeypatch: pytest.MonkeyPatch):

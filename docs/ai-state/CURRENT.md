@@ -21,8 +21,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   técnico público es `ldb` / `LDB`; el cambio desde el nombre anterior es
   incompatible y está documentado en `README.md` y `CHANGELOG.md`.
 - El paquete implementa ILM dirigido por configuración. Oracle es el adaptador
-  disponible; el contrato `DatabaseEngine` mantiene la extensión a otros
-  motores.
+  disponible y el único motor aceptado por configuración; PostgreSQL permanece
+  como implementación futura y se rechaza antes de conectar. El contrato
+  `DatabaseEngine` mantiene la extensión a otros motores. `PEND-007` está
+  resuelto.
 - Las interfaces publicadas son `ldb-run`, `ldb-init`, `ldb-crypt` y
   `ldb-impl`.
 - La configuración se resuelve por archivo, variables `LDB_*` y opciones
@@ -32,7 +34,7 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
 - La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-07 es
-  de 78 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
+  de 80 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
   sin hallazgos sobre los 23 módulos del paquete. Los tres casos vigentes de
   integración ejecutan métodos del adaptador `OracleEngine` y pasaron sobre la
   base efímera de CI; cubren idempotencia, recuperación tras DDL parcial y
@@ -115,3 +117,5 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   tablas relacionadas; `LDB_DATE_<suffix>` usa un diferenciador, no un alias SQL.
 - `DEC-013`: fijar `use_added_columns` y `add_ldb_columns` exclusivamente en la
   configuración persistente del ambiente y excluirlos de CLI, entorno y `--set`.
+- `DEC-014`: aceptar sólo Oracle hasta que exista otro adaptador y rechazar
+  PostgreSQL tempranamente en configuración, CLI y carga de motor.

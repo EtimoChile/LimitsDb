@@ -30,7 +30,8 @@ FILE_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"use_added_columns", "add_ldb
 IlmAction = Literal["SOURCE_ILM", "HISTORY_ILM"]
 RuntimeMode = Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-DatabaseEngineName = Literal["oracle", "postgres"]
+DatabaseEngineName = Literal["oracle"]
+SUPPORTED_DATABASE_ENGINES: tuple[DatabaseEngineName, ...] = ("oracle",)
 
 
 def _normalize_mode(value: str) -> str:
@@ -132,7 +133,12 @@ class Config:
     parallel_max: Annotated[
         int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("LDB_PARALLEL_MAX")
     ] = 10
-    db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine"), Env("LDB_DB_ENGINE")] = "oracle"
+    db_engine: Annotated[
+        DatabaseEngineName,
+        Help("Database engine (Oracle only)"),
+        Cli("--db-engine"),
+        Env("LDB_DB_ENGINE"),
+    ] = "oracle"
     log_level: Annotated[
         Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         Help("Logging level"),
@@ -156,18 +162,14 @@ class Config:
     # Database connection parameters
     source_dsn: Annotated[
         str | None,
-        Help(
-            "DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname."
-        ),
+        Help("Oracle DSN / connection descriptor: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL)."),
         Env("LDB_SOURCE_DSN"),
     ] = ""
     source_username: Annotated[str | None, Help("Username"), Env("LDB_SOURCE_USERNAME")] = ""
     source_password: Annotated[str | None, Help("Password"), Secret()] = ""
     history_dsn: Annotated[
         str | None,
-        Help(
-            "DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname."
-        ),
+        Help("Oracle DSN / connection descriptor: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL)."),
         Env("LDB_HISTORY_DSN"),
     ] = ""
     history_username: Annotated[str | None, Help("Username"), Env("LDB_HISTORY_USERNAME")] = ""
@@ -199,8 +201,10 @@ class Config:
         requires_connections = self.mode in MODES_REQUIRING_CONNECTIONS
         if not self.schema:
             raise ValidationError("schema is required")
-        if self.db_engine not in ("oracle", "postgres"):
-            raise ValidationError(f"invalid db_engine: {self.db_engine}")
+        if self.db_engine not in SUPPORTED_DATABASE_ENGINES:
+            raise ValidationError(
+                f"unsupported db_engine: {self.db_engine}; supported engines: {', '.join(SUPPORTED_DATABASE_ENGINES)}"
+            )
         if (
             requires_connections
             and self.action == "SOURCE_ILM"
@@ -332,9 +336,10 @@ def build_argparser_from_config() -> argparse.ArgumentParser:
         # Suppress defaults so argparse only sets values explicitly provided in CLI
         arg_kwargs: dict[str, Any] = {"help": help_text or "", "default": argparse.SUPPRESS}
         # infer choices from Literal if present
-        origin = get_origin(annotated)
+        parameter_type = metas[0]
+        origin = get_origin(parameter_type)
         if origin is Literal:
-            arg_kwargs["choices"] = tuple(get_args(annotated))
+            arg_kwargs["choices"] = tuple(get_args(parameter_type))
         # Schema can be supplied by its explicitly registered environment variable.
         if name == "schema" and "schema" not in env_values:
             arg_kwargs["required"] = True

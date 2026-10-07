@@ -38,7 +38,7 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
 - **Poetry**: 1.6+ (install from https://python-poetry.org/docs/#installation)
 - **Database drivers**
   - **Oracle**: `oracledb` (thin mode works out of the box; for thick mode, install Oracle Instant Client and set PATH/LD_LIBRARY_PATH).
-  - **PostgreSQL**: planned. You can wire your own engine layer later if needed.
+  - **PostgreSQL**: planned for a future adapter; it is not currently accepted in configuration.
 
 All Python dependencies are defined in `pyproject.toml`. For source installations, they are installed through Poetry.
 
@@ -263,7 +263,7 @@ poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EX
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
-| `db_engine`              | Database engine.                                                                                                                                                | Default `"oracle"`; choices `"oracle"`, `"postgres"`.                                |
+| `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
 | `schema`                 | Schema name (folder under `schemas/`).                                                                                                                          | Required on CLI; no persisted default.                                               |
 | `profile`                | Profile name (e.g., `dev`, `prod`).                                                                                                                             | Optional; default `null`.                                                            |
@@ -350,6 +350,9 @@ Every key is commented; the default value and short help appear inline. Example:
 # db_engine: "oracle"   # Database engine
 # log_level: "INFO"     # Logging level
 ```
+
+`oracle` is the only supported `db_engine`. PostgreSQL remains a future implementation; values such as `postgres`
+are rejected during argument or configuration validation, before any database connection is attempted.
 
 Uncomment and set values as needed. Secrets are not listed here (they live in `secrets.<PROFILE>.json`).
 
