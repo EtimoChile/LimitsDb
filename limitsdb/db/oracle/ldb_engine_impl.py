@@ -414,6 +414,7 @@ class OracleEngine(DatabaseEngine):
         )
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
         source_ilm = execution.action == "SOURCE_ILM"
+        runtime_owner = source_owner if source_ilm else history_owner
         ins_cols = join_wrapped(", ", table_columns + other_cols_alias, 200)
         ins_vals = join_wrapped(", ", [f"r_rec(i).{col}" for col in table_columns + other_cols_alias], 200)
         if execution.generate_script:
@@ -421,7 +422,7 @@ class OracleEngine(DatabaseEngine):
         plsql = f"""declare
     l_source_owner varchar2(50) := '{source_owner}';
     l_history_owner varchar2(50) := '{history_owner}';
-    l_action varchar2(10) := '{execution.action}';
+    l_action varchar2(11) := '{execution.action}';
     l_mode varchar2(10) := '{execution.mode}';
     l_message varchar2(200) := case
         when l_mode = 'EXECUTE' then null
@@ -477,7 +478,7 @@ begin
         end loop;"""
                 plsql += f"""
         forall i in 1 .. r_rec.count
-            delete from {OracleEngine._format_identifier(source_owner)}.{OracleEngine._format_identifier(table_name)} where rowid = r_rec(i).rowid;
+            delete from {OracleEngine._format_identifier(runtime_owner)}.{OracleEngine._format_identifier(table_name)} where rowid = r_rec(i).rowid;
         l_record_count := l_record_count + r_rec.count;"""
             plsql += f"""
         check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.CHUNK_END}', null, l_chunk_start, sysdate, l_message, r_rec.count, null, l_sqlcode, l_out_message);
@@ -493,7 +494,7 @@ begin
     select /*+ {hint_expr} */ {indent_lines(cols_select, 4)}
     {indent_lines(query_expr, 4)};"""
                 plsql += f"""
-    delete from {OracleEngine._format_identifier(source_owner)}.{OracleEngine._format_identifier(table_name)} where rowid in
+    delete from {OracleEngine._format_identifier(runtime_owner)}.{OracleEngine._format_identifier(table_name)} where rowid in
     (select /*+ {hint_expr} */ a.rowid
     {indent_lines(query_expr, 4)});
     l_record_count := sql%rowcount;"""

@@ -17,7 +17,10 @@ def test_build_control_tables_shapes():
     tables = ldb_impl._build_control_tables("OWNER")
     assert {t.name for t in tables} == {"LDB_CTL", "LDB_LOG", "LDB_CNF"}
     ctl = next(t for t in tables if t.name == "LDB_CTL")
+    log = next(t for t in tables if t.name == "LDB_LOG")
     assert ctl.primary_key == ("CTL_OWNER", "CTL_TABLE_NAME")
+    assert next(column for column in ctl.columns if column.name == "CTL_ACTION").length == 11
+    assert next(column for column in log.columns if column.name == "LOG_ACTION").length == 11
 
 
 def test_ldb_impl_run_cli(monkeypatch: pytest.MonkeyPatch):

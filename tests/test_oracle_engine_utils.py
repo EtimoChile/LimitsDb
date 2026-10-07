@@ -102,6 +102,40 @@ def test_generated_source_insert_does_not_duplicate_limitsdb_columns():
     assert "'TEND', l_process_start, null, sysdate, l_message, 0, null" in block
 
 
+def test_generated_history_block_deletes_from_history_owner():
+    config = Config(
+        schema="s",
+        action="HISTORY_ILM",
+        mode="EXECUTE",
+        history_dsn="dsn",
+        history_username="history",
+        history_password="secret",
+    )
+    table_config = {
+        "conds": [
+            {
+                "source_owner": "SOURCE",
+                "history_owner": "HISTORY",
+                "table_name": "ITEMS",
+                "history_hint_expr": None,
+                "hint_expr": "",
+                "has_lob_columns": "N",
+            }
+        ],
+        "other_columns": [],
+        "referencing_tables": [],
+        "query_expr": "from history.items A\nwhere A.created_at < l_process_date",
+        "table_columns": ["ID", "CREATED_AT"],
+        "months_keep_history_max": 3,
+    }
+
+    block = OracleEngine.generate_sql_block(config, table_config, "20261007")
+
+    assert "l_action varchar2(11) := 'HISTORY_ILM'" in block
+    assert "delete from history.items where rowid = r_rec(i).rowid" in block
+    assert "delete from source.items" not in block
+
+
 def test_register_and_fetch_connection_env_round_trip():
     class DummyConnection:
         pass

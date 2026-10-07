@@ -140,6 +140,11 @@ def _collect_privilege_targets(
     return sorted(tables)
 
 
+def _runtime_owner(config: Config, rule: IlmRule) -> str:
+    """Return the schema whose rows are processed for the selected ILM action."""
+    return rule["source_owner"] if config.execution.action == "SOURCE_ILM" else rule["history_owner"]
+
+
 def _plan_mode(config: Config) -> int:
     rows = _load_offline_rows(config)
     if not rows:
@@ -224,13 +229,14 @@ def _build_history_table_definition(
     table_cnf: ProcessedTableConfig,
 ) -> TableDefinition:
     cnd0 = table_cnf["conds"][0]
-    source_owner, history_owner, table_name = cnd0["source_owner"], cnd0["history_owner"], cnd0["table_name"]
+    history_owner, table_name = cnd0["history_owner"], cnd0["table_name"]
+    metadata_owner = _runtime_owner(config, cnd0)
     required_columns: list[ColumnDefinition] = sorted(
         table_cnf.get("columns_metadata", {}).values(), key=attrgetter("id")
     )
     for other_column in table_cnf.get("other_columns", []):
         required_columns.append(other_column["metadata"])
-    pk_columns = list(engine.get_primary_key_columns(source_connection, source_owner, table_name, table_cnf))
+    pk_columns = list(engine.get_primary_key_columns(source_connection, metadata_owner, table_name, table_cnf))
     if config.execution.add_ldb_columns:
         if "LDB_PROCESS_DATE" not in pk_columns:
             pk_columns.append("LDB_PROCESS_DATE")
@@ -525,10 +531,11 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     # Persist the resulting predicate in cond_expr so later stages can reuse it.
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
+        runtime_owner = _runtime_owner(config, cnd0)
         inherited_references = cnd0["referencing_tables"]
         added_conds = [("A", cond) for cond in table_cnf["conds"]]
         table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(
-            connection, cnd0["source_owner"], cnd0["table_name"]
+            connection, runtime_owner, cnd0["table_name"]
         )
         if inherited_references:
             for ref_table in inherited_references.split(","):
@@ -629,7 +636,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                     "metadata": ColumnDefinition(name="LDB_INSERT_DATE", data_type="date", nullable=False),
                 }
             )
-        cnf_source_owner, cnf_table_name = key
+        _, cnf_table_name = key
         cnf_join_expr, cnf_source_orphan_purge = cnd0["join_expr"], cnd0["source_orphan_purge"]
         # Prepare join_expr changing type of join based on cnf_source_orphan_purge
         join_expr = (
@@ -638,7 +645,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
             else ""
         )
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
-        base_from = f"from {cnf_source_owner.lower()}.{cnf_table_name.lower()} A"
+        base_from = f"from {runtime_owner.lower()}.{cnf_table_name.lower()} A"
         join_clause = f"\n   {join_expr}" if join_expr else ""
         where_clause = f"\nwhere {where_expr}" if where_expr else ""
         table_cnf["query_expr"] = base_from + join_clause + where_clause
@@ -670,7 +677,11 @@ def ldb_run(config: Config) -> None:
         table_privileges = ("SELECT", "INSERT", "UPDATE", "DELETE")
         tables_conf_rows = _get_conf_rows(config, engine, connection)
         source_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
-        if source_tables_for_privileges and _credentials_present(config, admin=True, env="SOURCE"):
+        if (
+            config.execution.action == "SOURCE_ILM"
+            and source_tables_for_privileges
+            and _credentials_present(config, admin=True, env="SOURCE")
+        ):
             source_admin_priv_conn = engine.get_connection(config, admin=True, env="SOURCE")
             try:
                 engine.ensure_table_privileges(

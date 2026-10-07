@@ -62,6 +62,13 @@ def test_collect_privilege_targets():
     assert targets == [("A", "T1"), ("A", "T2")]
 
 
+def test_runtime_owner_follows_ilm_action():
+    rule = {"source_owner": "SOURCE", "history_owner": "HISTORY"}
+
+    assert ldb_runner._runtime_owner(Config(schema="s", action="SOURCE_ILM", mode="PLAN"), rule) == "SOURCE"
+    assert ldb_runner._runtime_owner(Config(schema="s", action="HISTORY_ILM", mode="PLAN"), rule) == "HISTORY"
+
+
 def test_exception_details_supports_oracle_and_generic_errors():
     oracle_error = SimpleNamespace(code=942, message="table missing")
     assert ldb_runner._exception_details(Exception(oracle_error)) == (942, "table missing")
