@@ -97,6 +97,8 @@ def _write_e2e_configuration(
     source_password: str,
     history_user: str,
     history_password: str,
+    parent_additional_filter_expr: str | None = None,
+    parent_history_addtl_filter_expr: str | None = None,
 ) -> None:
     schema_dir = root / "schemas" / "e2e"
     schema_dir.mkdir(parents=True)
@@ -129,8 +131,13 @@ def _write_e2e_configuration(
         ),
         encoding="utf-8",
     )
+    parent_filter_lines = ""
+    if parent_additional_filter_expr is not None:
+        parent_filter_lines += f"        additional_filter_expr: {json.dumps(parent_additional_filter_expr)}\n"
+    if parent_history_addtl_filter_expr is not None:
+        parent_filter_lines += f"        history_addtl_filter_expr: {json.dumps(parent_history_addtl_filter_expr)}\n"
     (schema_dir / "ilm.yml").write_text(
-        """tables:
+        f"""tables:
   - source_owner: LDBT_E2E_SOURCE
     history_owner: LDBT_E2E_HISTORY
     table_name: ILM_ORDERS
@@ -141,7 +148,7 @@ def _write_e2e_configuration(
         retain_months_source: 2
         retain_months_history: 3
         purge_date_expr: "@CREATED_AT"
-  - source_owner: LDBT_E2E_SOURCE
+{parent_filter_lines}  - source_owner: LDBT_E2E_SOURCE
     history_owner: LDBT_E2E_HISTORY
     table_name: ILM_ORDER_LINES
     frecuency: D
@@ -193,6 +200,27 @@ def _fetch_tend_log_count(connection: oracledb.Connection, *, owner: str, table_
             [owner, table_name, action],
         )
         return cursor.fetchone()[0]
+    finally:
+        cursor.close()
+
+
+def _fetch_column_names(connection: oracledb.Connection, table_name: str) -> set[str]:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT column_name FROM user_tab_columns WHERE table_name = :1",
+            [table_name.upper()],
+        )
+        return {row[0] for row in cursor}
+    finally:
+        cursor.close()
+
+
+def _fetch_related_filter_values(connection: oracledb.Connection, *, column_name: str) -> list[tuple[int, str]]:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(f"SELECT line_id, {column_name} FROM ilm_order_lines ORDER BY line_id")
+        return [(row[0], row[1]) for row in cursor]
     finally:
         cursor.close()
 
@@ -317,8 +345,30 @@ def test_oracle_privileged_ensures_are_idempotent(oracle_connection: oracledb.Co
         _drop_table_if_present(oracle_connection, table_name)
 
 
+@pytest.mark.parametrize(
+    ("predicate_case", "source_filter", "history_filter"),
+    [
+        pytest.param("baseline", None, None, id="baseline"),
+        pytest.param(
+            "distinct_history_filter",
+            "@SOURCE_STATE = 'READY'",
+            "@HISTORY_STATE = 'PURGE'",
+            id="preserves-distinct-history-filter-column",
+        ),
+        pytest.param(
+            "shared_filter_column",
+            "@LIFECYCLE_STATE IN ('KEEP', 'PURGE')",
+            "@LIFECYCLE_STATE = 'PURGE'",
+            id="rewrites-related-history-filter-column",
+        ),
+    ],
+)
 def test_limitsdb_happy_path_archives_and_purges_between_schemas(
-    oracle_connection: oracledb.Connection, tmp_path: Path
+    oracle_connection: oracledb.Connection,
+    tmp_path: Path,
+    predicate_case: str,
+    source_filter: str | None,
+    history_filter: str | None,
 ):
     source_user = "LDBT_E2E_SOURCE"
     history_user = "LDBT_E2E_HISTORY"
@@ -344,6 +394,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         source_password=source_password,
         history_user=history_user,
         history_password=history_password,
+        parent_additional_filter_expr=source_filter,
+        parent_history_addtl_filter_expr=history_filter,
     )
     cli_environment = _e2e_environment(tmp_path / "home")
     common_arguments = ("--schema", "e2e", "--config-dir", str(config_root))
@@ -391,6 +443,9 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 """CREATE TABLE ilm_orders (
                     id NUMBER(10) PRIMARY KEY,
                     created_at DATE NOT NULL,
+                    source_state VARCHAR2(10) NOT NULL,
+                    history_state VARCHAR2(10) NOT NULL,
+                    lifecycle_state VARCHAR2(10) NOT NULL,
                     payload VARCHAR2(40) NOT NULL
                 )"""
             )
@@ -411,8 +466,14 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 )"""
             )
             source_cursor.executemany(
-                "INSERT INTO ilm_orders (id, created_at, payload) VALUES (:1, ADD_MONTHS(TRUNC(SYSDATE), :2), :3)",
-                [(1, -1, "recent"), (2, -3, "archive"), (3, -7, "purge")],
+                """INSERT INTO ilm_orders
+                       (id, created_at, source_state, history_state, lifecycle_state, payload)
+                     VALUES (:1, ADD_MONTHS(TRUNC(SYSDATE), :2), :3, :4, :5, :6)""",
+                [
+                    (1, -1, "READY", "KEEP", "KEEP", "recent"),
+                    (2, -3, "READY", "KEEP", "KEEP", "archive"),
+                    (3, -7, "READY", "PURGE", "PURGE", "purge"),
+                ],
             )
             source_cursor.executemany(
                 "INSERT INTO ilm_order_lines (line_id, order_id, payload) VALUES (:1, :2, :3)",
@@ -444,6 +505,20 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         assert _fetch_ids(history_connection, "ilm_order_lines", "line_id") == [21, 31, 32]
         assert _fetch_ids(source_connection, "ilm_events", "event_id") == [101]
         assert _fetch_ids(history_connection, "ilm_events", "event_id") == [102, 103]
+        if predicate_case == "distinct_history_filter":
+            assert "HISTORY_STATE_B" in _fetch_column_names(history_connection, "ILM_ORDER_LINES")
+            assert _fetch_related_filter_values(history_connection, column_name="HISTORY_STATE_B") == [
+                (21, "KEEP"),
+                (31, "PURGE"),
+                (32, "PURGE"),
+            ]
+        elif predicate_case == "shared_filter_column":
+            assert "LIFECYCLE_STATE_B" in _fetch_column_names(history_connection, "ILM_ORDER_LINES")
+            assert _fetch_related_filter_values(history_connection, column_name="LIFECYCLE_STATE_B") == [
+                (21, "KEEP"),
+                (31, "PURGE"),
+                (32, "PURGE"),
+            ]
 
         source_cursor = source_connection.cursor()
         try:

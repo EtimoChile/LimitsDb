@@ -43,7 +43,11 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   los entry points instalados, incorpora tablas padre-detalle con clave foránea,
   una rama independiente con dos workers y reruns idempotentes de ambas acciones;
   los cuatro casos pasaron en GitHub sobre el commit `d8a77ea`. `PEND-005` está
-  resuelto.
+  resuelto. El árbol de trabajo agrega dos variantes E2E para `PEND-012`: una
+  exige materializar una columna usada sólo por el filtro histórico y otra
+  exige reescribirla como `<columna>_<alias>` durante `HISTORY_ILM`; se
+  recolectan seis casos Oracle en total y las variantes nuevas aún no se han
+  ejecutado en el runner efímero.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
@@ -96,3 +100,6 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - `DEC-011`: mantener las políticas ILM exclusivamente en archivos de
   configuración y retirar el uso de `LDB_CNF` sin eliminar automáticamente
   objetos legados.
+- `DEC-012`: cada fila histórica conserva los valores necesarios para reevaluar
+  todos sus predicados, incluidas fechas de corte y columnas adicionales de
+  tablas relacionadas; `LDB_DATE_<suffix>` usa un diferenciador, no un alias SQL.
