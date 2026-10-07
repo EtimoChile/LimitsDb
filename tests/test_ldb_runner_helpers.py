@@ -1,5 +1,8 @@
 from concurrent.futures import Future
+from datetime import datetime
 from types import SimpleNamespace
+
+import pytest
 
 from limitsdb.core import ldb_runner
 from limitsdb.core.ldb_params_config import Config
@@ -33,6 +36,194 @@ def test_cycle_detection():
         assert "Cyclic" in str(exc)
     else:
         raise AssertionError("cycle not detected")
+
+
+def test_plan_mode_handles_empty_and_layered_configuration(monkeypatch: pytest.MonkeyPatch):
+    config = Config(schema="s", mode="PLAN")
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda current: [])
+    assert ldb_runner._plan_mode(config) == 0
+
+    rows = [
+        {"source_owner": "A", "table_name": "PARENT", "referencing_tables": ""},
+        {"source_owner": "A", "table_name": "CHILD", "referencing_tables": "A.PARENT P"},
+    ]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda current: rows)
+    assert ldb_runner._plan_mode(config) == 0
+
+
+def _validate_config() -> Config:
+    return Config(
+        schema="s",
+        mode="VALIDATE",
+        source_dsn="source-dsn",
+        source_username="source-user",
+        source_password="source-password",
+        history_dsn="history-dsn",
+        history_username="history-user",
+        history_password="history-password",
+        admin_source_username="source-admin",
+        admin_source_password="source-admin-password",
+        admin_history_username="history-admin",
+        admin_history_password="history-admin-password",
+    )
+
+
+def test_validate_environment_checks_required_and_optional_connections(monkeypatch: pytest.MonkeyPatch):
+    opened = []
+    closed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            connection = SimpleNamespace(admin=admin, env=env)
+            opened.append(connection)
+            return connection
+
+        def get_system_date(self, connection):
+            return datetime(2026, 10, 7)
+
+        def close_connection(self, connection):
+            closed.append(connection)
+
+    tables = {("SOURCE", "ITEMS"): {"query_expr": "from source.items A\nwhere A.id > 0"}}
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: tables)
+
+    assert ldb_runner._validate_environment(_validate_config(), DummyEngine()) == 0
+    assert len(opened) == 4
+    assert closed == opened
+
+
+def test_validate_environment_fails_when_required_connection_is_unavailable(monkeypatch: pytest.MonkeyPatch):
+    closed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            if admin and env is None:
+                raise RuntimeError("source admin unavailable")
+            return SimpleNamespace(admin=admin, env=env)
+
+        def get_system_date(self, connection):
+            return datetime(2026, 10, 7)
+
+        def close_connection(self, connection):
+            closed.append(connection)
+
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: {})
+
+    assert ldb_runner._validate_environment(_validate_config(), DummyEngine()) == 1
+    assert len(closed) == 3
+
+
+def test_validate_environment_skips_optional_credentials_not_provided(monkeypatch: pytest.MonkeyPatch):
+    opened = []
+    closed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            connection = SimpleNamespace(admin=admin, env=env)
+            opened.append(connection)
+            return connection
+
+        def get_system_date(self, connection):
+            return datetime(2026, 10, 7)
+
+        def close_connection(self, connection):
+            closed.append(connection)
+
+    # SOURCE_ILM provides HISTORY admin (required) but no HISTORY runtime credentials (optional)
+    config = Config(
+        schema="s",
+        mode="VALIDATE",
+        source_dsn="source-dsn",
+        source_username="source-user",
+        source_password="source-password",
+        admin_source_username="source-admin",
+        admin_source_password="source-admin-password",
+        history_dsn="history-dsn",
+        admin_history_username="history-admin",
+        admin_history_password="history-admin-password",
+    )
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: {})
+
+    assert ldb_runner._validate_environment(config, DummyEngine()) == 0
+    assert len(opened) == 3  # SOURCE runtime, SOURCE admin, HISTORY admin
+    assert closed == opened
+
+
+def test_validate_environment_fails_when_primary_connection_system_date_fails(monkeypatch: pytest.MonkeyPatch):
+    closed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            return SimpleNamespace(admin=admin, env=env)
+
+        def get_system_date(self, connection):
+            raise RuntimeError("clock unavailable")
+
+        def close_connection(self, connection):
+            closed.append(connection)
+
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: pytest.fail("should not reach config"))
+
+    assert ldb_runner._validate_environment(_validate_config(), DummyEngine()) == 1
+    assert len(closed) == 4  # all attempted connections closed despite all failing
+
+
+def test_validate_environment_fails_when_config_processing_raises(monkeypatch: pytest.MonkeyPatch):
+    closed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            return SimpleNamespace(admin=admin, env=env)
+
+        def get_system_date(self, connection):
+            return datetime(2026, 10, 7)
+
+        def close_connection(self, connection):
+            closed.append(connection)
+
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: (_ for _ in ()).throw(ValueError("bad config")))
+
+    assert ldb_runner._validate_environment(_validate_config(), DummyEngine()) == 1
+    assert len(closed) == 4
+
+
+def test_open_connection_rejects_missing_credentials():
+    config = Config(schema="s", mode="PLAN")
+    engine = SimpleNamespace(get_connection=lambda *args, **kwargs: pytest.fail("connection should not be attempted"))
+
+    assert ldb_runner._open_connection(config, engine, admin=False, env="SOURCE", description="SOURCE RUNTIME") is None
+
+
+def test_generate_script_orders_dependencies_and_skips_tables(capsys: pytest.CaptureFixture[str]):
+    tables = {
+        ("SOURCE", "CHILD"): {
+            "skip": False,
+            "conds": [{"ctl_status": None}],
+            "referencing_tables": [("SOURCE", "PARENT")],
+            "sql_block": "begin child; end;",
+        },
+        ("SOURCE", "PARENT"): {
+            "skip": False,
+            "conds": [{"ctl_status": None}],
+            "referencing_tables": [],
+            "sql_block": "begin parent; end;",
+        },
+        ("SOURCE", "SKIPPED"): {
+            "skip": True,
+            "conds": [{"ctl_status": None}],
+            "referencing_tables": [],
+            "sql_block": "begin skipped; end;",
+        },
+    }
+
+    assert ldb_runner.generate_script_output(Config(schema="billing", mode="PLAN"), tables) == 0
+
+    output = capsys.readouterr().out
+    assert output.index("SOURCE.PARENT") < output.index("SOURCE.CHILD")
+    assert "begin parent; end;" in output
+    assert "begin child; end;" in output
+    assert "begin skipped; end;" not in output
+    assert output.endswith("spool off\nexit 0\n\n")
 
 
 def test_append_unique_and_get_next_ready():

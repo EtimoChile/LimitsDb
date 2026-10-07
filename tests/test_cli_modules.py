@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from limitsdb.cli import ldb_crypt, ldb_impl, ldb_run
+from limitsdb.cli import ldb_crypt, ldb_impl, ldb_init, ldb_run
 from limitsdb.core.ldb_params_config import Config
 
 
@@ -128,3 +128,58 @@ def test_ldb_run_cli(monkeypatch: pytest.MonkeyPatch):
         ),
     )
     ldb_run.run_cli()
+
+
+def test_ldb_init_run_cli_creates_requested_files(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    args = SimpleNamespace(
+        schema="billing",
+        profile="dev",
+        config_dir=str(tmp_path),
+        overwrite=True,
+        no_examples=False,
+        log_level="DEBUG",
+    )
+    calls = {}
+    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
+    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: calls.setdefault("key", True))
+    monkeypatch.setattr(ldb_init, "reconfigure_logger", lambda **kwargs: calls.setdefault("log_level", kwargs["level"]))
+
+    def initialize(**kwargs):
+        calls["init"] = kwargs
+        return tuple(tmp_path / name for name in ("config.yml", "ilm.yml", "secrets.json", "ilm.example.yml"))
+
+    monkeypatch.setattr(ldb_init, "init_schema", initialize)
+
+    ldb_init.run_cli()
+
+    assert calls == {
+        "key": True,
+        "log_level": "DEBUG",
+        "init": {
+            "schema": "billing",
+            "profile": "dev",
+            "config_root": str(tmp_path),
+            "overwrite": True,
+            "with_examples": True,
+            "auto_encrypt": True,
+        },
+    }
+
+
+def test_ldb_init_run_cli_reports_invalid_request(monkeypatch: pytest.MonkeyPatch):
+    args = SimpleNamespace(
+        schema="billing",
+        profile=None,
+        config_dir=None,
+        overwrite=False,
+        no_examples=True,
+        log_level="INFO",
+    )
+    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
+    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(ldb_init, "init_schema", lambda **kwargs: (_ for _ in ()).throw(ValueError("invalid root")))
+
+    with pytest.raises(SystemExit) as caught:
+        ldb_init.run_cli()
+
+    assert caught.value.code == 1

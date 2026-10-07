@@ -3,7 +3,7 @@ status: active
 authority: operational-state
 scope: development/maintenance/release
 last-reviewed: 2026-10-07
-last-updated: 2026-10-07
+last-updated: 2026-10-07T19:10
 ---
 
 # Estado vigente
@@ -34,7 +34,9 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
 - La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-07 es
-  de 80 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
+  de 97 pruebas exitosas (ampliada desde 81 con pruebas locales para `ldb-init`,
+  modos PLAN y VALIDATE, generación de script y métodos Oracle de PK y registro
+  de errores); Ruff valida formato y lint, y `mypy` estricto termina
   sin hallazgos sobre los 23 módulos del paquete. Los tres casos vigentes de
   integración ejecutan métodos del adaptador `OracleEngine` y pasaron sobre la
   base efímera de CI; cubren idempotencia, recuperación tras DDL parcial y

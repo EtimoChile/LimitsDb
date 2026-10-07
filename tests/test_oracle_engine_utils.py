@@ -1,3 +1,6 @@
+from datetime import datetime
+from types import SimpleNamespace
+
 import pytest
 
 from limitsdb.core.ldb_errors import DatabaseConnectionError, ExecutionError
@@ -30,6 +33,214 @@ def test_rows_processed_failure_is_not_reported_as_zero():
         OracleEngine.get_rows_processed(DummyConnection(), "OWNER", "TABLE", "20261006")  # type: ignore[arg-type]
 
     assert caught.value.__cause__ is cause
+
+
+def test_save_error_status_calls_supporting_procedure_and_commits(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    class DummyCursor:
+        closed = False
+
+        def var(self, data_type):
+            return f"var:{data_type}"
+
+        def callproc(self, name, arguments):
+            calls.append((name, arguments))
+
+        def close(self):
+            self.closed = True
+
+    class DummyConnection:
+        def __init__(self):
+            self.cursor_instance = DummyCursor()
+            self.commits = 0
+
+        def cursor(self):
+            return self.cursor_instance
+
+        def commit(self):
+            self.commits += 1
+
+    connection = DummyConnection()
+    process_end = datetime(2026, 10, 7, 12, 5)
+    monkeypatch.setattr(OracleEngine, "get_system_date", lambda conn: process_end)
+    config = Config(
+        schema="s",
+        mode="EXECUTE",
+        source_dsn="dsn",
+        source_username="user",
+        source_password="password",
+    )
+
+    OracleEngine.save_error_status(
+        connection,  # type: ignore[arg-type]
+        config,
+        "OWNER",
+        "ITEMS",
+        "20261007",
+        datetime(2026, 10, 7, 12, 0),
+        "controlled failure",
+        "begin fail; end;",
+    )
+
+    assert calls[0][0] == "check_save_status"
+    assert calls[0][1][0:5] == ["OWNER", "ITEMS", datetime(2026, 10, 7).date(), "SOURCE_ILM", "ERROR"]
+    assert calls[0][1][7:11] == [process_end, "controlled failure", 0, "begin fail; end;"]
+    assert connection.commits == 1
+    assert connection.cursor_instance.closed is True
+
+
+def test_save_error_status_chains_procedure_failure(monkeypatch: pytest.MonkeyPatch):
+    cause = RuntimeError("procedure failed")
+
+    class DummyCursor:
+        def var(self, data_type):
+            return object()
+
+        def callproc(self, name, arguments):
+            raise cause
+
+        def close(self):
+            self.closed = True
+
+    class DummyConnection:
+        def __init__(self):
+            self.cursor_instance = DummyCursor()
+
+        def cursor(self):
+            return self.cursor_instance
+
+    connection = DummyConnection()
+    monkeypatch.setattr(OracleEngine, "get_system_date", lambda conn: datetime(2026, 10, 7, 12, 5))
+    config = Config(
+        schema="s",
+        mode="EXECUTE",
+        source_dsn="dsn",
+        source_username="user",
+        source_password="password",
+    )
+
+    with pytest.raises(ExecutionError) as caught:
+        OracleEngine.save_error_status(
+            connection,  # type: ignore[arg-type]
+            config,
+            "OWNER",
+            "ITEMS",
+            "20261007",
+            datetime(2026, 10, 7, 12, 0),
+            "controlled failure",
+            "begin fail; end;",
+        )
+
+    assert caught.value.__cause__ is cause
+    assert connection.cursor_instance.closed is True
+
+
+def test_get_primary_key_columns_prefers_existing_primary_key(monkeypatch: pytest.MonkeyPatch):
+    cursor = SimpleNamespace(close=lambda: None)
+    connection = SimpleNamespace(cursor=lambda: cursor)
+    monkeypatch.setattr(OracleEngine, "_get_primary_key_info", lambda *args: ("ITEMS_PK", ("ID",), "ITEMS_PK"))
+
+    assert OracleEngine.get_primary_key_columns(connection, "OWNER", "ITEMS", {}) == ("ID",)  # type: ignore[arg-type]
+
+
+def test_get_primary_key_columns_selects_best_index(monkeypatch: pytest.MonkeyPatch):
+    class DummyCursor:
+        def __init__(self):
+            self.rows = []
+            self.closed = False
+
+        def execute(self, statement, **params):
+            assert params == {"owner": "OWNER", "table_name": "ITEMS"}
+            self.rows = [
+                ("IDX_NULLABLE", "UNIQUE", "OPTIONAL_ID", "200"),
+                ("IDX_STABLE", "UNIQUE", "ACCOUNT_ID", "100"),
+                ("IDX_STABLE", "UNIQUE", "ITEM_ID", "100"),
+            ]
+
+        def __iter__(self):
+            return iter(self.rows)
+
+        def close(self):
+            self.closed = True
+
+    cursor = DummyCursor()
+    connection = SimpleNamespace(cursor=lambda: cursor)
+    monkeypatch.setattr(OracleEngine, "_get_primary_key_info", lambda *args: (None, (), None))
+    columns = {
+        "OPTIONAL_ID": ColumnDefinition(name="OPTIONAL_ID", data_type="number", nullable=True),
+        "ACCOUNT_ID": ColumnDefinition(name="ACCOUNT_ID", data_type="number", nullable=False),
+        "ITEM_ID": ColumnDefinition(name="ITEM_ID", data_type="number", nullable=False),
+    }
+    table_config = {"columns_metadata": columns, "metadata": object()}
+
+    result = OracleEngine.get_primary_key_columns(
+        connection,
+        "OWNER",
+        "ITEMS",
+        table_config,  # type: ignore[arg-type]
+    )
+
+    assert result == ("ACCOUNT_ID", "ITEM_ID")
+    assert cursor.closed is True
+
+
+def test_get_primary_key_columns_returns_empty_when_no_suitable_index(monkeypatch: pytest.MonkeyPatch):
+    class DummyCursor:
+        def __init__(self):
+            self.closed = False
+
+        def execute(self, statement, **params):
+            pass
+
+        def __iter__(self):
+            return iter([])
+
+        def close(self):
+            self.closed = True
+
+    cursor = DummyCursor()
+    connection = SimpleNamespace(cursor=lambda: cursor)
+    monkeypatch.setattr(OracleEngine, "_get_primary_key_info", lambda *args: (None, (), None))
+
+    result = OracleEngine.get_primary_key_columns(
+        connection,
+        "OWNER",
+        "ITEMS",
+        {"columns_metadata": {}, "metadata": object()},  # type: ignore[arg-type]
+    )
+
+    assert result == ()
+    assert cursor.closed is True
+
+
+def test_get_primary_key_columns_closes_cursor_on_metadata_query_error(monkeypatch: pytest.MonkeyPatch):
+    cause = RuntimeError("metadata unavailable")
+
+    class DummyCursor:
+        def __init__(self):
+            self.closed = False
+
+        def execute(self, statement, **params):
+            raise cause
+
+        def close(self):
+            self.closed = True
+
+    cursor = DummyCursor()
+    connection = SimpleNamespace(cursor=lambda: cursor)
+    monkeypatch.setattr(OracleEngine, "_get_primary_key_info", lambda *args: (None, (), None))
+
+    with pytest.raises(RuntimeError) as caught:
+        OracleEngine.get_primary_key_columns(
+            connection,
+            "OWNER",
+            "ITEMS",
+            {"columns_metadata": {}, "metadata": object()},  # type: ignore[arg-type]
+        )
+
+    assert caught.value is cause
+    assert cursor.closed is True
 
 
 def test_get_date_condition_renders_expected_predicate():
