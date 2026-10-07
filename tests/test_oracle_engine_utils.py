@@ -95,6 +95,7 @@ def test_generated_source_insert_does_not_duplicate_limitsdb_columns():
 
     block = OracleEngine.generate_sql_block(config, table_config, "20261007")
 
+    assert "A.*, l_process_date AS ldb_process_date, sysdate AS ldb_insert_date" in block
     assert "(ID, CREATED_AT, LDB_PROCESS_DATE, LDB_INSERT_DATE)" in block
     assert "values (r_rec(i).ID, r_rec(i).CREATED_AT, r_rec(i).LDB_PROCESS_DATE, r_rec(i).LDB_INSERT_DATE)" in block
     assert "LDB_PROCESS_DATE, LDB_INSERT_DATE, LDB_PROCESS_DATE" not in block

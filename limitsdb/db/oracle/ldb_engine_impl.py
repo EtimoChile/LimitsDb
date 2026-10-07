@@ -438,7 +438,11 @@ class OracleEngine(DatabaseEngine):
     l_sqlcode number := null;
     l_out_message varchar2(200) := null;"""
         if not has_lob_columns:
-            cols_expr = ", ".join(["A.*", *other_cols_exprs])
+            other_cols_select = [
+                f"{expression} AS {OracleEngine._format_identifier(alias)}"
+                for expression, alias in zip(other_cols_exprs, other_cols_alias, strict=True)
+            ]
+            cols_expr = ", ".join(["A.*", *other_cols_select])
             plsql += f"""
     l_chunk_size pls_integer := {execution.chunk_size}; l_chunk_start date;
     cursor c_records is
