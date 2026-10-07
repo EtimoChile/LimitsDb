@@ -137,9 +137,43 @@ def test_parse_cli_sets_and_build_config(monkeypatch: pytest.MonkeyPatch):
     assert merged["ilm_config_file"] is None
 
 
-def test_argparser_choices_requirements():
+def test_env_metadata_is_authoritative_and_ilm_name_is_normalized(monkeypatch: pytest.MonkeyPatch):
+    bindings = ldb_params_config.env_bindings_from_config()
+
+    assert bindings["LDB_CHUNK_SIZE"] == "chunk_size"
+    assert bindings["LDB_ILM_CONFIG_FILE"] == "ilm_config_file"
+    assert "ILM_CONFIG_FILE" not in bindings
+    assert "LDB_USE_ADDED_COLUMNS" not in bindings
+    assert "LDB_ADD_LDB_COLUMNS" not in bindings
+
+    monkeypatch.setenv("LDB_CHUNK_SIZE", "250")
+    monkeypatch.setenv("LDB_ILM_CONFIG_FILE", "current.yml")
+    monkeypatch.setenv("ILM_CONFIG_FILE", "legacy.yml")
+    monkeypatch.setenv("LDB_USE_ADDED_COLUMNS", "false")
+    assert ldb_params_config.read_env_overrides(bindings) == {
+        "chunk_size": 250,
+        "ilm_config_file": "current.yml",
+    }
+
+
+@pytest.mark.parametrize("key", ["use_added_columns", "add_ldb_columns"])
+def test_history_column_settings_reject_cli_set(key: str):
+    with pytest.raises(ValueError, match="persistent YAML"):
+        ldb_params_config._parse_cli_sets([f"{key}=false"])
+
+
+def test_argparser_choices_requirements(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LDB_SCHEMA", raising=False)
     parser = ldb_params_config.build_argparser_from_config()
     with pytest.raises(SystemExit):
         parser.parse_args([])
     parsed = parser.parse_args(["--schema", "s", "--mode", "DRY_RUN"])
     assert parsed.mode == "DRY_RUN"
+
+
+def test_schema_can_be_bootstrapped_from_registered_environment(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LDB_SCHEMA", "environment-schema")
+    parser = ldb_params_config.build_argparser_from_config()
+
+    parsed = parser.parse_args([])
+    assert not hasattr(parsed, "schema")

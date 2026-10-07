@@ -55,30 +55,28 @@ def _load_secrets(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], data)
 
 
-def _read_env_overrides(prefix: str = "LDB_") -> dict[str, Any]:
+def read_env_overrides(bindings: Mapping[str, str]) -> dict[str, Any]:
+    """Read only environment variables explicitly registered by Config metadata."""
     out: dict[str, Any] = {}
-    for k, v in os.environ.items():
-        if not k.startswith(prefix):
+    for env_name, config_key in bindings.items():
+        if env_name not in os.environ:
             continue
-        # A single underscore belongs to the public flat key (for example,
-        # LDB_CHUNK_SIZE -> chunk_size). A double underscore is reserved for
-        # a future/nested key (LDB_GROUP__VALUE -> group.value).
-        key = k[len(prefix) :].lower().replace("__", ".")
+        value = os.environ[env_name]
         # basic typing
-        if v.lower() in ("true", "false"):
-            out[key] = v.lower() == "true"
+        if value.lower() in ("true", "false"):
+            out[config_key] = value.lower() == "true"
             continue
         try:
-            out[key] = int(v)
+            out[config_key] = int(value)
             continue
         except ValueError:
             pass
         try:
-            out[key] = float(v)
+            out[config_key] = float(value)
             continue
         except ValueError:
             pass
-        out[key] = v
+        out[config_key] = value
     return out
 
 
@@ -116,12 +114,13 @@ def load_runtime_config(
     schema: str,
     profile: str | None,
     cli_sets: dict[str, Any],
+    env_bindings: Mapping[str, str] | None = None,
     explicit_config_file: str | None = None,
     explicit_config_dir: str | None = None,
     enforce_encrypted_secrets: bool = True,
 ) -> dict[str, Any]:
     """
-    config_file → ENV LDB_* → --set
+    config_file → registered environment variables → --set
     Then inject **decrypted** secrets from schemas/<schema>/secrets*.json.
     If enforce_encrypted_secrets=True, plaintext secrets are rejected.
     """
@@ -144,7 +143,7 @@ def load_runtime_config(
         assert config_file is not None
         cfg = _deep_merge(cfg, _load_yaml(Path(config_file)))
     # 4) ENV
-    env_over = _read_env_overrides()
+    env_over = read_env_overrides(env_bindings or {})
     if env_over:
         cfg = _apply_overrides(cfg, env_over)
     # 5) CLI --set

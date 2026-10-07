@@ -20,19 +20,21 @@ def test_deep_merge_and_overrides():
 
 
 def test_read_env_overrides(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TEST_FLAG", "true")
-    monkeypatch.setenv("TEST_NUMBER", "42")
-    monkeypatch.setenv("TEST_FLOAT", "3.14")
-    monkeypatch.setenv("TEST_CHUNK_SIZE", "500")
-    monkeypatch.setenv("TEST_GROUP__VALUE", "nested")
-    monkeypatch.setenv("OTHER", "ignored")
-    env = ldb_config_loader._read_env_overrides(prefix="TEST_")
+    monkeypatch.setenv("LDB_FLAG", "true")
+    monkeypatch.setenv("LDB_NUMBER", "42")
+    monkeypatch.setenv("LDB_FLOAT", "3.14")
+    monkeypatch.setenv("LDB_UNREGISTERED", "ignored")
+    env = ldb_config_loader.read_env_overrides(
+        {
+            "LDB_FLAG": "flag",
+            "LDB_NUMBER": "number",
+            "LDB_FLOAT": "float",
+        }
+    )
     assert env == {
         "flag": True,
         "number": 42,
         "float": 3.14,
-        "chunk_size": 500,
-        "group.value": "nested",
     }
 
 
@@ -52,15 +54,19 @@ def test_load_runtime_config_with_overlays(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(ldb_config_loader, "get_config_roots", lambda: (tmp_path / "user", tmp_path / "system"))
     monkeypatch.setattr(ldb_config_loader, "secret_keys_from_config", lambda: ["source_password"])
     monkeypatch.setattr(ldb_config_loader, "_IS_ENC", lambda v: True)
-    monkeypatch.setenv("LDB_EXTRA", "value")
+    monkeypatch.setenv("LDB_CHUNK_SIZE", "500")
 
     monkeypatch.setattr(ldb_config_loader, "_DECRYPT", lambda v: "pw")
     cfg = ldb_config_loader.load_runtime_config(
-        schema="s", profile=None, cli_sets={"bar.nested": False}, explicit_config_dir=None
+        schema="s",
+        profile=None,
+        cli_sets={"bar.nested": False},
+        env_bindings={"LDB_CHUNK_SIZE": "chunk_size"},
+        explicit_config_dir=None,
     )
     assert cfg["foo"] == 1
     assert cfg["bar"]["nested"] is False
-    assert cfg["extra"] == "value"
+    assert cfg["chunk_size"] == 500
     assert cfg["source_password"] == "pw"
 
 
@@ -103,6 +109,7 @@ def test_runtime_precedence_is_system_user_explicit_env_cli_then_secrets(
         schema="s",
         profile="dev",
         cli_sets={"winner": "cli", "nested.winner": "cli"},
+        env_bindings={"LDB_WINNER": "winner"},
         explicit_config_file=str(explicit),
     )
 

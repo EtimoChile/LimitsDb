@@ -20,13 +20,18 @@ The effective value order, from lowest to highest priority, is:
 1. system `config.<PROFILE>.yml`;
 2. user `config.<PROFILE>.yml`;
 3. `--config-file` overlay;
-4. `LDB_*` environment variables;
+4. environment variables explicitly registered through `Config`'s `Env(...)`
+   metadata;
 5. explicit CLI flags and `--set`;
 6. decrypted values from `secrets.<PROFILE>.json` for fields marked secret.
 
-A single underscore in an environment name belongs to the flat Python key
-(`LDB_CHUNK_SIZE` becomes `chunk_size`). A double underscore is the reserved
-separator for a nested override (`LDB_GROUP__VALUE` becomes `group.value`).
+Environment names map programmatically to flat Config fields through their
+exact `Env(...)` declarations (`Env("LDB_CHUNK_SIZE")` on `chunk_size`). An
+unregistered variable is not a configuration override even when it starts with
+`LDB_`. All public names use that prefix, including `LDB_ILM_CONFIG_FILE`.
+`use_added_columns` and `add_ldb_columns` deliberately have no `Env` metadata
+and are also rejected by `--set`; they are stable, file-only properties of the
+historical environment.
 
 The ILM policy input remains independent from runtime configuration. An
 explicit ILM YAML file is normalized to row mappings. Without that override,
@@ -71,6 +76,9 @@ enter the normalized rule contract.
    typed views.
 4. Type normalized ILM rules and mutable processing state while retaining
    mapping-compatible engine boundaries.
+5. Make `Env(...)` the authoritative environment allowlist, normalize the ILM
+   file override to `LDB_ILM_CONFIG_FILE` without a legacy alias, and make the
+   two history-column shape settings YAML-only.
 
 Any nested public YAML format remains outside this work and would require a
 separate compatibility decision, migration tests, README update, and changelog

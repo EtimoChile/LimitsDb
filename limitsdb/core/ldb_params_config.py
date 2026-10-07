@@ -14,7 +14,7 @@ from typing import (
     get_type_hints,
 )
 
-from limitsdb.core.ldb_config_loader import load_runtime_config
+from limitsdb.core.ldb_config_loader import load_runtime_config, read_env_overrides
 from limitsdb.core.ldb_errors import ValidationError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_meta import Cli, CliOnly, Env, Help, Secret
@@ -25,6 +25,7 @@ logger = get_logger("params_config")
 VALID_MODES: tuple[str, ...] = ("VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE")
 MODE_ALIASES: dict[str, str] = {"DRY_RUN": "PREVIEW"}
 MODES_REQUIRING_CONNECTIONS: set[str] = {"VALIDATE", "PREVIEW", "SCRIPT", "EXECUTE"}
+FILE_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"use_added_columns", "add_ldb_columns"})
 
 IlmAction = Literal["SOURCE_ILM", "HISTORY_ILM"]
 RuntimeMode = Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"]
@@ -131,7 +132,7 @@ class Config:
     parallel_max: Annotated[
         int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("LDB_PARALLEL_MAX")
     ] = 10
-    db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine")] = "oracle"
+    db_engine: Annotated[Literal["oracle", "postgres"], Help("Database engine"), Env("LDB_DB_ENGINE")] = "oracle"
     log_level: Annotated[
         Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         Help("Logging level"),
@@ -149,7 +150,7 @@ class Config:
         str | None,
         Help("YAML file with tables (bypass DB discovery)"),
         Cli("--ilm-config-file"),
-        Env("ILM_CONFIG_FILE"),
+        Env("LDB_ILM_CONFIG_FILE"),
         CliOnly(),
     ] = None
     # Database connection parameters
@@ -158,20 +159,24 @@ class Config:
         Help(
             "DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname."
         ),
+        Env("LDB_SOURCE_DSN"),
     ] = ""
-    source_username: Annotated[str | None, Help("Username")] = ""
+    source_username: Annotated[str | None, Help("Username"), Env("LDB_SOURCE_USERNAME")] = ""
     source_password: Annotated[str | None, Help("Password"), Secret()] = ""
     history_dsn: Annotated[
         str | None,
         Help(
             "DSN / connection descriptor (engine-specific). Examples — Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). Postgres: host:port/dbname."
         ),
+        Env("LDB_HISTORY_DSN"),
     ] = ""
-    history_username: Annotated[str | None, Help("Username")] = ""
+    history_username: Annotated[str | None, Help("Username"), Env("LDB_HISTORY_USERNAME")] = ""
     history_password: Annotated[str | None, Help("Password"), Secret()] = ""
-    admin_source_username: Annotated[str | None, Help("Admin username")] = ""
+    admin_source_username: Annotated[str | None, Help("Admin username"), Env("LDB_ADMIN_SOURCE_USERNAME")] = ""
     admin_source_password: Annotated[str | None, Help("Admin Source password"), Secret()] = ""
-    admin_history_username: Annotated[str | None, Help("Admin History username")] = ""
+    admin_history_username: Annotated[str | None, Help("Admin History username"), Env("LDB_ADMIN_HISTORY_USERNAME")] = (
+        ""
+    )
     admin_history_password: Annotated[str | None, Help("Admin History password"), Secret()] = ""
     source_default_tablespace: Annotated[str | None, Help("Default tablespace for the source user")] = None
     history_default_tablespace: Annotated[str | None, Help("Default tablespace for the history user")] = None
@@ -293,6 +298,20 @@ def _arg_type_from_default(default: Any) -> type[bool] | type[int] | type[float]
     return str
 
 
+def env_bindings_from_config() -> dict[str, str]:
+    """Return exact environment-name to Config-field bindings from Env metadata."""
+    bindings: dict[str, str] = {}
+    hints = get_type_hints(Config, include_extras=True)
+    for field_name, annotated in hints.items():
+        env = next((meta for meta in get_args(annotated)[1:] if isinstance(meta, Env)), None)
+        if env is None:
+            continue
+        if env.name in bindings:
+            raise RuntimeError(f"Duplicate environment binding: {env.name}")
+        bindings[env.name] = field_name
+    return bindings
+
+
 def build_argparser_from_config() -> argparse.ArgumentParser:
     """
     Build an argparse.ArgumentParser from Config's Annotated metadata.
@@ -300,6 +319,7 @@ def build_argparser_from_config() -> argparse.ArgumentParser:
     CLI defaults are suppressed so they don't override values from YAML or ENV.
     """
     parser = argparse.ArgumentParser(description="LimitsDb CLI", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    env_values = read_env_overrides(env_bindings_from_config())
     hints = get_type_hints(Config, include_extras=True)
     for name, annotated in hints.items():
         metas = get_args(annotated)
@@ -315,8 +335,8 @@ def build_argparser_from_config() -> argparse.ArgumentParser:
         origin = get_origin(annotated)
         if origin is Literal:
             arg_kwargs["choices"] = tuple(get_args(annotated))
-        # Make --schema required (empty-string default is just for template rendering)
-        if name == "schema":
+        # Schema can be supplied by its explicitly registered environment variable.
+        if name == "schema" and "schema" not in env_values:
             arg_kwargs["required"] = True
         # Booleans: use BooleanOptionalAction for --flag / --no-flag
         if isinstance(default, bool):
@@ -349,6 +369,9 @@ def _parse_cli_sets(pairs: Sequence[str]) -> dict[str, Any]:
         if "=" not in p:
             continue
         k, v = p.split("=", 1)
+        key = k.strip()
+        if key.split(".", 1)[0] in FILE_ONLY_CONFIG_KEYS:
+            raise ValidationError(f"'{key}' can only be set in the persistent YAML configuration")
         v = v.strip()
         # simple auto-typing
         if v.isdigit():
@@ -361,7 +384,7 @@ def _parse_cli_sets(pairs: Sequence[str]) -> dict[str, Any]:
                 v_typed = float(v)
             except ValueError:
                 v_typed = v
-        out[k.strip()] = v_typed
+        out[key] = v_typed
     return out
 
 
@@ -374,6 +397,15 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> d
     Environment and CLI overrides are handled inside the loader (ENV LDB_*), and here we map
     explicit flags to --set so they win with the highest priority.
     """
+    env_bindings = env_bindings_from_config()
+    env_values = read_env_overrides(env_bindings)
+    schema = getattr(cli_args, "schema", None) or env_values.get("schema")
+    if not schema:
+        raise ValidationError("schema is required through --schema or LDB_SCHEMA")
+    profile = getattr(cli_args, "profile", None)
+    if profile is None:
+        profile = env_values.get("profile")
+
     # Map CLI flags (derived from Config metadata) into --set key=value overrides
     cli_sets: dict[str, Any] = _parse_cli_sets(getattr(cli_args, "set", []))
     # Pull values for every CLI-exposed field from args and push into cli_sets if not None
@@ -397,9 +429,10 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> d
                 cli_sets[name] = val
     # Call the loader with overlay sources
     cfg = load_runtime_config(
-        schema=cli_args.schema,
-        profile=getattr(cli_args, "profile", None),
+        schema=str(schema),
+        profile=cast(str | None, profile),
         cli_sets=cli_sets,
+        env_bindings=env_bindings,
         explicit_config_file=getattr(cli_args, "config_file", None),
         explicit_config_dir=getattr(cli_args, "config_dir", None),
     )
@@ -407,13 +440,13 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> d
     final = dict(defaults)
     final.update(cfg)
     # Ensure schema/profile land in the object (the loader also uses them but they are not part of the dict)
-    final["schema"] = cli_args.schema
-    final["profile"] = getattr(cli_args, "profile", None)
+    final["schema"] = schema
+    final["profile"] = profile
     final["ilm_config_file"] = resolve_schema_file(
-        schema=cli_args.schema,
-        profile=getattr(cli_args, "profile", None),
+        schema=str(schema),
+        profile=cast(str | None, profile),
         explicit_config_dir=getattr(cli_args, "config_dir", None),
-        explicit_file=getattr(cli_args, "ilm_config_file", None),
+        explicit_file=cast(str | None, final.get("ilm_config_file")),
         prefix_name="ilm",
         extension_name="yml",
         description="ilm configuration file",

@@ -32,7 +32,7 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
 - La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-07 es
-  de 74 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
+  de 78 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
   sin hallazgos sobre los 23 módulos del paquete. Los tres casos vigentes de
   integración ejecutan métodos del adaptador `OracleEngine` y pasaron sobre la
   base efímera de CI; cubren idempotencia, recuperación tras DDL parcial y
@@ -56,6 +56,13 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
   reglas ILM normalizadas y el estado derivado de tablas también tienen
   contratos tipados. `PEND-004` está resuelto.
+- Las variables de entorno se habilitan y mapean exclusivamente mediante los
+  metadatos `Env(...)` de `Config`; todos sus nombres públicos usan el prefijo
+  `LDB_`, incluido `LDB_ILM_CONFIG_FILE`. `use_added_columns` y
+  `add_ldb_columns` se fijan en la configuración YAML persistente del ambiente
+  y no admiten flags, variables de entorno ni `--set`, porque variar estas
+  características puede desestabilizar el procesamiento histórico. `PEND-011`
+  está resuelto.
 - Los límites de configuración, secretos, validación, conexión y ejecución
   exponen errores de dominio encadenados. Los archivos de secretos inválidos
   detienen la operación sin sobrescribirse y los fallos de workers producen un
@@ -106,3 +113,5 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - `DEC-012`: cada fila histórica conserva los valores necesarios para reevaluar
   todos sus predicados, incluidas fechas de corte y columnas adicionales de
   tablas relacionadas; `LDB_DATE_<suffix>` usa un diferenciador, no un alias SQL.
+- `DEC-013`: fijar `use_added_columns` y `add_ldb_columns` exclusivamente en la
+  configuración persistente del ambiente y excluirlos de CLI, entorno y `--set`.

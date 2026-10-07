@@ -236,8 +236,6 @@ Common overrides:
 --mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW simulate, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
---use-added-columns / --no-use-added-columns  # Toggle helper columns in history tables
---add-ldb-columns / --no-add-ldb-columns      # Toggle ILM execution timestamp columns
 --log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Adjust logger verbosity
 --ilm-config-file <path>                      # Point to a specific ILM YAML file
 --config-dir <root>                           # Override config root discovery
@@ -288,14 +286,14 @@ poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EX
 | `action`                 | `--action`                 | `LDB_ACTION`                 | `config.<PROFILE>.yml: action`                   |
 | `mode`                   | `--mode`                   | `LDB_MODE`                   | `config.<PROFILE>.yml: mode`                     |
 | `chunk_size`             | `--chunk-size`             | `LDB_CHUNK_SIZE`             | `config.<PROFILE>.yml: chunk_size`               |
-| `use_added_columns`      | `--use-added-columns`      | `LDB_USE_ADDED_COLS`         | `config.<PROFILE>.yml: use_added_columns`        |
-| `add_ldb_columns`        | `--add-ldb-columns`        | `LDB_ADD_LDB_COLUMNS`        | `config.<PROFILE>.yml: add_ldb_columns`          |
+| `use_added_columns`      | —                          | —                            | `config.<PROFILE>.yml: use_added_columns`        |
+| `add_ldb_columns`        | —                          | —                            | `config.<PROFILE>.yml: add_ldb_columns`          |
 | `parallel_max`           | `--parallel-max`           | `LDB_PARALLEL_MAX`           | `config.<PROFILE>.yml: parallel_max`             |
 | `db_engine`              | `--db-engine`              | `LDB_DB_ENGINE`              | `config.<PROFILE>.yml: db_engine`                |
 | `log_level`              | `--log-level`              | `LDB_LOG_LEVEL`              | `config.<PROFILE>.yml: log_level`                |
 | `schema`                 | `--schema`                 | `LDB_SCHEMA`                 | CLI only (not stored).                           |
 | `profile`                | `--profile`                | `LDB_PROFILE`                | CLI only (not stored).                           |
-| `ilm_config_file`        | `--ilm-config-file`        | `ILM_CONFIG_FILE`            | CLI only (not stored).                           |
+| `ilm_config_file`        | `--ilm-config-file`        | `LDB_ILM_CONFIG_FILE`        | CLI only (not stored).                           |
 | `source_dsn`             | `--source-dsn`             | `LDB_SOURCE_DSN`             | `config.<PROFILE>.yml: source_dsn`               |
 | `source_username`        | `--source-username`        | `LDB_SOURCE_USERNAME`        | `config.<PROFILE>.yml: source_username`          |
 | `source_password`        | —                          | —                            | `secrets.<PROFILE>.json: source_password`        |
@@ -328,7 +326,7 @@ Lowest → highest priority:
 1. System root: `/etc/limitsdb`
 2. User root: `~/.config/LimitsDb`
 3. `--config-file` (extra overlay)
-4. Environment variables (`LDB_*`)
+4. Registered environment variables (`Env("LDB_*")` metadata)
 5. `--<param> value` or `--set key=value`
 
 After overlays, secrets from `secrets.<PROFILE>.json` are loaded and decrypted. If any secret is plaintext and enforcement is enabled (default), the loader raises an error.
@@ -369,12 +367,16 @@ Holds only secret fields (empty by default). Must be encrypted (run `ldb-crypt`)
 
 ## Environment Variables
 
-Any variable prefixed with `LDB_` becomes a config override (underscores become dots). Examples:
+Only variables explicitly registered with `Env(...)` in the Config model become overrides. The declared name maps
+directly to its Config field; unregistered `LDB_*` variables are ignored. Examples:
 
 - `LDB_PARALLEL_MAX=8` → `parallel_max: 8`
 - `LDB_LOG_LEVEL=DEBUG` → `log_level: "DEBUG"`
 
 Booleans accept `true/false`, `1/0`, `on/off` (case-insensitive).
+
+`use_added_columns` and `add_ldb_columns` are intentionally file-only because changing the historical table shape
+between runs can destabilize history processing. They cannot be overridden through environment variables or `--set`.
 
 ## Development
 
