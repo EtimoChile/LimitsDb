@@ -188,6 +188,18 @@ def test_get_identifiers_from_expression_handles_mixed_cases_and_quotes():
     }
 
 
+def test_rewrite_expression_identifiers_uses_persisted_names_and_preserves_unknowns():
+    expression = "@state = 'PURGE' AND @\"MixedCase\" = 1 AND @untouched = 2"
+
+    rewritten = OracleEngine.rewrite_expression_identifiers(
+        expression,
+        {"STATE": "STATE_B", "MixedCase": "MixedCase_B"},
+        qualifier="A",
+    )
+
+    assert rewritten == "A.state_b = 'PURGE' AND A.\"MixedCase_B\" = 1 AND @untouched = 2"
+
+
 def test_get_column_type_variants_and_errors():
     assert OracleEngine.get_column_type(ColumnDefinition(name="a", data_type="string", length=10)) == "VARCHAR2(10)"
     assert OracleEngine.get_column_type(ColumnDefinition(name="b", data_type="char", length=None)) == "CHAR(1)"

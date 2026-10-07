@@ -588,7 +588,18 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
             alias_prefix = al + "."
             mod_alexp_uac = alias_prefix if is_source_mode or not config.execution.use_added_columns else "A."
             if addtl_expr:
-                cond_list.append(addtl_expr.replace("@", mod_alexp_uac))
+                if not is_source_mode and config.execution.use_added_columns and al != "A":
+                    related_identifiers = engine.get_identifiers_from_expression(history_addtl_filter_expr)
+                    persisted_identifiers = {identifier: f"{identifier}_{al}" for identifier in related_identifiers}
+                    cond_list.append(
+                        engine.rewrite_expression_identifiers(
+                            history_addtl_filter_expr,
+                            persisted_identifiers,
+                            qualifier="A",
+                        )
+                    )
+                else:
+                    cond_list.append(addtl_expr.replace("@", mod_alexp_uac))
             if purge_date_expr:
                 if is_source_mode or not config.execution.use_added_columns or al == "A":
                     cond_list.append(
@@ -601,7 +612,6 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                         )
                     )
             cd["cond_expr"] = " and ".join(cond_list)
-            cd["history_addtl_filter_expr"] = addtl_expr
         # get the maximum cnf_retain_months_history from all added_conds
         table_cnf["months_keep_history_max"] = max_ignore_none([cd["retain_months_history"] for _, cd in added_conds])
         # if HISTORY_ILM and cnf_months_keep_history_max is None, skip the table
@@ -634,7 +644,10 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                             },
                         )
                     # Add columns in cnf_history_addtl_filter_expr to other_cols_exprs and other_cols_alias for referencing tables
-                    for column_name in engine.get_identifiers_from_expression(cd["history_addtl_filter_expr"] or ""):
+                    history_filter = " ".join(
+                        nvl(cd["history_addtl_filter_expr"], cd["additional_filter_expr"] or "").splitlines()
+                    )
+                    for column_name in engine.get_identifiers_from_expression(history_filter):
                         column_metadata = _clone_column_definition(f"{column_name}_{al}", columns_metadata[column_name])
                         other_column: _OtherColumn = {
                             "name": f"{column_name}_{al}",

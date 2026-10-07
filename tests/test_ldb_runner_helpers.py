@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from limitsdb.core import ldb_runner
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
+from limitsdb.db.ldb_engines import ColumnDefinition
+from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
 
 
 def test_build_dependency_graph_and_layers():
@@ -88,6 +90,108 @@ def test_runtime_join_uses_source_relationship_and_history_derived_columns():
     assert ldb_runner._runtime_join_expression(source_config, rule) == (
         "left outer JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID"
     )
+
+
+def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch):
+    def rules():
+        common = {
+            "id": 1,
+            "source_owner": "SOURCE",
+            "history_owner": "HISTORY",
+            "retain_months_source": None,
+            "retain_months_history": None,
+            "exec_day": None,
+            "frecuency": "D",
+            "is_active": "Y",
+            "purge_date_expr": None,
+            "additional_filter_expr": None,
+            "history_addtl_filter_expr": None,
+            "history_hint_expr": None,
+            "source_orphan_purge": "N",
+            "orphan_check_column": None,
+            "has_lob_columns": "N",
+            "referencing_tables": None,
+            "join_expr": None,
+            "hint_expr": None,
+            "long_columns": None,
+            "ctl_status": None,
+        }
+        parent = {
+            **common,
+            "table_name": "PARENT",
+            "retain_months_source": 2,
+            "retain_months_history": 3,
+            "purge_date_expr": "@CREATED_AT",
+            "additional_filter_expr": "@SOURCE_STATE = 'READY'",
+            "history_addtl_filter_expr": "@HISTORY_STATE = 'PURGE'",
+        }
+        child = {
+            **common,
+            "id": 2,
+            "table_name": "CHILD",
+            "referencing_tables": "PARENT B",
+            "join_expr": "@ JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID",
+        }
+        return [parent, child]
+
+    class DummyEngine:
+        get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+        get_date_condition = staticmethod(OracleEngine.get_date_condition)
+        get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
+        rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
+
+        @staticmethod
+        def get_ldb_columns_expressions():
+            return "l_process_date", "sysdate"
+
+        @staticmethod
+        def get_table_columns(connection, owner, table_name):
+            names = {
+                "PARENT": ["ID", "CREATED_AT", "SOURCE_STATE", "HISTORY_STATE"],
+                "CHILD": ["ID", "PARENT_ID", "HISTORY_STATE_B", "LDB_DATE_B"],
+            }[table_name]
+            return names, {
+                name: ColumnDefinition(name=name, data_type="varchar2", id=index, length=20)
+                for index, name in enumerate(names, start=1)
+            }
+
+        @staticmethod
+        def generate_sql_block(config, table_cnf, process_date):
+            return table_cnf["query_expr"]
+
+    loaded_rules = rules()
+    monkeypatch.setattr(ldb_runner, "_get_conf_rows", lambda config, engine, connection: loaded_rules)
+    source_config = Config(
+        schema="s",
+        action="SOURCE_ILM",
+        mode="SCRIPT",
+        source_dsn="dsn",
+        source_username="user",
+        source_password="password",
+    )
+    source_tables = ldb_runner.process_tables_cnf(object(), source_config, DummyEngine(), "20261007")
+    source_child = source_tables[("SOURCE", "CHILD")]
+
+    assert {column["name"] for column in source_child["other_columns"]} >= {
+        "HISTORY_STATE_B",
+        "LDB_DATE_B",
+    }
+    assert "B.SOURCE_STATE = 'READY'" in source_child["query_expr"]
+
+    loaded_rules = rules()
+    history_config = Config(
+        schema="s",
+        action="HISTORY_ILM",
+        mode="SCRIPT",
+        history_dsn="dsn",
+        history_username="user",
+        history_password="password",
+    )
+    history_tables = ldb_runner.process_tables_cnf(object(), history_config, DummyEngine(), "20261007")
+    history_query = history_tables[("SOURCE", "CHILD")]["query_expr"]
+
+    assert "A.history_state_b = 'PURGE'" in history_query
+    assert "SOURCE.PARENT" not in history_query
 
 
 def test_exception_details_supports_oracle_and_generic_errors():

@@ -364,6 +364,23 @@ class OracleEngine(DatabaseEngine):
         return identifiers
 
     @staticmethod
+    def rewrite_expression_identifiers(expression: str, replacements: Mapping[str, str], *, qualifier: str) -> str:
+        """Rewrite ``@`` identifiers to qualified persisted Oracle columns."""
+
+        def replace_identifier(match: re.Match[str]) -> str:
+            token = match.group(1)
+            if token.startswith('"') and token.endswith('"'):
+                identifier = token[1:-1].replace('""', '"')
+            else:
+                identifier = token.upper()
+            replacement = replacements.get(identifier)
+            if replacement is None:
+                return match.group(0)
+            return f"{qualifier}.{OracleEngine._format_identifier(replacement)}"
+
+        return OracleEngine._PREFIXED_IDENTIFIER.sub(replace_identifier, expression)
+
+    @staticmethod
     def get_column_type(column: ColumnDefinition) -> str:
         dtype = column.data_type.lower()
         if dtype in ("string", "varchar", "varchar2"):

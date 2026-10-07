@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Preserve related-table columns used only by historical filters and rewrite those predicates to their stored `<column>_<alias>` snapshots during `HISTORY_ILM`.
 - Generate source-to-history inserts with one explicitly aliased value for each `LDB_PROCESS_DATE` and `LDB_INSERT_DATE` audit column.
 - Avoid double-counting processed rows when chunk totals have already been recorded before the table reaches `TEND`.
 - Route `HISTORY_ILM` reads and deletes through the configured history owner, and size control/log action fields for the full `HISTORY_ILM` value.

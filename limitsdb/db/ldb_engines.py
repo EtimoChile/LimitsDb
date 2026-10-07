@@ -158,6 +158,20 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def rewrite_expression_identifiers(expression: str, replacements: Mapping[str, str], *, qualifier: str) -> str:
+        """Rewrite prefixed identifiers using engine-specific identifier rules.
+
+        Args:
+            expression: Expression containing identifiers prefixed with ``@``.
+            replacements: Mapping from normalized source identifiers to persisted identifiers.
+            qualifier: SQL qualifier to apply to each replacement.
+        Returns:
+            The expression with every mapped identifier rendered for the database engine.
+        """
+        pass
+
+    @staticmethod
+    @abstractmethod
     def get_column_type(column: ColumnDefinition) -> str:
         """Returns the database-specific column type definition for the given column.
         Args:
