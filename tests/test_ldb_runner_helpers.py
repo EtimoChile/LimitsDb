@@ -69,6 +69,26 @@ def test_runtime_owner_follows_ilm_action():
     assert ldb_runner._runtime_owner(Config(schema="s", action="HISTORY_ILM", mode="PLAN"), rule) == "HISTORY"
 
 
+def test_runtime_join_uses_source_relationship_and_history_derived_columns():
+    rule = {
+        "join_expr": "@ JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID",
+        "source_orphan_purge": "N",
+    }
+
+    source_config = Config(schema="s", action="SOURCE_ILM", mode="PLAN")
+    history_config = Config(schema="s", action="HISTORY_ILM", mode="PLAN")
+
+    assert ldb_runner._runtime_join_expression(source_config, rule) == (
+        "inner JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID"
+    )
+    assert ldb_runner._runtime_join_expression(history_config, rule) == ""
+
+    rule["source_orphan_purge"] = "Y"
+    assert ldb_runner._runtime_join_expression(source_config, rule) == (
+        "left outer JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID"
+    )
+
+
 def test_exception_details_supports_oracle_and_generic_errors():
     oracle_error = SimpleNamespace(code=942, message="table missing")
     assert ldb_runner._exception_details(Exception(oracle_error)) == (942, "table missing")

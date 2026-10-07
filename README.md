@@ -121,9 +121,11 @@ container inside the Linux runner, uses only credentials local to that job, and
 destroys the database when the job finishes. The workflow does not connect to a
 shared or production database. These tests exercise LimitsDb adapter behavior
 against a real Oracle instance; they do not attempt to test Oracle itself. The
-end-to-end happy path provisions separate source and history schemas through
-`ldb-impl`, loads operational fixture rows, executes both `SOURCE_ILM` and
-`HISTORY_ILM`, and verifies the resulting data and audit records.
+end-to-end happy path invokes the installed `ldb-impl` and `ldb-run` entry
+points, provisions separate source and history schemas, and processes related
+order/header and line/detail tables through both `SOURCE_ILM` and `HISTORY_ILM`.
+It verifies dependency-safe movement and purge results together with their audit
+records.
 
 The integration tests are excluded from the default test command. To run them
 against an explicitly disposable Oracle instance:
@@ -314,7 +316,7 @@ Each entry in `ilm.<PROFILE>.yml` merges table-level attributes with one or more
 - **Date expressions:** `purge_date_expr` identifies the date column (or expression) that anchors retention. Prefix column references with `@` (for example, `"@DSP_DATE"`); the runner swaps the prefix for the proper table alias at execution time.
 - **Additional filters:** Add optional filters through `additional_filter_expr` (source runs) and `history_addtl_filter_expr` (history runs). Both accept the same `@column` syntax, and the history expression falls back to the source expression when omitted.
 - **Referencing tables:** Use `referencing_tables` to pull parent conditions into child tables. List entries as `<TABLE> <ALIAS>` (optionally `<OWNER>.<TABLE> <ALIAS>`) and supply matching `join_expr` fragments. The runner inherits active conditions from each referenced table and rewrites the join fragments—`@` becomes `inner` joins by default or `left outer` joins when `source_orphan_purge: true` to find orphans.
-- **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to delete child rows whose parents no longer qualify. The engine also materializes helper columns (e.g., `ldb_date_<alias>`) when `use_added_columns` is enabled so history cleanups can reference parent timestamps.
+- **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to delete child rows whose parents no longer qualify. The engine also materializes helper columns (e.g., `ldb_date_<alias>`) when `use_added_columns` is enabled so history cleanups can reference parent timestamps without joining back to source tables.
 
 ## Configuration Resolution (Overlay Order)
 

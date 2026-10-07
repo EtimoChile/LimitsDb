@@ -145,6 +145,15 @@ def _runtime_owner(config: Config, rule: IlmRule) -> str:
     return rule["source_owner"] if config.execution.action == "SOURCE_ILM" else rule["history_owner"]
 
 
+def _runtime_join_expression(config: Config, rule: IlmRule) -> str:
+    """Render source joins, avoiding them when history predicates use stored derived columns."""
+    join_expr = rule["join_expr"]
+    if not join_expr or (config.execution.action == "HISTORY_ILM" and config.execution.use_added_columns):
+        return ""
+    join_type = "left outer" if rule["source_orphan_purge"] == "Y" else "inner"
+    return join_expr.replace("@", join_type)
+
+
 def _plan_mode(config: Config) -> int:
     rows = _load_offline_rows(config)
     if not rows:
@@ -637,13 +646,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 }
             )
         _, cnf_table_name = key
-        cnf_join_expr, cnf_source_orphan_purge = cnd0["join_expr"], cnd0["source_orphan_purge"]
-        # Prepare join_expr changing type of join based on cnf_source_orphan_purge
-        join_expr = (
-            cnf_join_expr.replace("@", "left outer" if cnf_source_orphan_purge == "Y" else "inner")
-            if cnf_join_expr
-            else ""
-        )
+        join_expr = _runtime_join_expression(config, cnd0)
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
         base_from = f"from {runtime_owner.lower()}.{cnf_table_name.lower()} A"
         join_clause = f"\n   {join_expr}" if join_expr else ""

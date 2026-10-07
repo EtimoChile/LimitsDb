@@ -1,8 +1,8 @@
 import json
 import os
 import secrets
+import shutil
 import subprocess
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -67,16 +67,18 @@ def _execute_cleanup_ddl(connection: oracledb.Connection, statement: str, *, mis
         cursor.close()
 
 
-def _run_cli(module: str, *arguments: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_cli(command: str, *arguments: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    executable = shutil.which(command, path=environment.get("PATH"))
+    assert executable is not None, f"installed CLI entry point not found: {command}"
     result = subprocess.run(
-        [sys.executable, "-m", module, *arguments],
+        [executable, *arguments],
         check=False,
         capture_output=True,
         env=environment,
         text=True,
         timeout=180,
     )
-    assert result.returncode == 0, f"{module} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == 0, f"{command} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     return result
 
 
@@ -134,6 +136,14 @@ def _write_e2e_configuration(
         retain_months_source: 2
         retain_months_history: 3
         purge_date_expr: "@CREATED_AT"
+  - source_owner: LDBT_E2E_SOURCE
+    history_owner: LDBT_E2E_HISTORY
+    table_name: ILM_ORDER_LINES
+    frecuency: D
+    hint_expr: full(A) full(B) use_hash(A B)
+    history_hint_expr: full(A)
+    referencing_tables: ILM_ORDERS B
+    join_expr: "@ JOIN LDBT_E2E_SOURCE.ILM_ORDERS B ON B.ID=A.ORDER_ID"
 """,
         encoding="utf-8",
     )
@@ -146,10 +156,10 @@ def _e2e_environment(home: Path) -> dict[str, str]:
     return environment
 
 
-def _fetch_ids(connection: oracledb.Connection, table_name: str) -> list[int]:
+def _fetch_ids(connection: oracledb.Connection, table_name: str, id_column: str = "id") -> list[int]:
     cursor = connection.cursor()
     try:
-        cursor.execute(f"SELECT id FROM {table_name} ORDER BY id")
+        cursor.execute(f"SELECT {id_column} FROM {table_name} ORDER BY {id_column}")
         return [row[0] for row in cursor]
     finally:
         cursor.close()
@@ -309,7 +319,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
     source_connection: oracledb.Connection | None = None
     history_connection: oracledb.Connection | None = None
     try:
-        _run_cli("limitsdb.cli.ldb_impl", *common_arguments, environment=cli_environment)
+        _run_cli("ldb-impl", *common_arguments, environment=cli_environment)
 
         encrypted_secrets = json.loads((config_root / "schemas" / "e2e" / "secrets.json").read_text("utf-8"))
         assert all(value.startswith("enc:v1:aes256gcm:") for value in encrypted_secrets.values())
@@ -352,16 +362,29 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                     payload VARCHAR2(40) NOT NULL
                 )"""
             )
+            source_cursor.execute(
+                """CREATE TABLE ilm_order_lines (
+                    line_id NUMBER(10) PRIMARY KEY,
+                    order_id NUMBER(10) NOT NULL,
+                    payload VARCHAR2(40) NOT NULL,
+                    CONSTRAINT ilm_order_lines_order_fk
+                        FOREIGN KEY (order_id) REFERENCES ilm_orders (id)
+                )"""
+            )
             source_cursor.executemany(
                 "INSERT INTO ilm_orders (id, created_at, payload) VALUES (:1, ADD_MONTHS(TRUNC(SYSDATE), :2), :3)",
                 [(1, -1, "recent"), (2, -3, "archive"), (3, -7, "purge")],
+            )
+            source_cursor.executemany(
+                "INSERT INTO ilm_order_lines (line_id, order_id, payload) VALUES (:1, :2, :3)",
+                [(11, 1, "recent-line"), (21, 2, "archive-line"), (31, 3, "purge-line-a"), (32, 3, "purge-line-b")],
             )
             source_connection.commit()
         finally:
             source_cursor.close()
 
         _run_cli(
-            "limitsdb.cli.ldb_run",
+            "ldb-run",
             *common_arguments,
             "--action",
             "SOURCE_ILM",
@@ -373,6 +396,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         history_connection = oracledb.connect(user=history_user, password=history_password, dsn=dsn)
         assert _fetch_ids(source_connection, "ilm_orders") == [1]
         assert _fetch_ids(history_connection, "ilm_orders") == [2, 3]
+        assert _fetch_ids(source_connection, "ilm_order_lines", "line_id") == [11]
+        assert _fetch_ids(history_connection, "ilm_order_lines", "line_id") == [21, 31, 32]
 
         source_cursor = source_connection.cursor()
         try:
@@ -383,11 +408,18 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 [source_user],
             )
             assert source_cursor.fetchone() == ("SOURCE_ILM", "TEND", 2)
+            source_cursor.execute(
+                """SELECT ctl_action, ctl_status, ctl_rows_processed
+                     FROM ldb_ctl
+                    WHERE ctl_owner = :1 AND ctl_table_name = 'ILM_ORDER_LINES'""",
+                [source_user],
+            )
+            assert source_cursor.fetchone() == ("SOURCE_ILM", "TEND", 3)
         finally:
             source_cursor.close()
 
         _run_cli(
-            "limitsdb.cli.ldb_run",
+            "ldb-run",
             *common_arguments,
             "--action",
             "HISTORY_ILM",
@@ -398,6 +430,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
 
         assert _fetch_ids(source_connection, "ilm_orders") == [1]
         assert _fetch_ids(history_connection, "ilm_orders") == [2]
+        assert _fetch_ids(source_connection, "ilm_order_lines", "line_id") == [11]
+        assert _fetch_ids(history_connection, "ilm_order_lines", "line_id") == [21]
         history_cursor = history_connection.cursor()
         try:
             history_cursor.execute(
@@ -408,10 +442,27 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             )
             assert history_cursor.fetchone() == ("HISTORY_ILM", "TEND", 1)
             history_cursor.execute(
+                """SELECT ctl_action, ctl_status, ctl_rows_processed
+                     FROM ldb_ctl
+                    WHERE ctl_owner = :1 AND ctl_table_name = 'ILM_ORDER_LINES'""",
+                [source_user],
+            )
+            assert history_cursor.fetchone() == ("HISTORY_ILM", "TEND", 2)
+            history_cursor.execute(
                 """SELECT COUNT(*)
                      FROM ldb_log
                     WHERE log_owner = :1
                       AND log_table_name = 'ILM_ORDERS'
+                      AND log_action = 'HISTORY_ILM'
+                      AND log_status = 'TEND'""",
+                [source_user],
+            )
+            assert history_cursor.fetchone()[0] == 1
+            history_cursor.execute(
+                """SELECT COUNT(*)
+                     FROM ldb_log
+                    WHERE log_owner = :1
+                      AND log_table_name = 'ILM_ORDER_LINES'
                       AND log_action = 'HISTORY_ILM'
                       AND log_status = 'TEND'""",
                 [source_user],
