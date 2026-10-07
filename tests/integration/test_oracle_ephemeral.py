@@ -903,8 +903,7 @@ def _fetch_ctl_status(connection: oracledb.Connection, *, owner: str, table_name
     try:
         cursor.execute(
             """SELECT ctl_status FROM ldb_ctl
-                WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_action = :3
-                ORDER BY ctl_id DESC""",
+                WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_action = :3""",
             [owner, table_name, action],
         )
         row = cursor.fetchone()
