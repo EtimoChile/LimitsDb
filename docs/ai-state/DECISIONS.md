@@ -2,7 +2,7 @@
 status: active
 authority: decision-register
 scope: development/maintenance/release
-last-reviewed: 2026-10-06
+last-reviewed: 2026-10-07
 ---
 
 # Registro compacto de decisiones
@@ -23,6 +23,7 @@ especificaciones ni registra cada cambio de código.
 | `DEC-008` | 2026-10-06 | `VIGENTE` | Robustez/errores | Traducir fallos de configuración, secretos, validación, conexión y ejecución a errores de dominio encadenados; reservar capturas amplias para fronteras documentadas de proceso, rollback, validación o limpieza. | Evitar que archivos corruptos, errores de consulta o fallos de workers se conviertan en éxitos aparentes, sin perder la causa ni la evidencia recuperable. | Resuelve `PEND-003`. | `limitsdb/core/ldb_errors.py`; `docs/exception-handling.md`; `README.md` |
 | `DEC-009` | 2026-10-06 | `VIGENTE` | Configuración/API | Mantener plana y compatible la configuración pública mientras el núcleo adopta por fases vistas tipadas e inmutables para ejecución, conexiones, administración y reglas ILM. | Separar responsabilidades y reducir accesos dinámicos sin combinar la refactorización interna con una migración de YAML, CLI, entorno o precedencia. | Resuelve `PEND-004`; relacionada con `DEC-002`. | `docs/configuration-contract.md`; `limitsdb/core/ldb_params_config.py`; `limitsdb/core/ldb_ilm_config.py`; `limitsdb/core/ldb_runner.py` |
 | `DEC-010` | 2026-10-06 | `VIGENTE` | Pruebas/CI/seguridad | Ejecutar la integración automatizada con Oracle sobre una base efímera dentro de un runner Linux de GitHub Actions, sin entregar acceso a la base cloud persistente a código de colaboradores externos. | Permitir pruebas reales y reproducibles de Oracle con aislamiento por job, sin secretos de infraestructura compartida ni estado residual entre contribuciones. | Avanza `PEND-005`; aplica `DEC-003`. | `.github/workflows/oracle-integration.yaml`; `tests/integration/test_oracle_ephemeral.py`; `README.md` |
+| `DEC-011` | 2026-10-07 | `VIGENTE` | Configuración/multibase | Mantener las políticas ILM exclusivamente en archivos de configuración y retirar `LDB_CNF` como fuente y objeto requerido. La transición no eliminará automáticamente tablas legadas existentes. | Una configuración externa única evita replicar DDL, lectura y sincronización de políticas por motor y por base, y simplifica escenarios con origen e historia en bases distintas. | Relacionada con `DEC-002` y `DEC-009`; origina `PEND-009`. | `docs/ai-state/PENDING.md`; implementación futura en configuración, contratos de motor y `ldb-impl` |
 
 Estados permitidos: `VIGENTE`, `REEMPLAZADA` y `DESCARTADA`. Una decisión
 reemplazada conserva su fila y referencia el ID sucesor.

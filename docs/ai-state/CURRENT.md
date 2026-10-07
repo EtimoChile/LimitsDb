@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-06
-last-updated: 2026-10-06
+last-reviewed: 2026-10-07
+last-updated: 2026-10-07
 ---
 
 # Estado vigente
@@ -31,8 +31,8 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - Las operaciones ILM pueden archivar, purgar, crear objetos y administrar
   privilegios. No se ejecutan contra una base real sin autorización explícita y
   un entorno identificado.
-- La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-06 es
-  de 71 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
+- La suite reside en `tests/`. La baseline unitaria verificada el 2026-10-07 es
+  de 72 pruebas exitosas; Ruff valida formato y lint, y `mypy` estricto termina
   sin hallazgos sobre los 23 módulos del paquete. Los tres casos vigentes de
   integración ejecutan métodos del adaptador `OracleEngine` y pasaron sobre la
   base efímera de CI; cubren idempotencia, recuperación tras DDL parcial y
@@ -40,7 +40,8 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   del proveedor sin intervención de LimitsDb. El cuarto caso E2E crea esquemas
   separados mediante `ldb-impl`, ejecuta `SOURCE_ILM` y `HISTORY_ILM` sobre
   filas controladas y verifica datos y auditoría; los cuatro casos pasaron en
-  GitHub sobre el commit `170e6af`.
+  GitHub sobre el commit `170e6af`. Una ampliación en curso ejecuta los entry
+  points instalados e incorpora tablas padre-detalle con clave foránea.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
@@ -90,3 +91,6 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   fases hacia contratos tipados e inmutables.
 - `DEC-010`: ejecutar la integración Oracle en una base efímera dentro de un
   runner Linux de GitHub Actions, sin acceso externo a la base cloud persistente.
+- `DEC-011`: mantener las políticas ILM exclusivamente en archivos de
+  configuración y retirar el uso de `LDB_CNF` sin eliminar automáticamente
+  objetos legados.
