@@ -54,7 +54,9 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   las 74 pruebas locales pasan. Las seis pruebas Oracle también pasaron en el
   runner efímero de GitHub `37679891653` sobre el commit `d5f9c95`, incluidas
   las dos variantes que antes reproducían los defectos. `PEND-012` está
-  resuelto.
+  resuelto. El run `37695410856` sobre `bcc8861` verificó 97 pruebas locales y 7
+  E2E exitosas (cobertura combinada 85 %; TOTAL 2582 sentencias, 314 no
+  cubiertas, 818 ramas, 159 parciales); todavía no se impone un umbral mínimo.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
