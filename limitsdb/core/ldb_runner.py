@@ -154,9 +154,41 @@ def _runtime_join_expression(config: Config, rule: IlmRule) -> str:
     return join_expr.replace("@", join_type)
 
 
+def _orphan_predicate(rule: IlmRule) -> str:
+    """Return the predicate that identifies a missing referenced row."""
+    if rule["source_orphan_purge"] != "Y":
+        return ""
+    columns = [column.strip() for column in (rule["orphan_check_column"] or "").split(",") if column.strip()]
+    return " or ".join(f"{column} is null" for column in columns)
+
+
+def _validate_orphan_configuration(config: Config, rule: IlmRule, key: tuple[str, str]) -> None:
+    """Validate the relationship data needed to archive orphan source rows."""
+    if rule["source_orphan_purge"] != "Y":
+        if rule["orphan_check_column"]:
+            raise ValueError(f"source_orphan_purge must be enabled when orphan_check_column is set for {key}")
+        return
+    missing = [
+        name
+        for name, value in (
+            ("referencing_tables", rule["referencing_tables"]),
+            ("join_expr", rule["join_expr"]),
+            ("orphan_check_column", rule["orphan_check_column"]),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"{', '.join(missing)} required when source_orphan_purge is enabled for {key}")
+    if not config.execution.use_added_columns:
+        raise ValueError(f"use_added_columns must be enabled when source_orphan_purge is enabled for {key}")
+
+
 def _relationship_date_column(alias: str) -> str:
     """Return the stable unquoted name used to persist a related table's retention date."""
     return f"LDB_DATE_{alias.upper()}"
+
+
+_ORPHAN_MARKER_COLUMN = "LDB_IS_ORPHAN"
 
 
 def _plan_mode(config: Config) -> int:
@@ -545,9 +577,11 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     # Persist the resulting predicate in cond_expr so later stages can reuse it.
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
+        _validate_orphan_configuration(config, cnd0, key)
         runtime_owner = _runtime_owner(config, cnd0)
         inherited_references = cnd0["referencing_tables"]
         added_conds = [("A", cond) for cond in table_cnf["conds"]]
+        orphan_history_date_predicates: list[str] = []
         table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(
             connection, runtime_owner, cnd0["table_name"]
         )
@@ -606,14 +640,16 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                         engine.get_date_condition(purge_date_expr.replace("@", alias_prefix), cast(int, retain_months))
                     )
                 else:
-                    cond_list.append(
-                        engine.get_date_condition(
-                            f"A.{_relationship_date_column(al)}", cast(int, retain_months_history)
-                        )
+                    relationship_date_predicate = engine.get_date_condition(
+                        f"A.{_relationship_date_column(al)}", cast(int, retain_months_history)
                     )
+                    cond_list.append(relationship_date_predicate)
+                    orphan_history_date_predicates.append(relationship_date_predicate)
             cd["cond_expr"] = " and ".join(cond_list)
         # get the maximum cnf_retain_months_history from all added_conds
         table_cnf["months_keep_history_max"] = max_ignore_none([cd["retain_months_history"] for _, cd in added_conds])
+        if cnd0["source_orphan_purge"] == "Y" and nvl(table_cnf["months_keep_history_max"], 0) <= 0:
+            raise ValueError(f"positive retain_months_history required when source_orphan_purge is enabled for {key}")
         # if HISTORY_ILM and cnf_months_keep_history_max is None, skip the table
         if not is_source_mode and table_cnf["months_keep_history_max"] is None:
             table_cnf["skip"] = True
@@ -622,7 +658,17 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
         # get where expression from cond_expr of all added_conds joined by " or "
         if config.execution.action == "SOURCE_ILM" and not any(cd["cond_expr"] for _, cd in added_conds):
             raise ValueError(f"At least one condition must be specified for SOURCE_ILM on table {key}")
-        where_expr = "\n   or ".join([f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]])
+        predicates = [f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]]
+        if is_source_mode:
+            orphan_predicate = _orphan_predicate(cnd0)
+            if orphan_predicate:
+                predicates.append(f"({orphan_predicate})")
+        elif cnd0["source_orphan_purge"] == "Y":
+            if not orphan_history_date_predicates:
+                raise ValueError(f"related retention date required when source_orphan_purge is enabled for {key}")
+            orphan_dates = "\n      or ".join(f"({predicate})" for predicate in orphan_history_date_predicates)
+            predicates.append(f"(A.{_ORPHAN_MARKER_COLUMN} = 'Y' and ({orphan_dates}))")
+        where_expr = "\n   or ".join(predicates)
         other_columns: list[_OtherColumn] = []
         table_cnf["other_columns"] = other_columns
         if config.execution.use_added_columns and is_source_mode:
@@ -639,7 +685,12 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                             other_columns,
                             {
                                 "name": relationship_date_column,
-                                "expr": nvl(cd["purge_date_expr"], "").replace("@", al + "."),
+                                "expr": engine.get_fallback_expression(
+                                    nvl(cd["purge_date_expr"], "").replace("@", al + "."),
+                                    ldb_process_date_expr,
+                                )
+                                if cnd0["source_orphan_purge"] == "Y"
+                                else nvl(cd["purge_date_expr"], "").replace("@", al + "."),
                                 "metadata": column_metadata,
                             },
                         )
@@ -655,6 +706,20 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                             "metadata": column_metadata,
                         }
                         _append_unique_name(other_columns, other_column)
+            orphan_predicate = _orphan_predicate(cnd0)
+            if orphan_predicate:
+                other_columns.append(
+                    {
+                        "name": _ORPHAN_MARKER_COLUMN,
+                        "expr": f"case when {orphan_predicate} then 'Y' else 'N' end",
+                        "metadata": ColumnDefinition(
+                            name=_ORPHAN_MARKER_COLUMN,
+                            data_type="string",
+                            length=1,
+                            nullable=True,
+                        ),
+                    }
+                )
         if config.execution.add_ldb_columns and is_source_mode:
             other_columns.append(
                 {

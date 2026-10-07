@@ -148,6 +148,12 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_fallback_expression(expression: str, fallback: str) -> str:
+        """Return an expression that uses ``fallback`` when ``expression`` is null."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def get_identifiers_from_expression(expression: str) -> set[str]:
         """Returns a set of @prefixxed identifiers found in the given expression.
         Args:

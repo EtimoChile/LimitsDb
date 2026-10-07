@@ -171,6 +171,81 @@ def _write_e2e_configuration(
     )
 
 
+def _write_orphan_e2e_configuration(
+    root: Path,
+    *,
+    dsn: str,
+    admin_user: str,
+    admin_password: str,
+    source_user: str,
+    source_password: str,
+    history_user: str,
+    history_password: str,
+) -> None:
+    schema_dir = root / "schemas" / "orphan-e2e"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "config.yml").write_text(
+        "\n".join(
+            [
+                "db_engine: oracle",
+                f"source_dsn: {json.dumps(dsn)}",
+                f"source_username: {source_user}",
+                f"history_dsn: {json.dumps(dsn)}",
+                f"history_username: {history_user}",
+                f"admin_source_username: {admin_user}",
+                f"admin_history_username: {admin_user}",
+                "source_default_tablespace: USERS",
+                "history_default_tablespace: USERS",
+                "source_to_history_dblink_name: LDBT_ORPH_HIST",
+                "history_to_source_dblink_name: LDBT_ORPH_SRC",
+                "source_role_name: LDBT_ORPH_SOURCE_ROLE",
+                "history_role_name: LDBT_ORPH_HISTORY_ROLE",
+                "parallel_max: 1",
+                "chunk_size: 2",
+                "use_added_columns: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (schema_dir / "secrets.json").write_text(
+        json.dumps(
+            {
+                "source_password": source_password,
+                "history_password": history_password,
+                "admin_source_password": admin_password,
+                "admin_history_password": admin_password,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (schema_dir / "ilm.yml").write_text(
+        """tables:
+  - source_owner: LDBT_ORPH_SOURCE
+    history_owner: LDBT_ORPH_HISTORY
+    table_name: ORPHAN_PARENTS
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true
+        retain_months_source: 2
+        retain_months_history: 3
+        purge_date_expr: "@CREATED_AT"
+  - source_owner: LDBT_ORPH_SOURCE
+    history_owner: LDBT_ORPH_HISTORY
+    table_name: ORPHAN_CHILDREN
+    frecuency: D
+    hint_expr: full(A) full(B) use_hash(A B)
+    history_hint_expr: full(A)
+    referencing_tables: ORPHAN_PARENTS B
+    join_expr: "@ JOIN LDBT_ORPH_SOURCE.ORPHAN_PARENTS B ON B.ID=A.PARENT_ID"
+    source_orphan_purge: true
+    orphan_check_column: B.ID
+""",
+        encoding="utf-8",
+    )
+
+
 def _e2e_environment(home: Path) -> dict[str, str]:
     environment = {key: value for key, value in os.environ.items() if not key.startswith("LDB_")}
     environment["HOME"] = str(home)
@@ -647,6 +722,99 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 )
                 == 1
             )
+    finally:
+        if source_connection is not None:
+            source_connection.close()
+        if history_connection is not None:
+            history_connection.close()
+        for user in (source_user, history_user):
+            _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+        for role in (source_role, history_role):
+            _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+
+def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
+    oracle_connection: oracledb.Connection, tmp_path: Path
+):
+    source_user = "LDBT_ORPH_SOURCE"
+    history_user = "LDBT_ORPH_HISTORY"
+    source_role = "LDBT_ORPH_SOURCE_ROLE"
+    history_role = "LDBT_ORPH_HISTORY_ROLE"
+    for user in (source_user, history_user):
+        _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+    for role in (source_role, history_role):
+        _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+    dsn = os.environ["LDB_ORACLE_TEST_DSN"]
+    admin_user = os.environ["LDB_ORACLE_TEST_USER"]
+    admin_password = os.environ["LDB_ORACLE_TEST_PASSWORD"]
+    source_password = f"LdbOrph_{secrets.token_hex(16)}"
+    history_password = f"LdbOrph_{secrets.token_hex(16)}"
+    config_root = tmp_path / "orphan-config"
+    _write_orphan_e2e_configuration(
+        config_root,
+        dsn=dsn,
+        admin_user=admin_user,
+        admin_password=admin_password,
+        source_user=source_user,
+        source_password=source_password,
+        history_user=history_user,
+        history_password=history_password,
+    )
+    cli_environment = _e2e_environment(tmp_path / "orphan-home")
+    common_arguments = ("--schema", "orphan-e2e", "--config-dir", str(config_root))
+
+    source_connection: oracledb.Connection | None = None
+    history_connection: oracledb.Connection | None = None
+    try:
+        _run_cli("ldb-impl", *common_arguments, environment=cli_environment)
+        source_connection = oracledb.connect(user=source_user, password=source_password, dsn=dsn)
+        source_cursor = source_connection.cursor()
+        try:
+            source_cursor.execute("CREATE TABLE orphan_parents (id NUMBER(10) PRIMARY KEY, created_at DATE NOT NULL)")
+            source_cursor.execute(
+                """CREATE TABLE orphan_children (
+                    line_id NUMBER(10) PRIMARY KEY,
+                    parent_id NUMBER(10) NOT NULL,
+                    payload VARCHAR2(40) NOT NULL
+                )"""
+            )
+            source_cursor.execute(
+                "INSERT INTO orphan_parents (id, created_at) VALUES (1, ADD_MONTHS(TRUNC(SYSDATE), -1))"
+            )
+            source_cursor.executemany(
+                "INSERT INTO orphan_children (line_id, parent_id, payload) VALUES (:1, :2, :3)",
+                [(11, 1, "has-parent"), (99, 999, "orphan")],
+            )
+            source_connection.commit()
+        finally:
+            source_cursor.close()
+
+        _run_cli(
+            "ldb-run",
+            *common_arguments,
+            "--action",
+            "SOURCE_ILM",
+            "--mode",
+            "EXECUTE",
+            environment=cli_environment,
+        )
+
+        history_connection = oracledb.connect(user=history_user, password=history_password, dsn=dsn)
+        assert _fetch_ids(source_connection, "orphan_children", "line_id") == [11]
+        assert _fetch_ids(history_connection, "orphan_children", "line_id") == [99]
+        history_cursor = history_connection.cursor()
+        try:
+            history_cursor.execute(
+                """SELECT COUNT(*)
+                     FROM orphan_children
+                    WHERE line_id = 99
+                      AND ldb_is_orphan = 'Y'
+                      AND TRUNC(ldb_date_b) = TRUNC(SYSDATE)"""
+            )
+            assert history_cursor.fetchone()[0] == 1
+        finally:
+            history_cursor.close()
     finally:
         if source_connection is not None:
             source_connection.close()

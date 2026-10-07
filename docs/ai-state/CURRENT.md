@@ -71,6 +71,13 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   resultado recuperable identificado por tabla. El coordinador reintenta en la
   misma corrida un fallo parcial sólo si aumentó el contador procesado; sin
   progreso lo convierte en `SKIPPED`.
+- `source_orphan_purge` archiva las filas de origen cuyo `left outer join` no
+  encuentra una relación, detectadas por cualquier `orphan_check_column IS
+  NULL`. Requiere snapshots derivados y retención histórica positiva; persiste
+  el estado en `LDB_IS_ORPHAN` y, si la fecha de una relación es nula, guarda la
+  fecha de proceso para que `HISTORY_ILM` conserve la retención evaluable. La
+  suite local vigente contiene 81 pruebas y existe un caso E2E Oracle separado
+  pendiente de ejecución en el runner efímero. `PEND-010` está resuelto.
 - El workflow `.github/workflows/quality.yaml` ejecuta en Python 3.12 las
   barreras de formato, lint, tipado, pruebas, pre-commit, construcción,
   verificación de distribuciones e instalación limpia del wheel. La publicación
@@ -85,8 +92,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   las pruebas. La suite ampliada tardó 4.16 segundos y mantuvo 5.4 GiB libres.
   El workflow también mide cobertura combinada de líneas y ramas para la suite
   local y la E2E, incluidos subprocesses CLI y workers, y conserva informes de
-  texto, XML y HTML durante 14 días; la primera baseline combinada aún debe
-  verificarse en GitHub antes de definir un umbral.
+  texto, XML y HTML durante 14 días. El run `37689648223` sobre `faa3209`
+  verificó 80 pruebas locales y 6 E2E exitosas, con 81,42 % de líneas, 67,46 %
+  de ramas y 78 % combinado; `PEND-013` está resuelto y todavía no se impone un
+  umbral mínimo.
 - Inversiones Etimo SpA mantiene el proyecto. Los términos aplicables se
   distribuyen en los archivos de licencia, notices y edición comercial de la
   raíz.
@@ -125,3 +134,5 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   PostgreSQL tempranamente en configuración, CLI y carga de motor.
 - `DEC-015`: medir conjuntamente cobertura local y Oracle E2E, incluidos los
   procesos hijos, y verificar la baseline antes de imponer un umbral.
+- `DEC-016`: archivar los huérfanos detectados por outer join, usando la fecha
+  de proceso como fallback de sus fechas de control relacionadas.

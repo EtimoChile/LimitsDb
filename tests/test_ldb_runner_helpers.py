@@ -131,6 +131,8 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch):
             "table_name": "CHILD",
             "referencing_tables": "PARENT B",
             "join_expr": "@ JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID",
+            "source_orphan_purge": "Y",
+            "orphan_check_column": "B.ID",
         }
         return [parent, child]
 
@@ -139,6 +141,7 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch):
         get_date_condition = staticmethod(OracleEngine.get_date_condition)
         get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
         rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
+        get_fallback_expression = staticmethod(OracleEngine.get_fallback_expression)
 
         @staticmethod
         def get_ldb_columns_expressions():
@@ -175,8 +178,15 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch):
     assert {column["name"] for column in source_child["other_columns"]} >= {
         "HISTORY_STATE_B",
         "LDB_DATE_B",
+        "LDB_IS_ORPHAN",
     }
     assert "B.SOURCE_STATE = 'READY'" in source_child["query_expr"]
+    assert "left outer JOIN SOURCE.PARENT B" in source_child["query_expr"]
+    assert "(B.ID is null)" in source_child["query_expr"]
+    relationship_date = next(column for column in source_child["other_columns"] if column["name"] == "LDB_DATE_B")
+    assert relationship_date["expr"] == "coalesce(B.CREATED_AT, l_process_date)"
+    orphan_marker = next(column for column in source_child["other_columns"] if column["name"] == "LDB_IS_ORPHAN")
+    assert orphan_marker["expr"] == "case when B.ID is null then 'Y' else 'N' end"
 
     loaded_rules = rules()
     history_config = Config(
@@ -191,7 +201,36 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch):
     history_query = history_tables[("SOURCE", "CHILD")]["query_expr"]
 
     assert "A.history_state_b = 'PURGE'" in history_query
+    assert "A.LDB_IS_ORPHAN = 'Y'" in history_query
     assert "SOURCE.PARENT" not in history_query
+
+
+def test_orphan_configuration_requires_complete_relationship_and_snapshots():
+    rule = {
+        "source_orphan_purge": "Y",
+        "orphan_check_column": None,
+        "referencing_tables": "PARENT B",
+        "join_expr": "@ JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID",
+    }
+    config = Config(schema="s", action="SOURCE_ILM", mode="PLAN")
+
+    try:
+        ldb_runner._validate_orphan_configuration(config, rule, ("SOURCE", "CHILD"))
+    except ValueError as exc:
+        assert "orphan_check_column required" in str(exc)
+    else:
+        raise AssertionError("missing orphan_check_column was accepted")
+
+    rule["orphan_check_column"] = "B.ID, C.ID"
+    no_snapshots = Config(schema="s", action="SOURCE_ILM", mode="PLAN", use_added_columns=False)
+    try:
+        ldb_runner._validate_orphan_configuration(no_snapshots, rule, ("SOURCE", "CHILD"))
+    except ValueError as exc:
+        assert "use_added_columns must be enabled" in str(exc)
+    else:
+        raise AssertionError("orphan purge without derived snapshots was accepted")
+
+    assert ldb_runner._orphan_predicate(rule) == "B.ID is null or C.ID is null"
 
 
 def test_exception_details_supports_oracle_and_generic_errors():

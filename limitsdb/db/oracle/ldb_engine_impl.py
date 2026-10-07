@@ -347,6 +347,11 @@ class OracleEngine(DatabaseEngine):
         return f"({date_expr} < add_months(l_process_date,-{months_keep_src}))"
 
     @staticmethod
+    def get_fallback_expression(expression: str, fallback: str) -> str:
+        """Return Oracle's null-safe fallback expression."""
+        return f"coalesce({expression}, {fallback})"
+
+    @staticmethod
     def get_identifiers_from_expression(expression: str) -> set[str]:
         """Returns a set of @prefixxed identifiers found in the given expression.
         Args:

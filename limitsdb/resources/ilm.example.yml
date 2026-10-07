@@ -36,8 +36,8 @@
 #     history_hint_expr: full(A)
 #     referencing_tables: INV_HEAD B # List of parent tables
 #     join_expr: "@ JOIN GL.INV_HEAD B ON B.INV_ID=A.INV_ID" # Join expression to link to parent table (must follow DB identifier rules)
-#     source_orphan_purge: true # If there mast to apply ILM to rows without parent
-#     orphan_check_column: B.INV_ID # Column from parent to use for orphan detection
+#     source_orphan_purge: true # Archive source rows whose referenced parent is absent; requires use_added_columns: true
+#     orphan_check_column: B.INV_ID # Parent column checked with IS NULL after the left outer join
 #     # conds:
 #     #   - is_active: true # If a table with no conds but an explicit inactive one is considered inactive
 #   - source_owner: GL # Parent table
@@ -65,7 +65,7 @@
 #     referencing_tables: GL.DSP_HEAD B, GL.INV_DET C, GL.INV_HEAD D
 #     join_expr: "@ JOIN GL.DSP_HEAD B ON B.DSP_ID=A.DSP_ID @ JOIN GL.INV_DET C ON C.IND_ID = A.IND_ID @ JOIN GL.INV_HEAD ON D.INV_ID= C.INV_ID"
 #     source_orphan_purge: true
-#     orphan_check_column: B.DSP_ID, C.IND_ID, D.INV_ID
+#     orphan_check_column: B.DSP_ID, C.IND_ID, D.INV_ID # Any NULL check marks the source row as orphaned
 #     has_lob_columns: true
 #     conds:
 #       # - is_active: true
