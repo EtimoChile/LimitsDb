@@ -43,12 +43,14 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   los entry points instalados, incorpora tablas padre-detalle con clave foránea,
   una rama independiente con dos workers y reruns idempotentes de ambas acciones;
   los cuatro casos pasaron en GitHub sobre el commit `d8a77ea`. `PEND-005` está
-  resuelto. La corrección local de `PEND-012` conserva por separado el filtro
+  resuelto. La corrección de `PEND-012` conserva por separado el filtro
   histórico normalizado, materializa sus columnas relacionadas aunque no estén
   en el filtro de origen y delega al adaptador la reescritura hacia
   `<columna>_<alias>` durante `HISTORY_ILM`; las dos pruebas unitarias focales y
-  las 74 pruebas locales pasan. La ejecución de las seis pruebas Oracle sobre
-  esta corrección permanece pendiente en el runner efímero de GitHub.
+  las 74 pruebas locales pasan. Las seis pruebas Oracle también pasaron en el
+  runner efímero de GitHub `37679891653` sobre el commit `d5f9c95`, incluidas
+  las dos variantes que antes reproducían los defectos. `PEND-012` está
+  resuelto.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
