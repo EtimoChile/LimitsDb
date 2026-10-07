@@ -120,7 +120,10 @@ separate Oracle integration workflow. It starts an Oracle Database Free
 container inside the Linux runner, uses only credentials local to that job, and
 destroys the database when the job finishes. The workflow does not connect to a
 shared or production database. These tests exercise LimitsDb adapter behavior
-against a real Oracle instance; they do not attempt to test Oracle itself.
+against a real Oracle instance; they do not attempt to test Oracle itself. The
+end-to-end happy path provisions separate source and history schemas through
+`ldb-impl`, loads operational fixture rows, executes both `SOURCE_ILM` and
+`HISTORY_ILM`, and verifies the resulting data and audit records.
 
 The integration tests are excluded from the default test command. To run them
 against an explicitly disposable Oracle instance:
