@@ -43,11 +43,11 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   los entry points instalados, incorpora tablas padre-detalle con clave foránea,
   una rama independiente con dos workers y reruns idempotentes de ambas acciones;
   los cuatro casos pasaron en GitHub sobre el commit `d8a77ea`. `PEND-005` está
-  resuelto. El árbol de trabajo agrega dos variantes E2E para `PEND-012`: una
-  exige materializar una columna usada sólo por el filtro histórico y otra
-  exige reescribirla como `<columna>_<alias>` durante `HISTORY_ILM`; se
-  recolectan seis casos Oracle en total y las variantes nuevas aún no se han
-  ejecutado en el runner efímero.
+  resuelto. Dos variantes E2E para `PEND-012` exigen materializar una columna
+  usada sólo por el filtro histórico y reescribirla como
+  `<columna>_<alias>` durante `HISTORY_ILM`. La ejecución de GitHub
+  `37673480103` sobre `c1de690` confirmó ambos defectos: cuatro casos Oracle
+  pasaron y esas dos variantes fallaron en sus comprobaciones específicas.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
