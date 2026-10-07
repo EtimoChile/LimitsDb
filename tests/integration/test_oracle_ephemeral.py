@@ -109,7 +109,7 @@ def _write_e2e_configuration(
         "history_to_source_dblink_name: LDBT_E2E_SRC",
         "source_role_name: LDBT_E2E_SOURCE_ROLE",
         "history_role_name: LDBT_E2E_HISTORY_ROLE",
-        "parallel_max: 1",
+        "parallel_max: 2",
         "chunk_size: 2",
     ]
     (schema_dir / "config.yml").write_text("\n".join(config_lines) + "\n", encoding="utf-8")
@@ -144,6 +144,16 @@ def _write_e2e_configuration(
     history_hint_expr: full(A)
     referencing_tables: ILM_ORDERS B
     join_expr: "@ JOIN LDBT_E2E_SOURCE.ILM_ORDERS B ON B.ID=A.ORDER_ID"
+  - source_owner: LDBT_E2E_SOURCE
+    history_owner: LDBT_E2E_HISTORY
+    table_name: ILM_EVENTS
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true
+        retain_months_source: 2
+        retain_months_history: 3
+        purge_date_expr: "@CREATED_AT"
 """,
         encoding="utf-8",
     )
@@ -371,6 +381,13 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                         FOREIGN KEY (order_id) REFERENCES ilm_orders (id)
                 )"""
             )
+            source_cursor.execute(
+                """CREATE TABLE ilm_events (
+                    event_id NUMBER(10) PRIMARY KEY,
+                    created_at DATE NOT NULL,
+                    payload VARCHAR2(40) NOT NULL
+                )"""
+            )
             source_cursor.executemany(
                 "INSERT INTO ilm_orders (id, created_at, payload) VALUES (:1, ADD_MONTHS(TRUNC(SYSDATE), :2), :3)",
                 [(1, -1, "recent"), (2, -3, "archive"), (3, -7, "purge")],
@@ -378,6 +395,10 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             source_cursor.executemany(
                 "INSERT INTO ilm_order_lines (line_id, order_id, payload) VALUES (:1, :2, :3)",
                 [(11, 1, "recent-line"), (21, 2, "archive-line"), (31, 3, "purge-line-a"), (32, 3, "purge-line-b")],
+            )
+            source_cursor.executemany(
+                "INSERT INTO ilm_events (event_id, created_at, payload) VALUES (:1, ADD_MONTHS(TRUNC(SYSDATE), :2), :3)",
+                [(101, -1, "recent-event"), (102, -4, "archive-event"), (103, -8, "purge-event")],
             )
             source_connection.commit()
         finally:
@@ -398,6 +419,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         assert _fetch_ids(history_connection, "ilm_orders") == [2, 3]
         assert _fetch_ids(source_connection, "ilm_order_lines", "line_id") == [11]
         assert _fetch_ids(history_connection, "ilm_order_lines", "line_id") == [21, 31, 32]
+        assert _fetch_ids(source_connection, "ilm_events", "event_id") == [101]
+        assert _fetch_ids(history_connection, "ilm_events", "event_id") == [102, 103]
 
         source_cursor = source_connection.cursor()
         try:
@@ -415,6 +438,13 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 [source_user],
             )
             assert source_cursor.fetchone() == ("SOURCE_ILM", "TEND", 3)
+            source_cursor.execute(
+                """SELECT ctl_action, ctl_status, ctl_rows_processed
+                     FROM ldb_ctl
+                    WHERE ctl_owner = :1 AND ctl_table_name = 'ILM_EVENTS'""",
+                [source_user],
+            )
+            assert source_cursor.fetchone() == ("SOURCE_ILM", "TEND", 2)
         finally:
             source_cursor.close()
 
@@ -432,6 +462,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         assert _fetch_ids(history_connection, "ilm_orders") == [2]
         assert _fetch_ids(source_connection, "ilm_order_lines", "line_id") == [11]
         assert _fetch_ids(history_connection, "ilm_order_lines", "line_id") == [21]
+        assert _fetch_ids(source_connection, "ilm_events", "event_id") == [101]
+        assert _fetch_ids(history_connection, "ilm_events", "event_id") == [102]
         history_cursor = history_connection.cursor()
         try:
             history_cursor.execute(
@@ -448,6 +480,13 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 [source_user],
             )
             assert history_cursor.fetchone() == ("HISTORY_ILM", "TEND", 2)
+            history_cursor.execute(
+                """SELECT ctl_action, ctl_status, ctl_rows_processed
+                     FROM ldb_ctl
+                    WHERE ctl_owner = :1 AND ctl_table_name = 'ILM_EVENTS'""",
+                [source_user],
+            )
+            assert history_cursor.fetchone() == ("HISTORY_ILM", "TEND", 1)
             history_cursor.execute(
                 """SELECT COUNT(*)
                      FROM ldb_log
