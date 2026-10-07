@@ -180,6 +180,23 @@ def _fetch_ids(connection: oracledb.Connection, table_name: str, id_column: str 
         cursor.close()
 
 
+def _fetch_tend_log_count(connection: oracledb.Connection, *, owner: str, table_name: str, action: str) -> int:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            """SELECT COUNT(*)
+                 FROM ldb_log
+                WHERE log_owner = :1
+                  AND log_table_name = :2
+                  AND log_action = :3
+                  AND log_status = 'TEND'""",
+            [owner, table_name, action],
+        )
+        return cursor.fetchone()[0]
+    finally:
+        cursor.close()
+
+
 def test_oracle_engine_table_ensure_is_idempotent(oracle_connection: oracledb.Connection):
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
     table_name = "LDBT_ENGINE_TABLE"
@@ -454,6 +471,35 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         finally:
             source_cursor.close()
 
+        for table_name in ("ILM_ORDERS", "ILM_ORDER_LINES", "ILM_EVENTS"):
+            assert (
+                _fetch_tend_log_count(source_connection, owner=source_user, table_name=table_name, action="SOURCE_ILM")
+                == 1
+            )
+
+        source_rerun = _run_cli(
+            "ldb-run",
+            *common_arguments,
+            "--action",
+            "SOURCE_ILM",
+            "--mode",
+            "EXECUTE",
+            environment=cli_environment,
+        )
+        assert _worker_process_names(source_rerun) == set()
+        assert "No tables to process." in source_rerun.stderr
+        assert _fetch_ids(source_connection, "ilm_orders") == [1]
+        assert _fetch_ids(history_connection, "ilm_orders") == [2, 3]
+        assert _fetch_ids(source_connection, "ilm_order_lines", "line_id") == [11]
+        assert _fetch_ids(history_connection, "ilm_order_lines", "line_id") == [21, 31, 32]
+        assert _fetch_ids(source_connection, "ilm_events", "event_id") == [101]
+        assert _fetch_ids(history_connection, "ilm_events", "event_id") == [102, 103]
+        for table_name in ("ILM_ORDERS", "ILM_ORDER_LINES", "ILM_EVENTS"):
+            assert (
+                _fetch_tend_log_count(source_connection, owner=source_user, table_name=table_name, action="SOURCE_ILM")
+                == 1
+            )
+
         history_run = _run_cli(
             "ldb-run",
             *common_arguments,
@@ -494,28 +540,38 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 [source_user],
             )
             assert history_cursor.fetchone() == ("HISTORY_ILM", "TEND", 1)
-            history_cursor.execute(
-                """SELECT COUNT(*)
-                     FROM ldb_log
-                    WHERE log_owner = :1
-                      AND log_table_name = 'ILM_ORDERS'
-                      AND log_action = 'HISTORY_ILM'
-                      AND log_status = 'TEND'""",
-                [source_user],
-            )
-            assert history_cursor.fetchone()[0] == 1
-            history_cursor.execute(
-                """SELECT COUNT(*)
-                     FROM ldb_log
-                    WHERE log_owner = :1
-                      AND log_table_name = 'ILM_ORDER_LINES'
-                      AND log_action = 'HISTORY_ILM'
-                      AND log_status = 'TEND'""",
-                [source_user],
-            )
-            assert history_cursor.fetchone()[0] == 1
         finally:
             history_cursor.close()
+
+        for table_name in ("ILM_ORDERS", "ILM_ORDER_LINES", "ILM_EVENTS"):
+            assert (
+                _fetch_tend_log_count(
+                    history_connection, owner=source_user, table_name=table_name, action="HISTORY_ILM"
+                )
+                == 1
+            )
+
+        history_rerun = _run_cli(
+            "ldb-run",
+            *common_arguments,
+            "--action",
+            "HISTORY_ILM",
+            "--mode",
+            "EXECUTE",
+            environment=cli_environment,
+        )
+        assert _worker_process_names(history_rerun) == set()
+        assert "No tables to process." in history_rerun.stderr
+        assert _fetch_ids(history_connection, "ilm_orders") == [2]
+        assert _fetch_ids(history_connection, "ilm_order_lines", "line_id") == [21]
+        assert _fetch_ids(history_connection, "ilm_events", "event_id") == [102]
+        for table_name in ("ILM_ORDERS", "ILM_ORDER_LINES", "ILM_EVENTS"):
+            assert (
+                _fetch_tend_log_count(
+                    history_connection, owner=source_user, table_name=table_name, action="HISTORY_ILM"
+                )
+                == 1
+            )
     finally:
         if source_connection is not None:
             source_connection.close()

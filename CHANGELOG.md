@@ -6,6 +6,7 @@
 - Avoid double-counting processed rows when chunk totals have already been recorded before the table reaches `TEND`.
 - Route `HISTORY_ILM` reads and deletes through the configured history owner, and size control/log action fields for the full `HISTORY_ILM` value.
 - Use stored relationship-derived columns during `HISTORY_ILM` instead of joining history cleanup queries back to source tables.
+- Restore completed-run status from `LDB_CTL` when policies come from YAML, so same-day reruns remain idempotent and launch no workers.
 - Add isolated Oracle adapter integration tests backed by an ephemeral Oracle Database Free container in GitHub Actions with generated, masked per-job credentials; cover recovery after partial DDL, idempotent object and privilege administration, and an end-to-end source/archive/history ILM happy path; characterize runner dependencies and progress-based retry behavior.
 - Preserve the documented configuration precedence from system and user files through explicit overlays, environment variables, CLI values, and encrypted secrets; map names such as `LDB_CHUNK_SIZE` to their flat Python keys; add immutable execution, connection, administration, and runtime-context views without changing the public flat configuration; and type normalized ILM rules and derived table state.
 - Add chained domain errors for configuration, secrets, validation, database connections, and execution; fail closed on unreadable secret files; and make worker failures recoverable by the coordinator.

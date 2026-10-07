@@ -126,7 +126,8 @@ points, provisions separate source and history schemas, and processes related
 order/header and line/detail tables through both `SOURCE_ILM` and `HISTORY_ILM`.
 An independent table exercises a second worker concurrently. The test verifies
 dependency-safe movement and purge results, multiple worker processes, and the
-resulting audit records.
+resulting audit records. It then repeats both actions for the same process date
+and verifies that completed tables launch no workers or duplicate audit results.
 
 The integration tests are excluded from the default test command. To run them
 against an explicitly disposable Oracle instance:

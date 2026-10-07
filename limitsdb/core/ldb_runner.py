@@ -502,7 +502,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     logger.info("Processing table configuration...")
     ldb_ctl_status_rows: list[dict[str, Any]] = []
     ldb_conf_rows = _get_conf_rows(config, engine, connection)
-    if not config.context.ilm_config_file:
+    if not config.execution.generate_script:
         ldb_ctl_status_rows = engine.get_status(connection, process_date)
     tables_config: TablesConfig = {}
     # Populate tables_config with the raw rows and derive referencing tables from cnf_referencing_tables.
