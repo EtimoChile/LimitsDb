@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Prevent duplicate `LDB_PROCESS_DATE` and `LDB_INSERT_DATE` columns in generated source-to-history inserts.
 - Add isolated Oracle adapter integration tests backed by an ephemeral Oracle Database Free container in GitHub Actions with generated, masked per-job credentials; cover recovery after partial DDL, idempotent object and privilege administration, and an end-to-end source/archive/history ILM happy path; characterize runner dependencies and progress-based retry behavior.
 - Preserve the documented configuration precedence from system and user files through explicit overlays, environment variables, CLI values, and encrypted secrets; map names such as `LDB_CHUNK_SIZE` to their flat Python keys; add immutable execution, connection, administration, and runtime-context views without changing the public flat configuration; and type normalized ILM rules and derived table state.
 - Add chained domain errors for configuration, secrets, validation, database connections, and execution; fail closed on unreadable secret files; and make worker failures recoverable by the coordinator.

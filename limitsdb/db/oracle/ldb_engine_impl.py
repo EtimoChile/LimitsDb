@@ -414,13 +414,8 @@ class OracleEngine(DatabaseEngine):
         )
         referencing_tables = ", ".join([f"'{rt[0]}.{rt[1]}'" for rt in referencing_tables])
         source_ilm = execution.action == "SOURCE_ILM"
-        if execution.add_ldb_columns:
-            gend_cols = ["LDB_PROCESS_DATE", "LDB_INSERT_DATE"]
-            gend_vals = ["l_process_date", "sysdate"]
-        else:
-            gend_cols = gend_vals = []
-        ins_cols = join_wrapped(", ", table_columns + other_cols_alias + gend_cols, 200)
-        ins_vals = join_wrapped(", ", [f"r_rec(i).{col}" for col in table_columns + other_cols_alias] + gend_vals, 200)
+        ins_cols = join_wrapped(", ", table_columns + other_cols_alias, 200)
+        ins_vals = join_wrapped(", ", [f"r_rec(i).{col}" for col in table_columns + other_cols_alias], 200)
         if execution.generate_script:
             process_date = "&process_date"
         plsql = f"""declare
@@ -486,7 +481,7 @@ begin
     end loop;
     close c_records;"""
         else:
-            cols_select = ", ".join([f"a.{col}" for col in table_columns] + other_cols_exprs + gend_vals)
+            cols_select = ", ".join([f"a.{col}" for col in table_columns] + other_cols_exprs)
             if execution.mode in ("EXECUTE", "SCRIPT"):
                 if source_ilm and nvl(months_keep_history_max, 0) > 0:
                     plsql += f"""

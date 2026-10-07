@@ -55,6 +55,51 @@ def test_ldb_columns_expressions_return_expected_defaults():
     assert OracleEngine.get_ldb_columns_expressions() == ("l_process_date", "sysdate")
 
 
+def test_generated_source_insert_does_not_duplicate_limitsdb_columns():
+    config = Config(
+        schema="s",
+        action="SOURCE_ILM",
+        mode="EXECUTE",
+        source_dsn="dsn",
+        source_username="source",
+        source_password="secret",
+    )
+    table_config = {
+        "conds": [
+            {
+                "source_owner": "SOURCE",
+                "history_owner": "HISTORY",
+                "table_name": "ITEMS",
+                "history_hint_expr": None,
+                "hint_expr": "",
+                "has_lob_columns": "N",
+            }
+        ],
+        "other_columns": [
+            {
+                "name": "LDB_PROCESS_DATE",
+                "expr": "l_process_date",
+                "metadata": ColumnDefinition(name="LDB_PROCESS_DATE", data_type="date"),
+            },
+            {
+                "name": "LDB_INSERT_DATE",
+                "expr": "sysdate",
+                "metadata": ColumnDefinition(name="LDB_INSERT_DATE", data_type="date"),
+            },
+        ],
+        "referencing_tables": [],
+        "query_expr": "from source.items A\nwhere A.created_at < l_process_date",
+        "table_columns": ["ID", "CREATED_AT"],
+        "months_keep_history_max": 3,
+    }
+
+    block = OracleEngine.generate_sql_block(config, table_config, "20261007")
+
+    assert "(ID, CREATED_AT, LDB_PROCESS_DATE, LDB_INSERT_DATE)" in block
+    assert "values (r_rec(i).ID, r_rec(i).CREATED_AT, r_rec(i).LDB_PROCESS_DATE, r_rec(i).LDB_INSERT_DATE)" in block
+    assert "LDB_PROCESS_DATE, LDB_INSERT_DATE, LDB_PROCESS_DATE" not in block
+
+
 def test_register_and_fetch_connection_env_round_trip():
     class DummyConnection:
         pass
