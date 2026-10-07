@@ -733,6 +733,315 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
 
 
+def _fetch_constraint_type(connection: oracledb.Connection, table_name: str, constraint_type: str) -> list[str]:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT constraint_name FROM user_constraints WHERE table_name = :1 AND constraint_type = :2",
+            [table_name.upper(), constraint_type],
+        )
+        return [row[0] for row in cursor]
+    finally:
+        cursor.close()
+
+
+def _fetch_index_columns(connection: oracledb.Connection, index_name: str) -> list[str]:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT column_name FROM user_ind_columns WHERE index_name = :1 ORDER BY column_position",
+            [index_name.upper()],
+        )
+        return [row[0] for row in cursor]
+    finally:
+        cursor.close()
+
+
+def _fetch_column_type(connection: oracledb.Connection, table_name: str, column_name: str) -> tuple[str, int | None]:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT data_type, data_length FROM user_tab_columns WHERE table_name = :1 AND column_name = :2",
+            [table_name.upper(), column_name.upper()],
+        )
+        row = cursor.fetchone()
+        return (row[0], row[1]) if row else ("", None)
+    finally:
+        cursor.close()
+
+
+def test_oracle_engine_ensure_table_structure_reconciles_and_is_idempotent(
+    oracle_connection: oracledb.Connection,
+):
+    username = os.environ["LDB_ORACLE_TEST_USER"].upper()
+    parent_table = "LDBT_STR_PARENT"
+    test_table = "LDBT_STR_TEST"
+    _drop_table_if_present(oracle_connection, test_table)
+    _drop_table_if_present(oracle_connection, parent_table)
+
+    cursor = oracle_connection.cursor()
+    try:
+        cursor.execute(f"CREATE TABLE {parent_table} (id NUMBER(10) CONSTRAINT {parent_table}_pk PRIMARY KEY)")
+        cursor.execute(
+            f"""CREATE TABLE {test_table} (
+                id NUMBER(5),
+                parent_id NUMBER(10),
+                name VARCHAR2(10),
+                CONSTRAINT ldbt_str_fk FOREIGN KEY (parent_id) REFERENCES {parent_table}(id)
+            )"""
+        )
+        oracle_connection.commit()
+    finally:
+        cursor.close()
+
+    desired = TableDefinition(
+        owner=username,
+        name=test_table,
+        columns=(
+            ColumnDefinition(name="ID", data_type="number", precision=10, nullable=False),
+            ColumnDefinition(name="PARENT_ID", data_type="number", precision=10),
+            ColumnDefinition(name="NAME", data_type="varchar2", length=40),
+            ColumnDefinition(name="NOTES", data_type="varchar2", length=100),
+        ),
+        primary_key=("ID",),
+        indexes=(IndexDefinition(name="LDBT_STR_NAME_IX", columns=("NAME",)),),
+    )
+
+    try:
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {})
+
+        dtype, length = _fetch_column_type(oracle_connection, test_table, "NAME")
+        assert dtype == "VARCHAR2" and length == 40
+
+        dtype_notes, _ = _fetch_column_type(oracle_connection, test_table, "NOTES")
+        assert dtype_notes == "VARCHAR2"
+
+        pk_constraints = _fetch_constraint_type(oracle_connection, test_table, "P")
+        assert len(pk_constraints) == 1
+
+        fk_constraints = _fetch_constraint_type(oracle_connection, test_table, "R")
+        assert len(fk_constraints) == 1
+
+        assert _fetch_index_columns(oracle_connection, "LDBT_STR_NAME_IX") == ["NAME"]
+
+        # Second call must be idempotent
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {})
+
+        assert _fetch_constraint_type(oracle_connection, test_table, "P") == pk_constraints
+        assert _fetch_constraint_type(oracle_connection, test_table, "R") == fk_constraints
+    finally:
+        _drop_table_if_present(oracle_connection, test_table)
+        _drop_table_if_present(oracle_connection, parent_table)
+
+
+def _write_failure_e2e_configuration(
+    root: Path,
+    *,
+    dsn: str,
+    admin_user: str,
+    admin_password: str,
+    source_user: str,
+    source_password: str,
+    history_user: str,
+    history_password: str,
+) -> None:
+    schema_dir = root / "schemas" / "err-e2e"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "config.yml").write_text(
+        "\n".join(
+            [
+                "db_engine: oracle",
+                f"source_dsn: {json.dumps(dsn)}",
+                f"source_username: {source_user}",
+                f"history_dsn: {json.dumps(dsn)}",
+                f"history_username: {history_user}",
+                f"admin_source_username: {admin_user}",
+                f"admin_history_username: {admin_user}",
+                "source_default_tablespace: USERS",
+                "history_default_tablespace: USERS",
+                "source_to_history_dblink_name: LDBT_ERR_HIST",
+                "history_to_source_dblink_name: LDBT_ERR_SRC",
+                "source_role_name: LDBT_ERR_SOURCE_ROLE",
+                "history_role_name: LDBT_ERR_HISTORY_ROLE",
+                "parallel_max: 1",
+                "chunk_size: 10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (schema_dir / "secrets.json").write_text(
+        json.dumps(
+            {
+                "source_password": source_password,
+                "history_password": history_password,
+                "admin_source_password": admin_password,
+                "admin_history_password": admin_password,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (schema_dir / "ilm.yml").write_text(
+        """tables:
+  - source_owner: LDBT_ERR_SOURCE
+    history_owner: LDBT_ERR_HISTORY
+    table_name: ILM_ERRTBL
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true
+        retain_months_source: 2
+        retain_months_history: 3
+        purge_date_expr: "@CREATED_AT"
+""",
+        encoding="utf-8",
+    )
+
+
+def _fetch_ctl_status(connection: oracledb.Connection, *, owner: str, table_name: str, action: str) -> str | None:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            """SELECT ctl_status FROM ldb_ctl
+                WHERE ctl_owner = :1 AND ctl_table_name = :2 AND ctl_action = :3
+                ORDER BY ctl_id DESC""",
+            [owner, table_name, action],
+        )
+        row = cursor.fetchone()
+        return str(row[0]) if row else None
+    finally:
+        cursor.close()
+
+
+def _fetch_error_log_count(connection: oracledb.Connection, *, owner: str, table_name: str, action: str) -> int:
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            """SELECT COUNT(*) FROM ldb_log
+                WHERE log_owner = :1 AND log_table_name = :2 AND log_action = :3 AND log_status = 'ERROR'""",
+            [owner, table_name, action],
+        )
+        return cursor.fetchone()[0]
+    finally:
+        cursor.close()
+
+
+def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
+    oracle_connection: oracledb.Connection, tmp_path: Path
+):
+    source_user = "LDBT_ERR_SOURCE"
+    history_user = "LDBT_ERR_HISTORY"
+    source_role = "LDBT_ERR_SOURCE_ROLE"
+    history_role = "LDBT_ERR_HISTORY_ROLE"
+    for user in (source_user, history_user):
+        _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+    for role in (source_role, history_role):
+        _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+    dsn = os.environ["LDB_ORACLE_TEST_DSN"]
+    admin_user = os.environ["LDB_ORACLE_TEST_USER"]
+    admin_password = os.environ["LDB_ORACLE_TEST_PASSWORD"]
+    source_password = f"LdbErr_{secrets.token_hex(16)}"
+    history_password = f"LdbErr_{secrets.token_hex(16)}"
+    config_root = tmp_path / "err-config"
+    _write_failure_e2e_configuration(
+        config_root,
+        dsn=dsn,
+        admin_user=admin_user,
+        admin_password=admin_password,
+        source_user=source_user,
+        source_password=source_password,
+        history_user=history_user,
+        history_password=history_password,
+    )
+    cli_environment = _e2e_environment(tmp_path / "err-home")
+    common_arguments = ("--schema", "err-e2e", "--config-dir", str(config_root))
+
+    source_connection: oracledb.Connection | None = None
+    history_connection: oracledb.Connection | None = None
+    try:
+        _run_cli("ldb-impl", *common_arguments, environment=cli_environment)
+
+        source_connection = oracledb.connect(user=source_user, password=source_password, dsn=dsn)
+        source_cursor = source_connection.cursor()
+        try:
+            # Deliberately omit CREATED_AT so the ILM SQL block fails at runtime (ORA-00904)
+            source_cursor.execute("CREATE TABLE ilm_errtbl (id NUMBER(10) PRIMARY KEY, payload VARCHAR2(40) NOT NULL)")
+            source_cursor.execute("INSERT INTO ilm_errtbl (id, payload) VALUES (1, 'row-without-date')")
+            source_connection.commit()
+        finally:
+            source_cursor.close()
+
+        failed_run = subprocess.run(
+            [
+                shutil.which("ldb-run", path=cli_environment.get("PATH")),
+                *common_arguments,
+                "--action",
+                "SOURCE_ILM",
+                "--mode",
+                "EXECUTE",
+            ],
+            check=False,
+            capture_output=True,
+            env=cli_environment,
+            text=True,
+            timeout=180,
+        )
+        assert failed_run.returncode != 0, "expected ldb-run to exit non-zero after table failure"
+
+        assert (
+            _fetch_ctl_status(source_connection, owner=source_user, table_name="ILM_ERRTBL", action="SOURCE_ILM")
+            == "ERROR"
+        )
+        assert (
+            _fetch_error_log_count(source_connection, owner=source_user, table_name="ILM_ERRTBL", action="SOURCE_ILM")
+            >= 1
+        )
+
+        # Fix: recreate with the correct schema and insert an archivable row
+        source_cursor = source_connection.cursor()
+        try:
+            source_cursor.execute("DROP TABLE ilm_errtbl PURGE")
+            source_cursor.execute(
+                """CREATE TABLE ilm_errtbl (
+                    id NUMBER(10) PRIMARY KEY,
+                    created_at DATE NOT NULL,
+                    payload VARCHAR2(40) NOT NULL
+                )"""
+            )
+            source_cursor.execute(
+                "INSERT INTO ilm_errtbl (id, created_at, payload) VALUES (2, ADD_MONTHS(TRUNC(SYSDATE), -3), 'archivable')"
+            )
+            source_connection.commit()
+        finally:
+            source_cursor.close()
+
+        _run_cli(
+            "ldb-run", *common_arguments, "--action", "SOURCE_ILM", "--mode", "EXECUTE", environment=cli_environment
+        )
+
+        history_connection = oracledb.connect(user=history_user, password=history_password, dsn=dsn)
+        assert _fetch_ids(source_connection, "ilm_errtbl") == []
+        assert _fetch_ids(history_connection, "ilm_errtbl") == [2]
+        assert (
+            _fetch_ctl_status(source_connection, owner=source_user, table_name="ILM_ERRTBL", action="SOURCE_ILM")
+            == "TEND"
+        )
+        assert (
+            _fetch_tend_log_count(source_connection, owner=source_user, table_name="ILM_ERRTBL", action="SOURCE_ILM")
+            == 1
+        )
+    finally:
+        if source_connection is not None:
+            source_connection.close()
+        if history_connection is not None:
+            history_connection.close()
+        for user in (source_user, history_user):
+            _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+        for role in (source_role, history_role):
+            _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+
 def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
     oracle_connection: oracledb.Connection, tmp_path: Path
 ):
