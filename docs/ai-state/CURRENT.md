@@ -39,9 +39,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   operaciones privilegiadas. No se conservan pruebas del comportamiento propio
   del proveedor sin intervención de LimitsDb. El cuarto caso E2E crea esquemas
   separados mediante `ldb-impl`, ejecuta `SOURCE_ILM` y `HISTORY_ILM` sobre
-  filas controladas y verifica datos y auditoría; los cuatro casos pasaron en
-  GitHub sobre el commit `170e6af`. Una ampliación en curso ejecuta los entry
-  points instalados e incorpora tablas padre-detalle con clave foránea.
+  filas controladas y verifica datos y auditoría. La ampliación vigente ejecuta
+  los entry points instalados, incorpora tablas padre-detalle con clave foránea
+  y una rama independiente con dos workers; los cuatro casos pasaron en GitHub
+  sobre el commit `f1a9b73`.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las

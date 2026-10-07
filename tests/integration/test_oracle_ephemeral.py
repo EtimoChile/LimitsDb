@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -80,6 +81,10 @@ def _run_cli(command: str, *arguments: str, environment: dict[str, str]) -> subp
     )
     assert result.returncode == 0, f"{command} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     return result
+
+
+def _worker_process_names(result: subprocess.CompletedProcess[str]) -> set[str]:
+    return set(re.findall(r"(?:Fork|Spawn)Process-\d+", result.stderr))
 
 
 def _write_e2e_configuration(
@@ -404,7 +409,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         finally:
             source_cursor.close()
 
-        _run_cli(
+        source_run = _run_cli(
             "ldb-run",
             *common_arguments,
             "--action",
@@ -413,6 +418,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             "EXECUTE",
             environment=cli_environment,
         )
+        assert len(_worker_process_names(source_run)) >= 2
 
         history_connection = oracledb.connect(user=history_user, password=history_password, dsn=dsn)
         assert _fetch_ids(source_connection, "ilm_orders") == [1]
@@ -448,7 +454,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         finally:
             source_cursor.close()
 
-        _run_cli(
+        history_run = _run_cli(
             "ldb-run",
             *common_arguments,
             "--action",
@@ -457,6 +463,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             "EXECUTE",
             environment=cli_environment,
         )
+        assert len(_worker_process_names(history_run)) >= 2
 
         assert _fetch_ids(source_connection, "ilm_orders") == [1]
         assert _fetch_ids(history_connection, "ilm_orders") == [2]

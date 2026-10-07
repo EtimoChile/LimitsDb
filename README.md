@@ -124,8 +124,9 @@ against a real Oracle instance; they do not attempt to test Oracle itself. The
 end-to-end happy path invokes the installed `ldb-impl` and `ldb-run` entry
 points, provisions separate source and history schemas, and processes related
 order/header and line/detail tables through both `SOURCE_ILM` and `HISTORY_ILM`.
-It verifies dependency-safe movement and purge results together with their audit
-records.
+An independent table exercises a second worker concurrently. The test verifies
+dependency-safe movement and purge results, multiple worker processes, and the
+resulting audit records.
 
 The integration tests are excluded from the default test command. To run them
 against an explicitly disposable Oracle instance:
