@@ -536,7 +536,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     if not config.execution.generate_script:
         # Inject ctl_status values loaded from the database when resuming a run.
         for ldb_ctl_status_row in ldb_ctl_status_rows:
-            key = (ldb_ctl_status_row["ctl_source_owner"], ldb_ctl_status_row["ctl_table_name"])
+            key = (ldb_ctl_status_row["ctl_owner"], ldb_ctl_status_row["ctl_table_name"])
             if key in tables_config:
                 for cond in tables_config[key]["conds"]:
                     cond["ctl_status"] = ldb_ctl_status_row["ctl_status"]
