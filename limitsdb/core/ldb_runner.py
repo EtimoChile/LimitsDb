@@ -154,6 +154,11 @@ def _runtime_join_expression(config: Config, rule: IlmRule) -> str:
     return join_expr.replace("@", join_type)
 
 
+def _relationship_date_column(alias: str) -> str:
+    """Return the stable unquoted name used to persist a related table's retention date."""
+    return f"LDB_DATE_{alias.upper()}"
+
+
 def _plan_mode(config: Config) -> int:
     rows = _load_offline_rows(config)
     if not rows:
@@ -590,7 +595,11 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                         engine.get_date_condition(purge_date_expr.replace("@", alias_prefix), cast(int, retain_months))
                     )
                 else:
-                    cond_list.append(engine.get_date_condition(f"A.ldb_date_{al}", cast(int, retain_months_history)))
+                    cond_list.append(
+                        engine.get_date_condition(
+                            f"A.{_relationship_date_column(al)}", cast(int, retain_months_history)
+                        )
+                    )
             cd["cond_expr"] = " and ".join(cond_list)
             cd["history_addtl_filter_expr"] = addtl_expr
         # get the maximum cnf_retain_months_history from all added_conds
@@ -612,11 +621,14 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 if al != "A":
                     # Add the cnf_purge_date_expr to other_columns for referencing tables
                     if cd["purge_date_expr"]:
-                        column_metadata = ColumnDefinition(name=f"ldb_date_{al}", data_type="date", nullable=True)
+                        relationship_date_column = _relationship_date_column(al)
+                        column_metadata = ColumnDefinition(
+                            name=relationship_date_column, data_type="date", nullable=True
+                        )
                         _append_unique_name(
                             other_columns,
                             {
-                                "name": f"ldb_date_{al}",
+                                "name": relationship_date_column,
                                 "expr": nvl(cd["purge_date_expr"], "").replace("@", al + "."),
                                 "metadata": column_metadata,
                             },

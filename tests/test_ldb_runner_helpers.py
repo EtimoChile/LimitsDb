@@ -82,6 +82,7 @@ def test_runtime_join_uses_source_relationship_and_history_derived_columns():
         "inner JOIN SOURCE.PARENT B ON B.ID=A.PARENT_ID"
     )
     assert ldb_runner._runtime_join_expression(history_config, rule) == ""
+    assert ldb_runner._relationship_date_column("b") == "LDB_DATE_B"
 
     rule["source_orphan_purge"] = "Y"
     assert ldb_runner._runtime_join_expression(source_config, rule) == (
