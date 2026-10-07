@@ -40,9 +40,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   del proveedor sin intervención de LimitsDb. El cuarto caso E2E crea esquemas
   separados mediante `ldb-impl`, ejecuta `SOURCE_ILM` y `HISTORY_ILM` sobre
   filas controladas y verifica datos y auditoría. La ampliación vigente ejecuta
-  los entry points instalados, incorpora tablas padre-detalle con clave foránea
-  y una rama independiente con dos workers; los cuatro casos pasaron en GitHub
-  sobre el commit `f1a9b73`.
+  los entry points instalados, incorpora tablas padre-detalle con clave foránea,
+  una rama independiente con dos workers y reruns idempotentes de ambas acciones;
+  los cuatro casos pasaron en GitHub sobre el commit `d8a77ea`. `PEND-005` está
+  resuelto.
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
