@@ -3,7 +3,7 @@ status: active
 authority: operational-state
 scope: development/maintenance/release
 last-reviewed: 2026-10-07
-last-updated: 2026-10-08T13:08
+last-updated: 2026-10-08T16:36
 ---
 
 # Estado vigente
@@ -59,7 +59,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   cubiertas, 818 ramas, 154 parciales); todavía no se impone un umbral mínimo.
   El run `37712040787` sobre `1181775` (PEND-009) verificó 108 pruebas locales
   y 9 E2E exitosas (cobertura combinada 87 %; TOTAL 2564 sentencias, 268 no
-  cubiertas, 816 ramas, 146 parciales).
+  cubiertas, 816 ramas, 146 parciales). El run `37809692118` sobre `4047abc`
+  (corrección detección de índices no gestionados + 2 tests E2E nuevos) verificó
+  108 pruebas locales y 11 E2E exitosas (cobertura combinada 87 %; TOTAL 2564
+  sentencias, 250 no cubiertas, 816 ramas, 148 parciales).
 - La configuración pública conserva claves planas y precedencia sistema,
   usuario, archivo explícito, entorno, CLI y secretos. El núcleo consume vistas
   tipadas e inmutables de ejecución, conexiones, administración y contexto; las
