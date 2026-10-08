@@ -115,16 +115,6 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def load_config(conn: Any) -> list[dict[str, Any]]:
-        """Loads configuration rows from the database.
-        Args:
-            conn: Active database connection.
-        Returns:
-            A list of configuration rows."""
-        pass
-
-    @staticmethod
-    @abstractmethod
     def get_table_columns(conn: Any, owner: str, table_name: str) -> tuple[list[str], dict[str, ColumnDefinition]]:
         """Retrieves column names and metadata for a given table.
         Args:

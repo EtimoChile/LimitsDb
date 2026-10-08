@@ -13,7 +13,6 @@ from limitsdb.db.ldb_engine_loader import get_db_engine
 from limitsdb.db.ldb_engines import (
     ColumnDefinition,
     DatabaseLinkDefinition,
-    IndexDefinition,
     RoleDefinition,
     SequenceDefinition,
     TableDefinition,
@@ -76,41 +75,12 @@ def _build_control_tables(owner: str) -> list[TableDefinition]:
             ),
             primary_key=("LOG_ID",),
         ),
-        TableDefinition(
-            owner=owner,
-            name="LDB_CNF",
-            columns=(
-                ColumnDefinition("CNF_ID", "number", precision=18, scale=0, nullable=False),
-                ColumnDefinition("CNF_SOURCE_OWNER", "string", length=50),
-                ColumnDefinition("CNF_HISTORY_OWNER", "string", length=50),
-                ColumnDefinition("CNF_TABLE_NAME", "string", length=50, nullable=False),
-                ColumnDefinition("CNF_RETAIN_MONTHS_SOURCE", "number", precision=10, scale=0),
-                ColumnDefinition("CNF_RETAIN_MONTHS_HISTORY", "number", precision=10, scale=0),
-                ColumnDefinition("CNF_EXEC_DAY", "string", length=10),
-                ColumnDefinition("CNF_FRECUENCY", "string", length=10),
-                ColumnDefinition("CNF_IS_ACTIVE", "char", length=1, default="'Y'"),
-                ColumnDefinition("CNF_PURGE_DATE_EXPR", "string", length=100),
-                ColumnDefinition("CNF_ADDITIONAL_FILTER_EXPR", "string", length=4000),
-                ColumnDefinition("CNF_HISTORY_ADDTL_FILTER_EXPR", "string", length=4000),
-                ColumnDefinition("CNF_SOURCE_ORPHAN_PURGE", "char", length=1, default="'N'"),
-                ColumnDefinition("CNF_ORPHAN_CHECK_COLUMN", "string", length=4000),
-                ColumnDefinition("CNF_HAS_LOB_COLUMNS", "char", length=1, default="'N'"),
-                ColumnDefinition("CNF_REFERENCING_TABLES", "string", length=200),
-                ColumnDefinition("CNF_JOIN_EXPR", "string", length=4000),
-                ColumnDefinition("CNF_HINT_EXPR", "string", length=4000),
-                ColumnDefinition("CNF_HISTORY_HINT_EXPR", "string", length=4000),
-                ColumnDefinition("CNF_LONG_COLUMNS", "string", length=4000),
-            ),
-            primary_key=("CNF_ID",),
-            indexes=(IndexDefinition(name="CNF_CONF_I1", columns=("CNF_SOURCE_OWNER", "CNF_TABLE_NAME")),),
-        ),
     ]
 
 
 def _build_sequences(owner: str) -> list[SequenceDefinition]:
     return [
         SequenceDefinition(owner=owner, name="LDB_LOG_ID"),
-        SequenceDefinition(owner=owner, name="LDB_CNF_ID"),
     ]
 
 

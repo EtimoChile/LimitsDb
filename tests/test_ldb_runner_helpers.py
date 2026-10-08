@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from limitsdb.core import ldb_runner
+from limitsdb.core.ldb_errors import ConfigurationError
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
 from limitsdb.db.ldb_engines import ColumnDefinition
@@ -49,6 +50,12 @@ def test_plan_mode_handles_empty_and_layered_configuration(monkeypatch: pytest.M
     ]
     monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda current: rows)
     assert ldb_runner._plan_mode(config) == 0
+
+
+def test_load_offline_rows_raises_when_no_ilm_file():
+    config = Config(schema="no_such_schema", mode="PLAN")
+    with pytest.raises(ConfigurationError, match=r"ilm\.yml"):
+        ldb_runner._load_offline_rows(config)
 
 
 def _validate_config() -> Config:
@@ -354,7 +361,7 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch):
             return table_cnf["query_expr"]
 
     loaded_rules = rules()
-    monkeypatch.setattr(ldb_runner, "_get_conf_rows", lambda config, engine, connection: loaded_rules)
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: loaded_rules)
     source_config = Config(
         schema="s",
         action="SOURCE_ILM",

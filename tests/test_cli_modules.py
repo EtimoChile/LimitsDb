@@ -16,7 +16,7 @@ def test_mask_secrets():
 
 def test_build_control_tables_shapes():
     tables = ldb_impl._build_control_tables("OWNER")
-    assert {t.name for t in tables} == {"LDB_CTL", "LDB_LOG", "LDB_CNF"}
+    assert {t.name for t in tables} == {"LDB_CTL", "LDB_LOG"}
     ctl = next(t for t in tables if t.name == "LDB_CTL")
     log = next(t for t in tables if t.name == "LDB_LOG")
     assert ctl.primary_key == ("CTL_OWNER", "CTL_TABLE_NAME")

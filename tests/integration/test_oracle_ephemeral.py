@@ -494,7 +494,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 """SELECT owner, object_name, object_type
                      FROM dba_objects
                     WHERE owner IN (:1, :2)
-                      AND object_name IN ('LDB_CTL', 'LDB_LOG', 'LDB_CNF', 'LDB_LOG_ID', 'LDB_CNF_ID',
+                      AND object_name IN ('LDB_CTL', 'LDB_LOG', 'LDB_LOG_ID',
                                           'CHECK_SAVE_STATUS', 'CHECK_REFERENCING_TABLES', 'T_REFERENCING_TABLES')""",
                 [source_user, history_user],
             )
@@ -502,9 +502,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             for owner in (source_user, history_user):
                 assert (owner, "LDB_CTL", "TABLE") in objects
                 assert (owner, "LDB_LOG", "TABLE") in objects
-                assert (owner, "LDB_CNF", "TABLE") in objects
                 assert (owner, "LDB_LOG_ID", "SEQUENCE") in objects
-                assert (owner, "LDB_CNF_ID", "SEQUENCE") in objects
                 assert (owner, "CHECK_SAVE_STATUS", "PROCEDURE") in objects
                 assert (owner, "CHECK_REFERENCING_TABLES", "PROCEDURE") in objects
                 assert (owner, "T_REFERENCING_TABLES", "TYPE") in objects

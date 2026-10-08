@@ -3,7 +3,7 @@ status: active
 authority: operational-state
 scope: development/maintenance/release
 last-reviewed: 2026-10-07
-last-updated: 2026-10-07T23:30
+last-updated: 2026-10-07T24:00
 ---
 
 # Estado vigente
@@ -128,7 +128,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   runner Linux de GitHub Actions, sin acceso externo a la base cloud persistente.
 - `DEC-011`: mantener las políticas ILM exclusivamente en archivos de
   configuración y retirar el uso de `LDB_CNF` sin eliminar automáticamente
-  objetos legados.
+  objetos legados. `PEND-009` está resuelto: `_get_conf_rows` y
+  `DatabaseEngine.load_config` eliminados; `LDB_CNF`/`LDB_CNF_ID` retirados
+  del DDL de bootstrap; `_load_offline_rows` lanza `ConfigurationError` cuando
+  no existe archivo ILM; 108 pruebas locales pasan.
 - `DEC-012`: cada fila histórica conserva los valores necesarios para reevaluar
   todos sus predicados, incluidas fechas de corte y columnas adicionales de
   tablas relacionadas; `LDB_DATE_<suffix>` usa un diferenciador, no un alias SQL.

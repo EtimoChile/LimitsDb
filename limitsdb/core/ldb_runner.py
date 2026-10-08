@@ -2,7 +2,8 @@ from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from operator import attrgetter
 from typing import Any, Literal, TypedDict, cast
 
-from limitsdb.core.ldb_ilm_config import IlmRule, load_rows_from_yaml, resolve_and_load_ilm_rows
+from limitsdb.core.ldb_errors import ConfigurationError
+from limitsdb.core.ldb_ilm_config import IlmRule, load_rows_from_yaml
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
@@ -84,7 +85,12 @@ def _open_connection(
 def _load_offline_rows(config: Config) -> list[IlmRule]:
     if config.context.ilm_config_file:
         return load_rows_from_yaml(config.context.ilm_config_file)
-    return resolve_and_load_ilm_rows(schema=config.context.schema, profile=config.context.profile)
+    schema = config.context.schema
+    profile = config.context.profile
+    name = f"ilm.{profile}.yml" if profile else "ilm.yml"
+    raise ConfigurationError(
+        f"ILM configuration file '{name}' not found for schema '{schema}'. Provide the file or set LDB_ILM_CONFIG_FILE."
+    )
 
 
 def _build_dependency_graph(rows: list[IlmRule]) -> dict[tuple[str, str], set[tuple[str, str]]]:
@@ -342,14 +348,6 @@ def _append_unique_name(other_columns: list[_OtherColumn], other_column: _OtherC
         other_columns.append(other_column)
 
 
-def _get_conf_rows(config: Config, engine: DatabaseEngine, connection: Any) -> list[IlmRule]:
-    if config.context.ilm_config_file:
-        ldb_conf_rows = load_rows_from_yaml(config.context.ilm_config_file)
-    else:
-        ldb_conf_rows = cast(list[IlmRule], engine.load_config(connection))
-    return ldb_conf_rows
-
-
 def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> WorkerResult:
     logger.info(f"Processing table {owner}.{table_name}...")
     prev_rows_processed = 0
@@ -533,7 +531,7 @@ def ldb_exec_ilm(
 def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, process_date: str) -> TablesConfig:
     logger.info("Processing table configuration...")
     ldb_ctl_status_rows: list[dict[str, Any]] = []
-    ldb_conf_rows = _get_conf_rows(config, engine, connection)
+    ldb_conf_rows = _load_offline_rows(config)
     if not config.execution.generate_script:
         ldb_ctl_status_rows = engine.get_status(connection, process_date)
     tables_config: TablesConfig = {}
@@ -768,7 +766,7 @@ def ldb_run(config: Config) -> None:
             raise SystemExit(rc)
         connection = engine.get_connection(config)
         table_privileges = ("SELECT", "INSERT", "UPDATE", "DELETE")
-        tables_conf_rows = _get_conf_rows(config, engine, connection)
+        tables_conf_rows = _load_offline_rows(config)
         source_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
         if (
             config.execution.action == "SOURCE_ILM"

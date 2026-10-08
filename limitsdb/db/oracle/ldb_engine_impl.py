@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Literal, cast
 
 import oracledb
 
-from limitsdb.core.ldb_errors import ConfigurationError, DatabaseConnectionError, ExecutionError
+from limitsdb.core.ldb_errors import DatabaseConnectionError, ExecutionError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
@@ -244,33 +244,6 @@ class OracleEngine(DatabaseEngine):
                 conn.close()
         except Exception:
             logger.critical("Failed to close Oracle DB connection.", exc_info=True)
-
-    @staticmethod
-    def load_config(conn: oracledb.Connection) -> list[dict[str, Any]]:
-        """Loads configuration from ldb_conf.
-        Args:
-            conn: Active Oracle connection.
-        Returns:
-            List of configuration rows."""
-        cursor: oracledb.Cursor | None = None
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """SELECT cnf_id, cnf_source_owner, cnf_history_owner, cnf_table_name, cnf_retain_months_source,
-                       cnf_retain_months_history, cnf_exec_day, cnf_frecuency, cnf_is_active, cnf_purge_date_expr,
-                       cnf_additional_filter_expr, cnf_history_addtl_filter_expr, cnf_source_orphan_purge, cnf_orphan_check_column, cnf_has_lob_columns,
-                       cnf_referencing_tables, cnf_join_expr, cnf_hint_expr, cnf_history_hint_expr, cnf_long_columns, null ctl_status
-                FROM ldb_conf
-                WHERE cnf_is_active = 'Y'"""
-            )
-            cols = [cast(str, col[0]).lower().removeprefix("cnf_") for col in cursor.description]
-            return [dict(zip(cols, row, strict=True)) for row in cursor.fetchall()]
-        except Exception as exc:
-            logger.critical("Failed to load configuration from Oracle.", exc_info=True)
-            raise ConfigurationError("Failed to load ILM configuration from Oracle") from exc
-        finally:
-            if cursor:
-                cursor.close()
 
     @staticmethod
     def get_table_columns(
