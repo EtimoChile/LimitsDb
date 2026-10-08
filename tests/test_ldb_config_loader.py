@@ -156,6 +156,88 @@ def test_invalid_secrets_are_not_treated_as_empty(tmp_path: Path):
     assert isinstance(caught.value.__cause__, json.JSONDecodeError)
 
 
+def test_load_yaml_nonexistent_path_returns_empty(tmp_path: Path):
+    result = ldb_config_loader._load_yaml(tmp_path / "does_not_exist.yml")
+    assert result == {}
+
+
+def test_load_yaml_empty_file_returns_empty(tmp_path: Path):
+    path = tmp_path / "empty.yml"
+    path.write_text("", encoding="utf-8")
+    result = ldb_config_loader._load_yaml(path)
+    assert result == {}
+
+
+def test_load_yaml_non_dict_root_raises(tmp_path: Path):
+    path = tmp_path / "list.yml"
+    path.write_text("- item1\n- item2\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError):
+        ldb_config_loader._load_yaml(path)
+
+
+def test_load_secrets_non_dict_root_raises(tmp_path: Path):
+    path = tmp_path / "secrets.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(SecretError):
+        ldb_config_loader._load_secrets(path)
+
+
+def test_apply_dot_set_creates_missing_intermediate_key():
+    cfg: dict = {"a": "string_not_dict"}
+    ldb_config_loader._apply_dot_set(cfg, "a.b", 42)
+    assert cfg == {"a": {"b": 42}}
+
+
+def test_load_runtime_config_without_secrets_file(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ldb_config_loader, "resolve_schema_file", lambda **k: None)
+    cfg = ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={})
+    assert isinstance(cfg, dict)
+
+
+def test_load_runtime_config_with_empty_secrets_dict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    secrets_file = tmp_path / "secrets.json"
+    secrets_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        ldb_config_loader,
+        "resolve_schema_file",
+        lambda **k: str(secrets_file) if k["prefix_name"] == "secrets" else None,
+    )
+    monkeypatch.setattr(ldb_config_loader, "secret_keys_from_config", lambda: ["source_password"])
+    cfg = ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={})
+    assert "source_password" not in cfg
+
+
+def test_load_runtime_config_skips_empty_secret_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    secrets_file = tmp_path / "secrets.json"
+    secrets_file.write_text(json.dumps({"source_password": ""}), encoding="utf-8")
+    monkeypatch.setattr(
+        ldb_config_loader,
+        "resolve_schema_file",
+        lambda **k: str(secrets_file) if k["prefix_name"] == "secrets" else None,
+    )
+    monkeypatch.setattr(ldb_config_loader, "secret_keys_from_config", lambda: ["source_password"])
+    cfg = ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={})
+    assert "source_password" not in cfg
+
+
+def test_load_ilm_config_loads_yaml_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    ilm_file = tmp_path / "ilm.yml"
+    ilm_file.write_text("tables: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        ldb_config_loader,
+        "resolve_schema_file",
+        lambda **k: str(ilm_file) if k["prefix_name"] == "ilm" else None,
+    )
+    result = ldb_config_loader.load_ilm_config(schema="s", profile=None)
+    assert result == {"tables": []}
+
+
+def test_load_ilm_config_returns_empty_when_no_file(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ldb_config_loader, "resolve_schema_file", lambda **k: None)
+    result = ldb_config_loader.load_ilm_config(schema="s", profile=None)
+    assert result == {}
+
+
 def test_decryption_failure_names_secret_without_exposing_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     secrets_file = tmp_path / "secrets.json"
     token = "enc:v1:aes256gcm:sensitive-token"

@@ -54,3 +54,40 @@ def test_invalid_keys_and_types(tmp_path):
     path.write_text(yaml.safe_dump(bad_key), encoding="utf-8")
     with pytest.raises(KeyError):
         ldb_ilm_config.load_rows_from_yaml(str(path))
+
+
+def test_ensure_mapping_none_returns_empty_dict():
+    result = ldb_ilm_config._ensure_mapping(None, "test_field")
+    assert result == {}
+
+
+def test_ensure_mapping_non_mapping_raises_type_error():
+    with pytest.raises(TypeError):
+        ldb_ilm_config._ensure_mapping("not_a_mapping", "test_field")
+
+
+def test_ensure_list_of_mappings_none_returns_empty_list():
+    result = ldb_ilm_config._ensure_list_of_mappings(None, "test_field")
+    assert result == []
+
+
+def test_ensure_list_of_mappings_non_mapping_element_raises_type_error():
+    with pytest.raises(TypeError):
+        ldb_ilm_config._ensure_list_of_mappings([{"valid": True}, "not_a_mapping"], "test_field")
+
+
+def test_load_rows_from_yaml_all_inactive_conds_excluded(tmp_path):
+    content = {
+        "tables": [
+            {
+                "source_owner": "SRC",
+                "table_name": "T1",
+                "conds": [{"is_active": False}],
+            }
+        ]
+    }
+    path = tmp_path / "ilm.yml"
+    path.write_text(yaml.safe_dump(content), encoding="utf-8")
+    rows = ldb_ilm_config.load_rows_from_yaml(str(path))
+    # Table T1 is excluded entirely because all its conds are inactive
+    assert len(rows) == 0

@@ -603,6 +603,165 @@ def test_ldb_exec_ilm_retries_partial_failure_that_made_progress(monkeypatch):
     assert tables_config[("A", "CHILD")]["conds"][0]["ctl_status"] == Status.TABLE_END
 
 
+def test_build_dependency_graph_no_dot_notation():
+    rows = [
+        {"source_owner": "A", "table_name": "T1", "referencing_tables": "T2 r"},
+        {"source_owner": "A", "table_name": "T2", "referencing_tables": ""},
+    ]
+    graph = ldb_runner._build_dependency_graph(rows)
+    assert graph[("A", "T2")] == {("A", "T1")}
+
+
+def test_build_dependency_graph_invalid_ref_format_raises():
+    rows = [
+        {"source_owner": "A", "table_name": "T1", "referencing_tables": "A.T2"},
+        {"source_owner": "A", "table_name": "T2", "referencing_tables": ""},
+    ]
+    with pytest.raises(ValueError, match="Invalid referencing_tables"):
+        ldb_runner._build_dependency_graph(rows)
+
+
+def test_build_dependency_graph_ref_not_in_config_raises():
+    rows = [{"source_owner": "A", "table_name": "T1", "referencing_tables": "A.NONEXISTENT r"}]
+    with pytest.raises(ValueError, match="not present in ILM configuration"):
+        ldb_runner._build_dependency_graph(rows)
+
+
+def test_validate_orphan_config_check_column_without_purge_raises():
+    config = Config(schema="s", mode="PLAN")
+    rule = {"source_orphan_purge": "N", "orphan_check_column": "FK_COL"}
+    with pytest.raises(ValueError, match="source_orphan_purge must be enabled"):
+        ldb_runner._validate_orphan_configuration(config, rule, ("A", "T1"))
+
+
+def test_validate_environment_history_ilm_adds_source_optional_specs(monkeypatch: pytest.MonkeyPatch):
+    opened = []
+    closed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            conn = SimpleNamespace(admin=admin, env=env)
+            opened.append(conn)
+            return conn
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 7)
+
+        def close_connection(self, conn):
+            closed.append(conn)
+
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: {})
+    config = Config(
+        schema="s",
+        action="HISTORY_ILM",
+        mode="VALIDATE",
+        source_dsn="source-dsn",
+        source_username="source-user",
+        source_password="source-password",
+        history_dsn="history-dsn",
+        history_username="history-user",
+        history_password="history-password",
+        admin_source_username="source-admin",
+        admin_source_password="source-admin-password",
+        admin_history_username="history-admin",
+        admin_history_password="history-admin-password",
+    )
+    result = ldb_runner._validate_environment(config, DummyEngine())
+    assert result == 0
+    assert len(opened) == 4  # HISTORY required x2 + SOURCE optional x2
+    assert closed == opened
+
+
+def test_build_history_table_without_ldb_columns():
+    config = Config(schema="s", mode="PLAN", add_ldb_columns=False)
+
+    class DummyEngine:
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ("ID",)
+
+    table_cnf = {
+        "conds": [{"history_owner": "H", "table_name": "T1", "source_owner": "S"}],
+        "columns_metadata": {"ID": ColumnDefinition(name="ID", data_type="NUMBER", id=1)},
+        "other_columns": [],
+    }
+    result = ldb_runner._build_history_table_definition(config, DummyEngine(), object(), table_cnf)
+    assert result.primary_key == ("ID",)
+
+
+def test_build_history_table_ldb_process_date_already_in_pk():
+    config = Config(schema="s", mode="PLAN")
+
+    class DummyEngine:
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ("ID", "LDB_PROCESS_DATE")
+
+    table_cnf = {
+        "conds": [{"history_owner": "H", "table_name": "T1", "source_owner": "S"}],
+        "columns_metadata": {"ID": ColumnDefinition(name="ID", data_type="NUMBER", id=1)},
+        "other_columns": [],
+    }
+    result = ldb_runner._build_history_table_definition(config, DummyEngine(), object(), table_cnf)
+    assert result.primary_key is not None
+    assert result.primary_key.count("LDB_PROCESS_DATE") == 1
+
+
+def test_log_where_predicates_with_query_expr(monkeypatch: pytest.MonkeyPatch):
+    logged: list[str] = []
+    monkeypatch.setattr(
+        ldb_runner,
+        "logger",
+        SimpleNamespace(info=lambda msg, *a, **k: logged.append(str(msg)), error=lambda *a, **k: None),
+    )
+    tables_config = {
+        ("A", "T1"): {"query_expr": "SELECT * FROM A.T1 WHERE id > 0"},
+        ("A", "T2"): {"query_expr": ""},
+    }
+    ldb_runner._log_where_predicates(tables_config)
+    assert any("WHERE predicates" in m for m in logged)
+
+
+def test_process_table_recovery_fails_gracefully(monkeypatch: pytest.MonkeyPatch):
+    call_count = [0]
+
+    class DummyEngine:
+        def get_connection(self, config):
+            return object()
+
+        def get_system_date(self, conn):
+            return "start"
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return 0
+            raise RuntimeError("recovery DB unavailable")
+
+        def sql_block_run(self, conn, plsql_code):
+            raise RuntimeError("primary failure")
+
+        def close_connection(self, conn):
+            pass
+
+    engine_obj = DummyEngine()
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine_obj)
+    config = Config(schema="s", db_engine="oracle", source_username="u", source_password="pw", source_dsn="dsn")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    assert result[2] == Status.ERROR
+
+
+def test_ldb_exec_ilm_handles_unexpected_worker_exception(monkeypatch: pytest.MonkeyPatch):
+    tables_config = {("A", "PARENT"): _table_config()}
+
+    def crashing_worker(config, owner, table_name, plsql_code, process_date):
+        raise RuntimeError("process crashed unexpectedly")
+
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(ldb_runner, "process_table", crashing_worker)
+
+    result = ldb_runner.ldb_exec_ilm(_execution_config(), tables_config, "20261006", _StatusEngine(), object())
+    assert result == 1
+
+
 def test_ldb_exec_ilm_stops_retrying_when_failure_makes_no_progress(monkeypatch):
     launched = []
     tables_config = {

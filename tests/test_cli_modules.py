@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -290,6 +291,40 @@ _FULL_IMPL_DICT = {
 )
 def test_ldb_impl_run_cli_fails_when_credential_is_missing(monkeypatch: pytest.MonkeyPatch, empty_key: str):
     cfg = {**_FULL_IMPL_DICT, empty_key: ""}
+    monkeypatch.setattr(
+        ldb_impl,
+        "_parse_args",
+        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
+    )
+    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
+    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
+
+    with pytest.raises(SystemExit) as caught:
+        ldb_impl.run_cli()
+
+    assert caught.value.code == 1
+
+
+def test_ldb_crypt_parse_args_directly(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sys, "argv", ["ldb-crypt", "--schema", "s", "--config-dir", "/tmp"])
+    args = ldb_crypt._parse_args()
+    assert args.schema == "s"
+    assert args.config_dir == "/tmp"
+
+
+def test_ldb_init_parse_args_directly(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sys, "argv", ["ldb-init", "--schema", "s", "--no-examples", "--overwrite"])
+    args = ldb_init._parse_args()
+    assert args.schema == "s"
+    assert args.no_examples is True
+    assert args.overwrite is True
+
+
+@pytest.mark.parametrize("empty_key", ["source_username", "source_dsn"])
+def test_ldb_impl_run_cli_source_credential_missing_in_plan_mode(monkeypatch: pytest.MonkeyPatch, empty_key: str):
+    # PLAN mode bypasses Config.__post_init__ credential validation → ldb_impl.py checks them
+    cfg = {**_FULL_IMPL_DICT, "mode": "PLAN", empty_key: ""}
     monkeypatch.setattr(
         ldb_impl,
         "_parse_args",

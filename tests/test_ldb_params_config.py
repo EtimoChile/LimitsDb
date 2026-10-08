@@ -179,6 +179,57 @@ def test_argparser_choices_requirements(monkeypatch: pytest.MonkeyPatch):
         parser.parse_args(["--schema", "s", "--db-engine", "postgres"])
 
 
+def test_invalid_mode_raises_validation_error():
+    with pytest.raises(ValueError, match="invalid mode"):
+        ldb_params_config.Config(schema="s", mode="BADMODE")  # type: ignore[arg-type]
+
+
+def test_arg_type_from_default_bool_and_float():
+    assert ldb_params_config._arg_type_from_default(True) is bool
+    assert ldb_params_config._arg_type_from_default(1.5) is float
+
+
+def test_parse_cli_sets_ignores_pair_without_equals():
+    result = ldb_params_config._parse_cli_sets(["noequals", "also_no_eq"])
+    assert result == {}
+
+
+def test_env_bindings_from_config_raises_for_duplicate(monkeypatch: pytest.MonkeyPatch):
+    from typing import Annotated, get_args
+
+    from limitsdb.core.ldb_params_config import Config, Env
+
+    real_hints = ldb_params_config.get_type_hints(Config, include_extras=True)
+    duplicate_env = next(m.name for ann in real_hints.values() for m in get_args(ann)[1:] if isinstance(m, Env))
+    fake_hints = {**real_hints, "_dup_field": Annotated[str, Env(duplicate_env)]}
+    monkeypatch.setattr(ldb_params_config, "get_type_hints", lambda cls, **kw: fake_hints)
+    with pytest.raises(RuntimeError, match="Duplicate"):
+        ldb_params_config.env_bindings_from_config()
+
+
+def test_build_config_raises_when_schema_is_missing(monkeypatch: pytest.MonkeyPatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(ldb_params_config, "env_bindings_from_config", lambda: {})
+    monkeypatch.setattr(ldb_params_config, "read_env_overrides", lambda bindings: {})
+    args = SimpleNamespace(schema=None, profile=None, set=[])
+    with pytest.raises(ValueError, match="schema is required"):
+        ldb_params_config.build_config({}, args)
+
+
+def test_build_config_with_profile_from_cli(monkeypatch: pytest.MonkeyPatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(ldb_params_config, "env_bindings_from_config", lambda: {})
+    monkeypatch.setattr(ldb_params_config, "read_env_overrides", lambda bindings: {})
+    monkeypatch.setattr(
+        ldb_params_config, "load_runtime_config", lambda **kw: {"schema": "s", "profile": kw.get("profile")}
+    )
+    args = SimpleNamespace(schema="s", profile="prod", set=[])
+    result = ldb_params_config.build_config({}, args)
+    assert result["profile"] == "prod"
+
+
 def test_schema_can_be_bootstrapped_from_registered_environment(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LDB_SCHEMA", "environment-schema")
     parser = ldb_params_config.build_argparser_from_config()

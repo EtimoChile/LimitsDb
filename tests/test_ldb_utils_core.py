@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from limitsdb.core import ldb_utils
-from limitsdb.core.ldb_errors import SecretError
+from limitsdb.core.ldb_errors import ConfigurationError, SecretError
 from limitsdb.core.ldb_params_config import Config
 
 
@@ -83,6 +83,95 @@ def test_init_schema_encrypts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     assert cfg.exists() and ilm.exists() and sec.exists()
     assert calls == {"key": True, "enc": True}
     assert ex.exists()
+
+
+def test_max_ignore_none_raises_for_incomparable_values():
+    with pytest.raises(TypeError):
+        ldb_utils.max_ignore_none(["string", 1])
+
+
+def test_resolve_schema_file_explicit_file_not_found_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        ldb_utils, "get_config_roots", lambda appname=ldb_utils.APPNAME: (tmp_path / "user", tmp_path / "sys")
+    )
+    for root in (tmp_path / "user", tmp_path / "sys"):
+        (root / "schemas" / "s").mkdir(parents=True, exist_ok=True)
+    with pytest.raises((ConfigurationError, FileNotFoundError, ValueError)):
+        ldb_utils.resolve_schema_file(
+            schema="s",
+            profile=None,
+            explicit_config_dir=None,
+            explicit_file="nonexistent.yml",
+            prefix_name="config",
+            extension_name="yml",
+            description="cfg",
+        )
+
+
+def test_write_or_update_secrets_raises_for_valid_json_non_dict_root(tmp_path: Path):
+    secrets_path = tmp_path / "schemas" / "s" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True)
+    secrets_path.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(SecretError):
+        ldb_utils.write_or_update_secrets("s", None, str(tmp_path))
+    assert secrets_path.read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_encrypt_secrets_in_place_raises_for_valid_json_non_dict_root(tmp_path: Path):
+    secrets_path = tmp_path / "schemas" / "s" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True)
+    secrets_path.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(SecretError):
+        ldb_utils.encrypt_secrets_in_place("s", None, str(tmp_path))
+    assert secrets_path.read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_render_config_template_includes_literal_choices():
+    output = ldb_utils.render_config_template_with_help()
+    assert isinstance(output, str)
+    assert len(output) > 0
+
+
+def test_write_config_yaml_no_overwrite_when_file_exists(tmp_path: Path):
+    first = ldb_utils.write_config_yaml("s", None, str(tmp_path), overwrite=True)
+    first.write_text("original: true\n", encoding="utf-8")
+    second = ldb_utils.write_config_yaml("s", None, str(tmp_path), overwrite=False)
+    assert second == first
+    assert second.read_text(encoding="utf-8") == "original: true\n"
+
+
+def test_write_ilm_yaml_no_overwrite_when_file_exists(tmp_path: Path):
+    first = ldb_utils.write_ilm_yaml("s", None, str(tmp_path), overwrite=True)
+    first.write_text("original: []\n", encoding="utf-8")
+    second = ldb_utils.write_ilm_yaml("s", None, str(tmp_path), overwrite=False)
+    assert second == first
+    assert second.read_text(encoding="utf-8") == "original: []\n"
+
+
+def test_write_ilm_example_no_overwrite_when_file_exists(tmp_path: Path):
+    first = ldb_utils.write_ilm_example("s", None, str(tmp_path), overwrite=True)
+    first.write_text("original example\n", encoding="utf-8")
+    second = ldb_utils.write_ilm_example("s", None, str(tmp_path), overwrite=False)
+    assert second == first
+    assert second.read_text(encoding="utf-8") == "original example\n"
+
+
+def test_init_schema_without_examples(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(ldb_utils, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(ldb_utils, "encrypt_secrets_in_place", lambda *a, **k: None)
+    cfg, ilm, sec, ex = ldb_utils.init_schema(
+        schema="s", profile=None, config_root=str(tmp_path), overwrite=True, with_examples=False
+    )
+    assert cfg.exists() and ilm.exists() and sec.exists()
+    assert ex is None
+
+
+def test_init_schema_without_auto_encrypt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    calls: dict = {}
+    monkeypatch.setattr(ldb_utils, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(ldb_utils, "encrypt_secrets_in_place", lambda *a, **k: calls.setdefault("enc", True))
+    ldb_utils.init_schema(schema="s", profile=None, config_root=str(tmp_path), overwrite=True, auto_encrypt=False)
+    assert "enc" not in calls
 
 
 def test_invalid_existing_secrets_are_not_overwritten(tmp_path: Path):
