@@ -832,6 +832,81 @@ def test_oracle_engine_ensure_table_structure_reconciles_and_is_idempotent(
         _drop_table_if_present(oracle_connection, parent_table)
 
 
+def test_oracle_engine_ensure_table_structure_replaces_pk_columns(
+    oracle_connection: oracledb.Connection,
+):
+    username = os.environ["LDB_ORACLE_TEST_USER"].upper()
+    table_name = "LDBT_PKC_TEST"
+    _drop_table_if_present(oracle_connection, table_name)
+
+    cursor = oracle_connection.cursor()
+    try:
+        cursor.execute(f"CREATE TABLE {table_name} (a NUMBER(5) NOT NULL, b NUMBER(5) NOT NULL)")
+        cursor.execute(f"ALTER TABLE {table_name} ADD CONSTRAINT {table_name}_PK PRIMARY KEY (a, b)")
+        oracle_connection.commit()
+    finally:
+        cursor.close()
+
+    desired = TableDefinition(
+        owner=username,
+        name=table_name,
+        columns=(
+            ColumnDefinition(name="A", data_type="number", precision=5, nullable=False),
+            ColumnDefinition(name="B", data_type="number", precision=5, nullable=False),
+        ),
+        primary_key=("A",),
+    )
+
+    try:
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {})
+
+        pk_constraints = _fetch_constraint_type(oracle_connection, table_name, "P")
+        assert len(pk_constraints) == 1
+        assert _fetch_index_columns(oracle_connection, f"{table_name}_PK") == ["A"]
+
+        # Second call is idempotent
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {})
+        assert _fetch_constraint_type(oracle_connection, table_name, "P") == pk_constraints
+    finally:
+        _drop_table_if_present(oracle_connection, table_name)
+
+
+def test_oracle_engine_ensure_table_structure_drops_unmanaged_index(
+    oracle_connection: oracledb.Connection,
+):
+    username = os.environ["LDB_ORACLE_TEST_USER"].upper()
+    table_name = "LDBT_UMI_TEST"
+    _drop_table_if_present(oracle_connection, table_name)
+
+    cursor = oracle_connection.cursor()
+    try:
+        cursor.execute(f"CREATE TABLE {table_name} (id NUMBER(10) NOT NULL, name VARCHAR2(20))")
+        cursor.execute(f"ALTER TABLE {table_name} ADD CONSTRAINT {table_name}_PK PRIMARY KEY (id)")
+        cursor.execute(f"CREATE INDEX ldbt_umi_extra_ix ON {table_name} (name)")
+        oracle_connection.commit()
+    finally:
+        cursor.close()
+
+    desired = TableDefinition(
+        owner=username,
+        name=table_name,
+        columns=(
+            ColumnDefinition(name="ID", data_type="number", precision=10, nullable=False),
+            ColumnDefinition(name="NAME", data_type="varchar2", length=20),
+        ),
+        primary_key=("ID",),
+        indexes=(),
+    )
+
+    try:
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {})
+
+        assert _fetch_index_columns(oracle_connection, "LDBT_UMI_EXTRA_IX") == []
+        assert len(_fetch_constraint_type(oracle_connection, table_name, "P")) == 1
+    finally:
+        _drop_table_if_present(oracle_connection, table_name)
+
+
 def _write_failure_e2e_configuration(
     root: Path,
     *,

@@ -868,13 +868,13 @@ end;"""
                 unique_clause = "UNIQUE " if is_unique else ""
                 create_index_sql = f"CREATE {unique_clause}INDEX {fmttd_owner}.{index_name} ON {fmttd_owner}.{fmttd_table_name} ({fmttd_columns_sql})"
                 OracleEngine._execute_ddl(conn, cursor, create_index_sql)
-            final_pk_name, _, final_pk_index = OracleEngine._get_primary_key_info(cursor, fmttd_owner, fmttd_table_name)
+            final_pk_name, _, final_pk_index = OracleEngine._get_primary_key_info(cursor, table.owner, table.name)
             expected_indexes = set(desired_indexes.keys())
             if final_pk_name:
                 expected_indexes.add(final_pk_name)
             if final_pk_index:
                 expected_indexes.add(final_pk_index)
-            existing_indexes = OracleEngine._get_table_indexes(cursor, fmttd_owner, fmttd_table_name)
+            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
             for index_name in list(existing_indexes.keys()):
                 if index_name not in expected_indexes:
                     fmttd_index_name = OracleEngine._format_identifier(index_name)
