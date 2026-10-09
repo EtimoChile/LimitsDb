@@ -243,6 +243,41 @@ def test_join_wrapped_splits_at_max_width_on_separator():
 # ---------------------------------------------------------------------------
 
 
+def test_plan_mode_raises_for_cyclic_table_dependencies(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode PLAN — circular dependencies cannot be resolved;
+    # PLAN mode must detect and report the cycle before any processing
+    # Given: two tables that reference each other
+    rows = [
+        {"source_owner": "A", "table_name": "T1", "referencing_tables": "A.T2 B"},
+        {"source_owner": "A", "table_name": "T2", "referencing_tables": "A.T1 B"},
+    ]
+    config = Config(schema="s", mode="PLAN")
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda current: rows)
+
+    # When / Then: ValueError naming the cycle is raised
+    with pytest.raises(ValueError, match=r"[Cc]ycl"):
+        ldb_runner._plan_mode(config)
+
+
+def test_source_orphan_purge_without_use_added_columns_raises(monkeypatch: pytest.MonkeyPatch):
+    # Spec: limitsdb/resources/ilm.example.yml — source_orphan_purge=Y requires
+    # use_added_columns; disabling added columns while orphan purge is active is an error
+    # Given: CHILD (with full orphan config) listed before PARENT so CHILD is validated first
+    child = _minimal_row(
+        "CHILD",
+        source_orphan_purge="Y",
+        orphan_check_column="B.ID",
+        join_expr="@ JOIN SRC.PARENT B ON B.ID=A.PARENT_ID",
+        referencing_tables="A.PARENT P",
+    )
+    parent = _minimal_row("PARENT")
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: [child, parent])
+
+    # When / Then: ValueError names use_added_columns as the missing prerequisite
+    with pytest.raises(ValueError, match="use_added_columns"):
+        ldb_runner.process_tables_cnf(object(), _script_config(use_added_columns=False), _MinimalEngine(), "20261007")
+
+
 def test_plan_mode_exits_without_error_when_ilm_has_no_tables(monkeypatch: pytest.MonkeyPatch):
     # Spec: README > Run ILM > --mode PLAN — evaluates dependency graph and prints
     # execution plan; empty config is valid and exits 0

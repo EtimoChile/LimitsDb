@@ -232,6 +232,98 @@ def test_decryption_failure_names_secret_without_exposing_value(tmp_path: Path, 
     assert token not in str(caught.value)
 
 
+def test_empty_config_file_is_treated_as_empty_layer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/configuration-contract.md — an empty YAML file contributes nothing;
+    # the layer is silently skipped as if the file were absent
+    # Given: an empty config file resolved as the explicit config
+    empty = tmp_path / "empty.yml"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        ldb_config_loader,
+        "resolve_schema_file",
+        lambda **k: str(empty) if k["prefix_name"] == "config" else None,
+    )
+
+    # When: config is loaded with that explicit file
+    cfg = ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={}, explicit_config_file=str(empty))
+
+    # Then: result is an empty dict — no keys injected from the empty file
+    assert isinstance(cfg, dict)
+    assert "foo" not in cfg
+
+
+def test_config_file_with_list_root_raises_configuration_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/exception-handling.md — ConfigurationError when config root is not a
+    # mapping; YAML list roots are invalid and must be rejected on load
+    # Given: a config file whose root is a YAML list
+    list_file = tmp_path / "list.yml"
+    list_file.write_text("- item1\n- item2\n", encoding="utf-8")
+    monkeypatch.setattr(ldb_config_loader, "resolve_schema_file", lambda **k: str(list_file))
+
+    # When / Then: ConfigurationError is raised — list root is not a valid config
+    with pytest.raises(ConfigurationError):
+        ldb_config_loader.load_runtime_config(
+            schema="s", profile=None, cli_sets={}, explicit_config_file=str(list_file)
+        )
+
+
+def test_secrets_file_with_list_root_raises_secret_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/exception-handling.md — SecretError when secrets file root is not a
+    # mapping; a JSON array at root indicates a malformed secrets file
+    # Given: a secrets file whose JSON root is an array
+    schema_dir = tmp_path / "user" / "schemas" / "s"
+    schema_dir.mkdir(parents=True)
+    secrets_file = schema_dir / "secrets.json"
+    secrets_file.write_text("[1, 2, 3]", encoding="utf-8")
+    monkeypatch.setattr(
+        ldb_config_loader,
+        "resolve_schema_file",
+        lambda **k: str(secrets_file) if k["prefix_name"] == "secrets" else None,
+    )
+    monkeypatch.setattr(ldb_config_loader, "secret_keys_from_config", lambda: ["source_password"])
+
+    # When / Then: SecretError is raised — non-dict secrets root is never accepted
+    with pytest.raises(SecretError):
+        ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={})
+
+
+def test_read_env_overrides_coerces_float_values(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/configuration-contract.md — registered env vars are coerced: booleans,
+    # integers, floats and strings are inferred from the string representation
+    # Given: an env var with a float value
+    monkeypatch.setenv("LDB_RATIO", "3.14")
+
+    # When: env overrides are read
+    env = ldb_config_loader.read_env_overrides({"LDB_RATIO": "ratio"})
+
+    # Then: the value is a float
+    assert env == {"ratio": 3.14}
+
+
+def test_secret_key_with_null_value_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Secrets & Encryption — a registered secret key that is null or
+    # empty in the secrets file is silently skipped; it does not cause an error
+    # Given: a secrets file where the registered key has a null value
+    schema_dir = tmp_path / "user" / "schemas" / "s"
+    schema_dir.mkdir(parents=True)
+    import json
+
+    secrets_file = schema_dir / "secrets.json"
+    secrets_file.write_text(json.dumps({"source_password": None}), encoding="utf-8")
+    monkeypatch.setattr(
+        ldb_config_loader,
+        "resolve_schema_file",
+        lambda **k: str(secrets_file) if k["prefix_name"] == "secrets" else None,
+    )
+    monkeypatch.setattr(ldb_config_loader, "secret_keys_from_config", lambda: ["source_password"])
+
+    # When: config is loaded
+    cfg = ldb_config_loader.load_runtime_config(schema="s", profile=None, cli_sets={}, enforce_encrypted_secrets=False)
+
+    # Then: source_password is absent — null value is skipped, not injected
+    assert "source_password" not in cfg
+
+
 def test_missing_config_file_is_treated_as_empty_layer(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/configuration-contract.md — absent files contribute nothing;
     # the loader does not fail on missing optional files

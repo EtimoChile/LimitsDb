@@ -57,6 +57,32 @@ def test_decrypting_plaintext_raises_secret_error():
         ldb_crypto.decrypt("plaintext_password")
 
 
+def test_master_key_loaded_from_hex_string_in_environment(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Secrets & Encryption — LDB_MASTER_KEY accepts a 64-char hex string
+    # Given: a valid 64-char hex key in LDB_MASTER_KEY
+    raw = b"A" * 32
+    monkeypatch.setenv("LDB_MASTER_KEY", raw.hex())  # 64 hex chars
+
+    # When: key is loaded
+    key = ldb_crypto.load_or_create_key()
+
+    # Then: the 32-byte value decoded from hex is returned
+    assert key == raw
+
+
+def test_master_key_loaded_from_raw_32_byte_string_in_environment(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Secrets & Encryption — LDB_MASTER_KEY accepts a raw 32-char ASCII string
+    # Given: a 32-char ASCII string in LDB_MASTER_KEY
+    raw_str = "A" * 32
+    monkeypatch.setenv("LDB_MASTER_KEY", raw_str)
+
+    # When: key is loaded
+    key = ldb_crypto.load_or_create_key()
+
+    # Then: the UTF-8 encoded bytes are returned
+    assert key == raw_str.encode("utf-8")
+
+
 def test_master_key_from_environment_is_accepted(monkeypatch: pytest.MonkeyPatch):
     # Spec: README > Secrets & Encryption — key in environment is used transparently
     # Given: a valid base64-encoded 32-byte key in LDB_MASTER_KEY

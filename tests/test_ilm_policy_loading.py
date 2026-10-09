@@ -136,6 +136,81 @@ def test_missing_tables_key_raises_key_error(tmp_path: Path):
         ldb_ilm_config.load_rows_from_yaml(str(path))
 
 
+def test_empty_ilm_file_returns_no_rows(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — an empty file contributes no ILM rules;
+    # the loader treats absent YAML content as an empty configuration, not an error
+    # Given: an ILM file with no content
+    path = tmp_path / "ilm.yml"
+    path.write_text("", encoding="utf-8")
+
+    # When: rows are loaded
+    rows = ldb_ilm_config.load_rows_from_yaml(str(path))
+
+    # Then: no rows — empty file is valid and contributes nothing
+    assert rows == []
+
+
+def test_ilm_file_with_list_root_raises_type_error(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — root must be a mapping; a list root
+    # indicates a malformed file and must be rejected early
+    # Given: ILM file whose root is a YAML list
+    path = tmp_path / "ilm.yml"
+    path.write_text("- item1\n- item2\n", encoding="utf-8")
+
+    # When / Then: TypeError is raised — the loader does not silently accept non-dict roots
+    with pytest.raises(TypeError):
+        ldb_ilm_config.load_rows_from_yaml(str(path))
+
+
+def test_ilm_file_with_non_mapping_table_entry_raises_type_error(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — each element of the tables list must
+    # be a mapping; a scalar or list element must be rejected
+    # Given: ILM file where tables contains a scalar element
+    path = tmp_path / "ilm.yml"
+    path.write_text(yaml.safe_dump({"tables": [123]}), encoding="utf-8")
+
+    # When / Then: TypeError is raised — malformed table entries are caught at load time
+    with pytest.raises(TypeError):
+        ldb_ilm_config.load_rows_from_yaml(str(path))
+
+
+def test_duplicate_table_in_resolved_ilm_config_is_rejected(monkeypatch: pytest.MonkeyPatch):
+    # Spec: limitsdb/resources/ilm.example.yml — each table appears once across merged
+    # config layers; duplicates indicate a configuration mistake and must be caught early
+    # Given: merged ILM config with the same table listed twice (both with active conds)
+    config = {
+        "tables": [
+            {"source_owner": "SRC", "table_name": "T1", "conds": [{"is_active": True}]},
+            {"source_owner": "SRC", "table_name": "T1", "conds": [{"is_active": True}]},
+        ]
+    }
+    monkeypatch.setattr(ldb_ilm_config, "load_ilm_config", lambda **_: config)
+
+    # When / Then: resolve_and_load_ilm_rows raises — the duplicate surfaces before any ILM run
+    with pytest.raises(ValueError, match="Duplicate"):
+        ldb_ilm_config.resolve_and_load_ilm_rows(schema="s", profile=None, config_dir=None)
+
+
+def test_resolved_ilm_rows_with_explicit_conds_and_multi_table(monkeypatch: pytest.MonkeyPatch):
+    # Spec: limitsdb/resources/ilm.example.yml — tables with explicit conds skip the
+    # default-active injection; inactive conds exclude the table from the result
+    # Given: two tables — one with explicit active cond, one with inactive cond
+    config = {
+        "tables": [
+            {"source_owner": "SRC", "table_name": "T1", "conds": [{"is_active": True}]},
+            {"source_owner": "SRC", "table_name": "T2", "conds": [{"is_active": False}]},
+        ]
+    }
+    monkeypatch.setattr(ldb_ilm_config, "load_ilm_config", lambda **_: config)
+
+    # When: rows are resolved
+    rows = ldb_ilm_config.resolve_and_load_ilm_rows(schema="s", profile=None, config_dir=None)
+
+    # Then: only the active table contributes rows
+    assert len(rows) == 1
+    assert rows[0]["table_name"] == "T1"
+
+
 def test_resolve_and_load_ilm_rows_returns_rows_from_resolved_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     # Spec: README > Run ILM > --ilm-config-file — a specific ILM YAML file
     # can bypass DB discovery
