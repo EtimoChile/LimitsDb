@@ -31,37 +31,29 @@ but does not replace the sources defined in `AGENTS.md`.
 - ILM operations can archive, purge, create objects, and manage privileges.
   They are not executed against a real database without explicit authorization
   and an identified environment.
-- The test suite lives in `tests/`. The unit baseline verified on 2026-10-07 is
-  97 passing tests (expanded from 81 with local tests for `ldb-init`, PLAN and
-  VALIDATE modes, script generation, and Oracle PK and error-logging methods);
-  Ruff validates format and lint, and strict `mypy` completes without findings
-  across the 23 package modules. The three current integration cases exercise
-  methods of the `OracleEngine` adapter and passed on the CI ephemeral base;
-  they cover idempotency, recovery after partial DDL, and privileged operations.
-  No tests of provider-own behavior without LimitsDb intervention are retained.
-  The fourth E2E case creates separate schemas via `ldb-impl`, runs `SOURCE_ILM`
-  and `HISTORY_ILM` on controlled rows, and verifies data and audit records. The
-  current extension runs the installed entry points, incorporates parent-detail
-  tables with a foreign key, an independent branch with two workers, and
-  idempotent reruns of both actions; all four cases passed on GitHub on commit
-  `d8a77ea`. `PEND-005` is resolved. The `PEND-012` fix separately preserves
-  the normalized historical filter, materializes its related columns even when
-  not in the source filter, and delegates to the adapter the rewriting toward
-  `<column>_<alias>` during `HISTORY_ILM`; the two focal unit tests and the 74
-  local tests pass. The six Oracle tests also passed on the GitHub ephemeral
-  runner `37679891653` on commit `d5f9c95`, including the two variants that
-  previously reproduced the defects. `PEND-012` is resolved. Run `37701931130`
-  on `38ab114` verified 97 local tests and 9 E2E passing (combined coverage 85%;
-  TOTAL 2582 statements, 298 not covered, 818 branches, 154 partial). Run
-  `37712040787` on `1181775` (PEND-009) verified 108 local tests and 9 E2E
-  passing (combined coverage 87%; TOTAL 2564 statements, 268 not covered, 816
-  branches, 146 partial). Run `37809692118` on `4047abc` (unmanaged-index
-  detection fix + 2 new E2E tests) verified 108 local tests and 11 E2E passing
-  (combined coverage 87%; TOTAL 2564 statements, 250 not covered, 816 branches,
-  148 partial). Run `37853724666` on `ead02f1` (51 new tests covering executable
-  paths not covered in core modules) verified 160 local tests and 11 E2E passing
-  (combined coverage 91%; TOTAL 2564 statements, 159 not covered, 816 branches,
-  107 partial).
+- The test suite lives in `tests/`. Local tests are 146 (non-oracle-integration)
+  and 11 E2E (oracle_integration). Ruff validates format and lint, and strict
+  `mypy` completes without findings across the 23 package modules. The test
+  layout follows `docs/test-organization.md`: core contracts in `tests/test_*.py`,
+  Oracle adapter tests (no real DB) in `tests/adapters/oracle/`, and E2E with an
+  ephemeral Oracle DB in `tests/integration/oracle/`. `PEND-018` is resolved:
+  `test_ldb_meta_status.py` (R5 violations; behaviors covered elsewhere) and
+  `test_oracle_engine_utils.py` (module-named, top-level location) were retired;
+  their behaviors were redistributed into three new adapter files
+  (`test_oracle_sql_generation.py`, `test_oracle_schema_objects.py`,
+  `test_oracle_connection_ops.py`), each named after a functional contract and
+  containing R1–R7 compliant tests (spec citations, Given/When/Then structure,
+  public interfaces with documented R2 exceptions). Two tests that called private
+  helpers with no documented contract and whose behaviors were covered elsewhere
+  (`test_identifier_formatting_and_quoting`, `test_register_and_fetch_connection_env_round_trip`)
+  were removed. The duplicate `tests/integration/test_oracle_ephemeral.py` was
+  removed; the canonical location is `tests/integration/oracle/`. The unit
+  baseline verified on 2026-10-07 is 97 passing tests (expanded from 81 with
+  local tests for `ldb-init`, PLAN and VALIDATE modes, script generation, and
+  Oracle PK and error-logging methods). `PEND-005`, `PEND-012`, `PEND-009` are
+  resolved. Run `37853724666` on `ead02f1` (51 new tests) verified 160 local
+  tests and 11 E2E passing (combined coverage 91%; TOTAL 2564 statements, 159
+  not covered, 816 branches, 107 partial).
 - The public configuration retains flat keys and system, user, explicit file,
   environment, CLI, and secrets precedence. The core consumes immutable typed
   views for execution, connections, administration, and context; normalized ILM
