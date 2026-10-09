@@ -1,6 +1,7 @@
 name: Quality
 
 on:
+  workflow_dispatch:
   push:
     branches: [development, main]
   pull_request:
