@@ -444,6 +444,32 @@ def test_bootstrap_roles_users_and_privileges_are_idempotent(oracle_connection: 
         _drop_table_if_present(oracle_connection, table_name)
 
 
+def test_privilege_grant_fails_when_table_does_not_exist(oracle_connection: oracledb.Connection):
+    # Spec: README § Bootstrap Database Objects — if ensure_table_privileges cannot
+    # locate the target table, the grant fails and the error is raised as ExecutionError
+    owner = os.environ["LDB_ORACLE_TEST_USER"].upper()
+    role_name = "LDBT_NOGRANT_ROLE"
+
+    # Given: a role that exists; the target table does not
+    _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role_name}", missing_error_code=1919)
+    OracleEngine.ensure_roles(oracle_connection, (RoleDefinition(name=role_name),))
+    try:
+        # When: ensure_table_privileges is called for a non-existent table
+        with pytest.raises(ExecutionError):
+            OracleEngine.ensure_table_privileges(
+                oracle_connection, role_name, ((owner, "LDBT_NONEXISTENT_TABLE_XYZ"),), ("SELECT",)
+            )
+        # Then: ExecutionError is raised; the role itself is intact
+        cursor = oracle_connection.cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) FROM dba_roles WHERE role = :1", [role_name])
+            assert cursor.fetchone()[0] == 1
+        finally:
+            cursor.close()
+    finally:
+        _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role_name}", missing_error_code=1919)
+
+
 @pytest.mark.parametrize(
     ("predicate_case", "source_filter", "history_filter"),
     [
@@ -973,6 +999,52 @@ def test_table_structure_reconciliation_drops_unmanaged_indexes(
         # Then: the extra index is gone; the PK constraint remains
         assert _fetch_index_columns(oracle_connection, "LDBT_UMI_EXTRA_IX") == []
         assert len(_fetch_constraint_type(oracle_connection, table_name, "P")) == 1
+    finally:
+        _drop_table_if_present(oracle_connection, table_name)
+
+
+def test_table_structure_reconciliation_fails_when_not_null_column_added_to_populated_table(
+    oracle_connection: oracledb.Connection,
+):
+    # Spec: README § Bootstrap Database Objects — if Oracle rejects an ALTER TABLE
+    # (e.g. ORA-01758: adding a NOT NULL column to a table that already has rows),
+    # the error is raised as ExecutionError; the table is left in the state Oracle
+    # reached before the failure
+    username = os.environ["LDB_ORACLE_TEST_USER"].upper()
+    table_name = "LDBT_NNULL_TEST"
+
+    # Given: an existing table that already has rows; desired definition adds a NOT NULL
+    # column with no DEFAULT — Oracle cannot backfill null into existing rows
+    _drop_table_if_present(oracle_connection, table_name)
+    cursor = oracle_connection.cursor()
+    try:
+        cursor.execute(f"CREATE TABLE {table_name} (id NUMBER(10) PRIMARY KEY)")
+        cursor.execute(f"INSERT INTO {table_name} (id) VALUES (1)")
+        oracle_connection.commit()
+    finally:
+        cursor.close()
+
+    desired = TableDefinition(
+        owner=username,
+        name=table_name,
+        columns=(
+            ColumnDefinition(name="ID", data_type="number", precision=10, nullable=False),
+            ColumnDefinition(name="REQUIRED", data_type="varchar2", length=40, nullable=False),
+        ),
+        primary_key=("ID",),
+    )
+
+    try:
+        # When: ensure_table_structure tries to ALTER the table
+        with pytest.raises(ExecutionError):
+            OracleEngine.ensure_table_structure(oracle_connection, desired, {})
+        # Then: ExecutionError is raised; the existing row is still present
+        cursor = oracle_connection.cursor()
+        try:
+            cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+            assert cursor.fetchone()[0] == 1
+        finally:
+            cursor.close()
     finally:
         _drop_table_if_present(oracle_connection, table_name)
 
