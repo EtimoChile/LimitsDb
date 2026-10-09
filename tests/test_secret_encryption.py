@@ -1,10 +1,17 @@
 import base64
+import json
 import os
 from pathlib import Path
 
 import pytest
 
-from limitsdb.core import ldb_crypto
+from limitsdb.cli import ldb_run
+from limitsdb.core import ldb_crypto, ldb_utils
+from limitsdb.core.ldb_errors import SecretError
+
+# ---------------------------------------------------------------------------
+# Master key and encrypt/decrypt round-trip
+# ---------------------------------------------------------------------------
 
 
 def test_secret_encrypted_with_master_key_can_be_decrypted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -99,3 +106,82 @@ def test_key_file_permission_failure_raises_secret_error(monkeypatch: pytest.Mon
     # Then: SecretError is raised — the key is never silently left unprotected
     with pytest.raises(ValueError, match="Unable to restrict permissions"):
         ldb_crypto.load_or_create_key()
+
+
+# ---------------------------------------------------------------------------
+# Secrets file operations
+# ---------------------------------------------------------------------------
+
+
+def test_write_or_update_secrets_creates_initial_file(tmp_path: Path):
+    # Spec: README > ldb-init — secrets file is created with an empty dict when absent
+    # Given: no existing secrets file
+    # When: write_or_update_secrets is called
+    secret_file = ldb_utils.write_or_update_secrets("demo", None, str(tmp_path))
+
+    # Then: file exists and contains a dict
+    data = json.loads(secret_file.read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+
+
+def test_write_or_update_secrets_does_not_overwrite_valid_json_array(tmp_path: Path):
+    # Spec: docs/exception-handling.md — SecretError when the secrets file root
+    # is not a dict; the original file must be preserved unmodified
+    # Given: an existing secrets file with a JSON array at root
+    secrets_path = tmp_path / "schemas" / "s" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True)
+    secrets_path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    # When / Then: SecretError is raised AND the original file is untouched
+    with pytest.raises(SecretError):
+        ldb_utils.write_or_update_secrets("s", None, str(tmp_path))
+    assert secrets_path.read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_encrypt_secrets_in_place_does_not_overwrite_valid_json_array(tmp_path: Path):
+    # Spec: docs/exception-handling.md — SecretError when secrets file has non-dict
+    # root; must not modify the file
+    # Given: a secrets file with a JSON array
+    secrets_path = tmp_path / "schemas" / "s" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True)
+    secrets_path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    # When / Then: SecretError is raised and file is unchanged
+    with pytest.raises(SecretError):
+        ldb_utils.encrypt_secrets_in_place("s", None, str(tmp_path))
+    assert secrets_path.read_text(encoding="utf-8") == "[1, 2, 3]"
+
+
+def test_invalid_existing_secrets_are_not_overwritten(tmp_path: Path):
+    # Spec: docs/exception-handling.md — SecretError: existing secrets files with
+    # invalid JSON are rejected; neither operation may modify the file
+    # Given: a broken secrets file
+    secrets_path = tmp_path / "schemas" / "s" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True)
+    secrets_path.write_text("{broken", encoding="utf-8")
+
+    # When / Then: both operations raise SecretError and the file is unchanged
+    with pytest.raises(SecretError):
+        ldb_utils.write_or_update_secrets("s", None, str(tmp_path))
+    with pytest.raises(SecretError):
+        ldb_utils.encrypt_secrets_in_place("s", None, str(tmp_path))
+    assert secrets_path.read_text(encoding="utf-8") == "{broken"
+
+
+# ---------------------------------------------------------------------------
+# Secret masking in logs
+# ---------------------------------------------------------------------------
+
+
+def test_secrets_are_masked_in_logged_config():
+    # Spec: README > Secrets & Encryption — secret values are never printed to logs;
+    # secret fields are replaced with "****" before any logging call
+    # Given: a config dict containing a password and a non-secret field
+    cfg = {"source_password": "secret", "other": 1}
+
+    # When: the config is masked
+    masked = ldb_run._mask_secrets(cfg)
+
+    # Then: password is redacted; non-secret field is unchanged
+    assert masked["source_password"] == "****"
+    assert masked["other"] == 1

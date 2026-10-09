@@ -4,12 +4,238 @@ from types import SimpleNamespace
 
 import pytest
 
-from limitsdb.core import ldb_runner
+from limitsdb.core import ldb_params_config, ldb_runner, ldb_utils
 from limitsdb.core.ldb_errors import ConfigurationError
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
 from limitsdb.db.ldb_engines import ColumnDefinition
 from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
+
+# ---------------------------------------------------------------------------
+# Config: ILM run prerequisites
+# ---------------------------------------------------------------------------
+
+
+def test_schema_and_dsn_are_required_for_non_plan_modes():
+    # Spec: README > Run ILM — schema, source_dsn and credentials are required
+    # Given: configs missing required fields
+    # When: Config is constructed with an empty schema
+    # Then: ValueError is raised
+    with pytest.raises(ValueError):
+        ldb_params_config.Config(schema="", source_dsn="d", source_username="u", source_password="p")
+
+    # When: Config is constructed with an empty source DSN
+    # Then: ValueError is raised
+    with pytest.raises(ValueError):
+        ldb_params_config.Config(schema="s", source_dsn="", source_username="u", source_password="p")
+
+
+def test_plan_mode_requires_no_credentials():
+    # Spec: README > Run ILM > --mode PLAN — PLAN evaluates deps without a DB connection
+    # Given: a PLAN config with no credentials
+    plan = ldb_params_config.Config(schema="s", mode="PLAN")
+
+    # Then: DSN is empty — no connection is attempted in PLAN mode
+    assert plan.source_dsn == ""
+
+
+def test_script_mode_enables_generation_flag():
+    # Spec: README > Run ILM > --mode SCRIPT — SCRIPT generates SQL blocks for review
+    # Given: a SCRIPT config with minimal credentials
+    script = ldb_params_config.Config(
+        schema="s",
+        mode="SCRIPT",
+        source_dsn="dsn",
+        source_username="user",
+        source_password="secret",
+    )
+
+    # Then: generate_script is set to true
+    assert script.generate_script is True
+
+
+def test_history_ilm_action_requires_history_connection():
+    # Spec: README > Run ILM > --action HISTORY_ILM — history credentials are required
+    # Given: a HISTORY_ILM config with history credentials
+    cfg = ldb_params_config.Config(
+        schema="s",
+        action="HISTORY_ILM",
+        history_dsn="dsn",
+        history_username="user",
+        history_password="secret",
+    )
+
+    # Then: action is accepted
+    assert cfg.action == "HISTORY_ILM"
+
+    # When: HISTORY_ILM is requested without history_dsn
+    # Then: ValueError names the missing field
+    with pytest.raises(ValueError, match="history_dsn"):
+        ldb_params_config.Config(schema="s", action="HISTORY_ILM")
+
+
+def test_invalid_mode_raises_validation_error():
+    # Spec: README > Run ILM > --mode — only PLAN, VALIDATE, PREVIEW, SCRIPT, EXECUTE
+    # are accepted mode names
+    # Given: an unrecognised mode string
+    # When / Then: ValueError names the invalid mode
+    with pytest.raises(ValueError, match="invalid mode"):
+        ldb_params_config.Config(schema="s", mode="BADMODE")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Credentials resolution
+# ---------------------------------------------------------------------------
+
+
+def test_get_effective_credentials_returns_source_by_default():
+    # Spec: README > Run ILM — source credentials are used for SOURCE_ILM and as default
+    # Given: a config with both source and history credentials
+    cfg = Config(
+        schema="s",
+        mode="PLAN",
+        source_username="src",
+        source_password="pw1",
+        source_dsn="dsn1",
+        history_username="hist",
+        history_password="pw2",
+        history_dsn="dsn2",
+        admin_source_username="admin_src",
+        admin_source_password="apw1",
+        admin_history_username="admin_hist",
+        admin_history_password="apw2",
+    )
+
+    # When: credentials are resolved for the default (source) action
+    # Then: source credentials are returned
+    assert ldb_utils.get_effective_credentials(cfg) == ("src", "pw1", "dsn1")
+
+
+def test_get_effective_credentials_returns_history_for_history_ilm():
+    # Spec: README > Run ILM > --action HISTORY_ILM — history credentials are used
+    # Given: a config with both environments populated
+    cfg = Config(
+        schema="s",
+        mode="PLAN",
+        source_username="src",
+        source_password="pw1",
+        source_dsn="dsn1",
+        history_username="hist",
+        history_password="pw2",
+        history_dsn="dsn2",
+        admin_source_username="admin_src",
+        admin_source_password="apw1",
+        admin_history_username="admin_hist",
+        admin_history_password="apw2",
+    )
+    cfg.action = "HISTORY_ILM"
+
+    # When: credentials are resolved for HISTORY_ILM
+    # Then: history credentials are returned
+    assert ldb_utils.get_effective_credentials(cfg) == ("hist", "pw2", "dsn2")
+
+
+def test_get_effective_credentials_uses_admin_when_requested():
+    # Spec: README > Run ILM > ldb-impl — admin credentials used for DDL operations
+    # Given: a config with admin credentials for history
+    cfg = Config(
+        schema="s",
+        mode="PLAN",
+        source_username="src",
+        source_password="pw1",
+        source_dsn="dsn1",
+        history_username="hist",
+        history_password="pw2",
+        history_dsn="dsn2",
+        admin_source_username="admin_src",
+        admin_source_password="apw1",
+        admin_history_username="admin_hist",
+        admin_history_password="apw2",
+    )
+    cfg.action = "HISTORY_ILM"
+
+    # When: admin credentials are requested
+    # Then: admin history credentials are returned
+    assert ldb_utils.get_effective_credentials(cfg, admin=True) == ("admin_hist", "apw2", "dsn2")
+
+
+def test_get_effective_credentials_raises_when_password_is_empty():
+    # Spec: docs/exception-handling.md — missing credentials raise before any connection
+    # Given: a config with empty history password
+    cfg = Config(
+        schema="s",
+        mode="PLAN",
+        source_username="src",
+        source_password="pw1",
+        source_dsn="dsn1",
+        history_username="hist",
+        history_password="pw2",
+        history_dsn="dsn2",
+        admin_source_username="admin_src",
+        admin_source_password="apw1",
+        admin_history_username="admin_hist",
+        admin_history_password="apw2",
+    )
+    cfg.action = "HISTORY_ILM"
+    cfg.history_password = ""
+
+    # When / Then: ValueError is raised because credentials are incomplete
+    with pytest.raises(ValueError):
+        ldb_utils.get_effective_credentials(cfg)
+
+
+# ---------------------------------------------------------------------------
+# Script generation utilities
+# ---------------------------------------------------------------------------
+
+
+def test_nvl_returns_value_when_present_and_fallback_when_none():
+    # Spec: README > utility — nvl mirrors Oracle NVL: return the first non-None value
+    # Given: a non-None value and a None value
+    # When / Then: the non-None value wins; the fallback is used for None
+    assert ldb_utils.nvl("val", "default") == "val"
+    assert ldb_utils.nvl(None, "fallback") == "fallback"
+
+
+def test_max_ignore_none_returns_maximum_skipping_none_values():
+    # Spec: README > utility — max_ignore_none skips None entries in the sequence
+    # Given: a sequence mixing None and integers
+    # When / Then: the maximum non-None value is returned; all-None gives None
+    assert ldb_utils.max_ignore_none([None, 3, 2, None, 5]) == 5
+    assert ldb_utils.max_ignore_none([None, None]) is None
+
+
+def test_max_ignore_none_raises_for_incomparable_mixed_types():
+    # Spec: README > utility — max_ignore_none propagates TypeError for incomparable values
+    # Given: a sequence of string and integer (incomparable)
+    # When / Then: TypeError propagates unchanged
+    with pytest.raises(TypeError):
+        ldb_utils.max_ignore_none(["string", 1])
+
+
+def test_indent_lines_indents_continuation_lines_only():
+    # Spec: README > utility — indent_lines adds prefix spaces to all lines except
+    # the first, preserving the first line's position
+    # Given: a multi-line text
+    text = "line1\nline2\nline3"
+
+    # When: indented by 2
+    result = ldb_utils.indent_lines(text, 2)
+
+    # Then: only continuation lines are indented
+    assert result == "line1\n  line2\n  line3"
+
+
+def test_join_wrapped_splits_at_max_width_on_separator():
+    # Spec: README > utility — join_wrapped emits the separator at the start of a
+    # wrapped continuation to preserve SQL readability
+    # Given: items that exceed the max-width when joined
+    # When: wrapped with width 4
+    wrapped = ldb_utils.join_wrapped(",", ["a", "b", "long_word"], 4)
+
+    # Then: the long word starts a new line prefixed by the separator
+    assert wrapped.splitlines() == ["a,b", ",long_word"]
+
 
 # ---------------------------------------------------------------------------
 # PLAN mode — R2 exception: _plan_mode is the sole entry point to the PLAN

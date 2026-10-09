@@ -1,5 +1,6 @@
 import pytest
 
+from limitsdb.core import ldb_params_config
 from limitsdb.db.ldb_engine_loader import get_db_engine
 from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
 
@@ -27,3 +28,12 @@ def test_unsupported_engine_name_raises_with_supported_engines_listed(engine_nam
         match=rf"Unsupported database engine: {engine_name}; supported engines: oracle",
     ):
         get_db_engine(engine_name)
+
+
+def test_postgres_engine_is_rejected_in_config_because_no_adapter_exists():
+    # Spec: docs/configuration-contract.md — only oracle is supported until
+    # a second adapter is contributed
+    # Given: a config requesting the postgres engine
+    # When / Then: ValueError names the unsupported engine and lists supported ones
+    with pytest.raises(ValueError, match="unsupported db_engine: postgres; supported engines: oracle"):
+        ldb_params_config.Config(schema="s", mode="PLAN", db_engine="postgres")  # type: ignore[arg-type]

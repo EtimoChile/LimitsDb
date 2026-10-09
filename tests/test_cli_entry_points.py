@@ -3,22 +3,74 @@ from types import SimpleNamespace
 import pytest
 
 from limitsdb.cli import ldb_crypt, ldb_impl, ldb_init, ldb_run
+from limitsdb.core import ldb_params_config
 from limitsdb.core.ldb_errors import LimitsDbError
 from limitsdb.core.ldb_params_config import Config
 
+_FULL_IMPL_DICT = {
+    "schema": "s",
+    "source_dsn": "d",
+    "source_username": "u",
+    "source_password": "p",
+    "history_dsn": "d2",
+    "history_username": "u2",
+    "history_password": "p2",
+    "admin_source_username": "a1",
+    "admin_source_password": "a2",
+    "admin_history_username": "a3",
+    "admin_history_password": "a4",
+    "db_engine": "oracle",
+}
 
-def test_secrets_are_masked_in_logged_config():
-    # Spec: README > Secrets & Encryption — secret values are never printed to logs;
-    # secret fields are replaced with "****" before any logging call
-    # Given: a config dict containing a password and a non-secret field
-    cfg = {"source_password": "secret", "other": 1}
 
-    # When: the config is masked
-    masked = ldb_run._mask_secrets(cfg)
+# ---------------------------------------------------------------------------
+# Argparser contract
+# ---------------------------------------------------------------------------
 
-    # Then: password is redacted; non-secret field is unchanged
-    assert masked["source_password"] == "****"
-    assert masked["other"] == 1
+
+def test_argparser_requires_schema_and_rejects_unsupported_engine(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM — --schema is required; --db-engine accepts only oracle
+    # Given: a parser built from the live Config schema
+    monkeypatch.delenv("LDB_SCHEMA", raising=False)
+    parser = ldb_params_config.build_argparser_from_config()
+
+    # When: no --schema is given
+    # Then: parser exits
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+
+    # When: DRY_RUN is passed as --mode
+    parsed = parser.parse_args(["--schema", "s", "--mode", "DRY_RUN"])
+    # Then: it is accepted as a valid choice
+    assert parsed.mode == "DRY_RUN"
+
+    # When: oracle is given as --db-engine
+    # Then: it is accepted
+    assert parser.parse_args(["--schema", "s", "--db-engine", "oracle"]).db_engine == "oracle"
+
+    # When: postgres is given as --db-engine
+    # Then: parser exits — not yet supported
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--schema", "s", "--db-engine", "postgres"])
+
+
+def test_schema_can_be_bootstrapped_from_environment_variable(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/configuration-contract.md — LDB_SCHEMA is the env var for schema;
+    # when present, --schema is not required on the CLI
+    # Given: LDB_SCHEMA is set in the environment
+    monkeypatch.setenv("LDB_SCHEMA", "environment-schema")
+    parser = ldb_params_config.build_argparser_from_config()
+
+    # When: no --schema is given
+    parsed = parser.parse_args([])
+
+    # Then: schema is not in parsed args (it is resolved from the env during build_config)
+    assert not hasattr(parsed, "schema")
+
+
+# ---------------------------------------------------------------------------
+# ldb-impl
+# ---------------------------------------------------------------------------
 
 
 def test_ldb_impl_control_tables_have_correct_shape():
@@ -104,6 +156,107 @@ def test_ldb_impl_run_cli_creates_database_objects(monkeypatch: pytest.MonkeyPat
     ldb_impl.run_cli()
 
 
+@pytest.mark.parametrize(
+    "empty_key",
+    [
+        "admin_source_username",
+        "admin_history_username",
+        "source_username",
+        "history_username",
+        "history_dsn",
+        "source_dsn",
+    ],
+)
+def test_ldb_impl_run_cli_exits_with_error_when_credential_is_missing(monkeypatch: pytest.MonkeyPatch, empty_key: str):
+    # Spec: README > ldb-impl — all admin and runtime credentials are required;
+    # missing any of them exits with code 1 before touching the database
+    # Given: a config dict with one required credential empty
+    cfg = {**_FULL_IMPL_DICT, empty_key: ""}
+    monkeypatch.setattr(
+        ldb_impl,
+        "_parse_args",
+        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
+    )
+    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
+    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
+
+    # When / Then: SystemExit with code 1
+    with pytest.raises(SystemExit) as caught:
+        ldb_impl.run_cli()
+    assert caught.value.code == 1
+
+
+@pytest.mark.parametrize("empty_key", ["source_username", "source_dsn"])
+def test_ldb_impl_run_cli_exits_with_error_for_source_credential_missing_in_plan_mode(
+    monkeypatch: pytest.MonkeyPatch, empty_key: str
+):
+    # Spec: README > ldb-impl — PLAN mode bypasses Config credential validation;
+    # ldb_impl.py checks source credentials explicitly before proceeding
+    # Given: PLAN mode config with an empty source credential
+    cfg = {**_FULL_IMPL_DICT, "mode": "PLAN", empty_key: ""}
+    monkeypatch.setattr(
+        ldb_impl,
+        "_parse_args",
+        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
+    )
+    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
+    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
+
+    # When / Then: SystemExit with code 1
+    with pytest.raises(SystemExit) as caught:
+        ldb_impl.run_cli()
+    assert caught.value.code == 1
+
+
+def test_ldb_impl_run_cli_logs_when_all_objects_already_exist(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ldb-impl — when all required objects are already present,
+    # ldb-impl logs a confirmation instead of silently exiting
+    # Given: an engine where all ensure_* return empty lists (nothing to create)
+    monkeypatch.setattr(
+        ldb_impl,
+        "_parse_args",
+        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
+    )
+    engine = SimpleNamespace(
+        REQUIRED_SYSTEM_PRIVILEGES=(),
+        ensure_roles=lambda *a, **k: [],
+        ensure_users=lambda *a, **k: [],
+        ensure_tables=lambda *a, **k: [],
+        ensure_sequences=lambda *a, **k: [],
+        ensure_supporting_objects=lambda *a, **k: [],
+        ensure_database_links=lambda *a, **k: [],
+        get_connection=lambda *a, **k: SimpleNamespace(),
+        close_connection=lambda *a, **k: None,
+    )
+    monkeypatch.setattr(ldb_impl, "get_db_engine", lambda eng: engine)
+    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(_FULL_IMPL_DICT))
+    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
+    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
+    logged: list[str] = []
+    monkeypatch.setattr(
+        ldb_impl,
+        "get_logger",
+        lambda name=None: SimpleNamespace(
+            info=lambda msg, *a, **k: logged.append(msg),
+            error=lambda *a, **k: None,
+            debug=lambda *a, **k: None,
+        ),
+    )
+
+    # When: run_cli runs with everything already in place
+    ldb_impl.run_cli()
+
+    # Then: a message indicating objects were already present is logged
+    assert any("already present" in m for m in logged)
+
+
+# ---------------------------------------------------------------------------
+# ldb-crypt
+# ---------------------------------------------------------------------------
+
+
 def test_ldb_crypt_run_cli_encrypts_secrets(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: README > ldb-crypt — encrypts plaintext secrets in the secrets file and
     # reports the output path; does not raise when file is already encrypted (None return)
@@ -141,6 +294,11 @@ def test_ldb_crypt_run_cli_exits_with_error_code_on_failure(monkeypatch: pytest.
     with pytest.raises(SystemExit) as caught:
         ldb_crypt.run_cli()
     assert caught.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# ldb-run
+# ---------------------------------------------------------------------------
 
 
 def test_ldb_run_run_cli_executes_successfully(monkeypatch: pytest.MonkeyPatch):
@@ -225,6 +383,11 @@ def test_ldb_run_run_cli_exits_with_error_code_on_failure(monkeypatch: pytest.Mo
     with pytest.raises(SystemExit) as caught:
         ldb_run.run_cli()
     assert caught.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# ldb-init
+# ---------------------------------------------------------------------------
 
 
 def test_ldb_init_run_cli_creates_all_files_and_encrypts(monkeypatch: pytest.MonkeyPatch, tmp_path):
@@ -327,115 +490,3 @@ def test_ldb_init_run_cli_tolerates_missing_example_file(monkeypatch: pytest.Mon
 
     # When / Then: run_cli completes without raising
     ldb_init.run_cli()
-
-
-_FULL_IMPL_DICT = {
-    "schema": "s",
-    "source_dsn": "d",
-    "source_username": "u",
-    "source_password": "p",
-    "history_dsn": "d2",
-    "history_username": "u2",
-    "history_password": "p2",
-    "admin_source_username": "a1",
-    "admin_source_password": "a2",
-    "admin_history_username": "a3",
-    "admin_history_password": "a4",
-    "db_engine": "oracle",
-}
-
-
-@pytest.mark.parametrize(
-    "empty_key",
-    [
-        "admin_source_username",
-        "admin_history_username",
-        "source_username",
-        "history_username",
-        "history_dsn",
-        "source_dsn",
-    ],
-)
-def test_ldb_impl_run_cli_exits_with_error_when_credential_is_missing(monkeypatch: pytest.MonkeyPatch, empty_key: str):
-    # Spec: README > ldb-impl — all admin and runtime credentials are required;
-    # missing any of them exits with code 1 before touching the database
-    # Given: a config dict with one required credential empty
-    cfg = {**_FULL_IMPL_DICT, empty_key: ""}
-    monkeypatch.setattr(
-        ldb_impl,
-        "_parse_args",
-        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
-    )
-    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
-    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
-    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
-
-    # When / Then: SystemExit with code 1
-    with pytest.raises(SystemExit) as caught:
-        ldb_impl.run_cli()
-    assert caught.value.code == 1
-
-
-@pytest.mark.parametrize("empty_key", ["source_username", "source_dsn"])
-def test_ldb_impl_run_cli_exits_with_error_for_source_credential_missing_in_plan_mode(
-    monkeypatch: pytest.MonkeyPatch, empty_key: str
-):
-    # Spec: README > ldb-impl — PLAN mode bypasses Config credential validation;
-    # ldb_impl.py checks source credentials explicitly before proceeding
-    # Given: PLAN mode config with an empty source credential
-    cfg = {**_FULL_IMPL_DICT, "mode": "PLAN", empty_key: ""}
-    monkeypatch.setattr(
-        ldb_impl,
-        "_parse_args",
-        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
-    )
-    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
-    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
-    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
-
-    # When / Then: SystemExit with code 1
-    with pytest.raises(SystemExit) as caught:
-        ldb_impl.run_cli()
-    assert caught.value.code == 1
-
-
-def test_ldb_impl_run_cli_logs_when_all_objects_already_exist(monkeypatch: pytest.MonkeyPatch):
-    # Spec: README > ldb-impl — when all required objects are already present,
-    # ldb-impl logs a confirmation instead of silently exiting
-    # Given: an engine where all ensure_* return empty lists (nothing to create)
-    monkeypatch.setattr(
-        ldb_impl,
-        "_parse_args",
-        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
-    )
-    engine = SimpleNamespace(
-        REQUIRED_SYSTEM_PRIVILEGES=(),
-        ensure_roles=lambda *a, **k: [],
-        ensure_users=lambda *a, **k: [],
-        ensure_tables=lambda *a, **k: [],
-        ensure_sequences=lambda *a, **k: [],
-        ensure_supporting_objects=lambda *a, **k: [],
-        ensure_database_links=lambda *a, **k: [],
-        get_connection=lambda *a, **k: SimpleNamespace(),
-        close_connection=lambda *a, **k: None,
-    )
-    monkeypatch.setattr(ldb_impl, "get_db_engine", lambda eng: engine)
-    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(_FULL_IMPL_DICT))
-    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
-    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
-    logged: list[str] = []
-    monkeypatch.setattr(
-        ldb_impl,
-        "get_logger",
-        lambda name=None: SimpleNamespace(
-            info=lambda msg, *a, **k: logged.append(msg),
-            error=lambda *a, **k: None,
-            debug=lambda *a, **k: None,
-        ),
-    )
-
-    # When: run_cli runs with everything already in place
-    ldb_impl.run_cli()
-
-    # Then: a message indicating objects were already present is logged
-    assert any("already present" in m for m in logged)
