@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-07
-last-updated: 2026-10-08T22:32
+last-reviewed: 2026-10-08
+last-updated: 2026-10-08T22:45
 ---
 
 # Estado vigente
@@ -95,7 +95,11 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
 - El workflow `.github/workflows/quality.yaml` ejecuta en Python 3.12 las
   barreras de formato, lint, tipado, pruebas, pre-commit, construcción,
   verificación de distribuciones e instalación limpia del wheel. La publicación
-  autorizada desde versiones etiquetadas permanece pendiente.
+  autorizada desde versiones etiquetadas permanece pendiente (`PEND-006`).
+  Los permisos de GITHUB_TOKEN se declaran a nivel de job (`contents: read`);
+  el nivel de workflow fija `permissions: {}` como denegación por defecto.
+  `.github/CODEOWNERS` exige revisión de `@etimochile` en todos los cambios.
+  Resta configurar branch protection rules en GitHub UI (`PEND-014`).
 - El workflow `.github/workflows/oracle-integration.yaml` levanta Oracle Free
   efímero en un runner Linux para pull requests relevantes y ejecución manual;
   no se ejecuta en cada `push`. Usa una imagen fijada por digest y credenciales
@@ -110,6 +114,10 @@ operativo, pero no reemplaza las fuentes definidas en `AGENTS.md`.
   verificó 80 pruebas locales y 6 E2E exitosas, con 81,42 % de líneas, 67,46 %
   de ramas y 78 % combinado; `PEND-013` está resuelto y todavía no se impone un
   umbral mínimo.
+- `docs/prompts/test-authoring.md` define las reglas obligatorias de autoría de
+  tests: los tests deben derivarse de la especificación (README, ilm.example.yml,
+  docs/), no de la implementación. `AGENTS.md` lo referencia como lectura
+  obligatoria antes de generar o modificar tests.
 - Inversiones Etimo SpA mantiene el proyecto. Los términos aplicables se
   distribuyen en los archivos de licencia, notices y edición comercial de la
   raíz.

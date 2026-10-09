@@ -6,12 +6,13 @@ on:
   pull_request:
     branches: [development, main]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   quality:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

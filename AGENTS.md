@@ -87,6 +87,11 @@ artificiales.
 
 ## Pruebas y criterios de cierre
 
+Toda tarea que genere o modifique tests debe leer primero
+`docs/prompts/test-authoring.md`. Ese documento define las reglas obligatorias
+de autoría: los tests deben derivarse de la especificación, no de la
+implementación.
+
 Aplicar una verificación proporcional al cambio. La secuencia completa es:
 
 ```bash

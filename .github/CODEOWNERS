@@ -1,0 +1,12 @@
+# All changes require review from the project maintainer org.
+* @etimochile
+
+# Workflow and CI changes are especially sensitive.
+.github/ @etimochile
+
+# Core package — business logic, adapters, CLI, resources.
+limitsdb/ @etimochile
+
+# Packaging and dependency manifest.
+pyproject.toml @etimochile
+poetry.lock @etimochile
