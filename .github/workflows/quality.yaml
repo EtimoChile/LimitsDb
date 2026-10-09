@@ -42,8 +42,19 @@ jobs:
       - name: Type-check
         run: poetry run mypy limitsdb
 
-      - name: Test
-        run: poetry run pytest
+      - name: Run unit tests with coverage
+        run: |
+          mkdir -p .coverage-data/unit
+          COVERAGE_FILE=.coverage-data/unit/.coverage poetry run coverage run -m pytest -q
+
+      - name: Upload unit test coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-coverage-${{ github.run_id }}
+          path: .coverage-data/unit/.coverage
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Verify pre-commit hooks
         run: poetry run pre-commit run --all-files
@@ -89,12 +100,11 @@ jobs:
       - name: Install project and development dependencies
         run: poetry install --with dev --no-interaction
 
-      - name: Run local tests with coverage
-        shell: bash
-        run: |
-          poetry run coverage erase
-          mkdir -p .coverage-data/local .coverage-data/oracle
-          COVERAGE_FILE=.coverage-data/local/.coverage poetry run coverage run -m pytest -q
+      - name: Download unit test coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: unit-coverage-${{ github.run_id }}
+          path: .coverage-data/unit
 
       - name: Generate ephemeral Oracle password
         shell: bash
@@ -164,13 +174,13 @@ jobs:
       - name: Build combined coverage report
         shell: bash
         run: |
-          poetry run coverage combine .coverage-data/local .coverage-data/oracle
+          poetry run coverage combine .coverage-data/unit .coverage-data/oracle
           poetry run coverage report -m | tee coverage.txt
           poetry run coverage xml -o coverage.xml
           poetry run coverage html -d htmlcov
 
           {
-            echo "### Combined local and Oracle E2E coverage"
+            echo "### Combined unit and Oracle E2E coverage"
             echo '```text'
             cat coverage.txt
             echo '```'
