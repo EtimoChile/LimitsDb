@@ -92,9 +92,14 @@ file in the repository, including files under `docs/`, `docs/ai-state/`, and
 
 ## Tests and completion criteria
 
-Any task that generates or modifies tests must first read
-`docs/prompts/test-authoring.md`. That document defines the mandatory authoring
-rules: tests must be derived from the specification, not from the implementation.
+Any task that generates or modifies tests must first read both normative
+documents:
+
+- `docs/prompts/test-authoring.md` — mandatory authoring rules (R1–R7): tests
+  must be derived from the specification, not from the implementation.
+- `docs/test-organization.md` — which file each test belongs in: each test file
+  covers one functional contract defined in the specification; the file to use
+  is determined by the spec section that governs the behavior under test.
 
 Apply a verification proportional to the change. The full sequence is:
 
