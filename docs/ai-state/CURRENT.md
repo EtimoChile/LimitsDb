@@ -47,7 +47,9 @@ but does not replace the sources defined in `AGENTS.md`.
   helpers with no documented contract and whose behaviors were covered elsewhere
   (`test_identifier_formatting_and_quoting`, `test_register_and_fetch_connection_env_round_trip`)
   were removed. The duplicate `tests/integration/test_oracle_ephemeral.py` was
-  removed; the canonical location is `tests/integration/oracle/`. The unit
+  removed; the canonical E2E file is
+  `tests/integration/oracle/test_oracle_ilm_lifecycle.py` (renamed from
+  `test_oracle_ephemeral.py`, which described the tool not the functionality). The unit
   baseline verified on 2026-10-07 is 97 passing tests (expanded from 81 with
   local tests for `ldb-init`, PLAN and VALIDATE modes, script generation, and
   Oracle PK and error-logging methods). `PEND-005`, `PEND-012`, `PEND-009` are

@@ -34,7 +34,7 @@ is the specification document that governs it, in order of precedence:
 | Oracle-specific SQL and DDL | README § *Run ILM* + Oracle engine | `adapters/oracle/test_oracle_sql_generation.py` |
 | Oracle schema objects | README § *Run ILM* (control/history objects) | `adapters/oracle/test_oracle_schema_objects.py` |
 | Oracle connection operations | README § *Run ILM* + `docs/exception-handling.md` § oracle | `adapters/oracle/test_oracle_connection_ops.py` |
-| Oracle E2E (real database) | README § *Oracle integration tests* | `integration/oracle/test_oracle_ephemeral.py` |
+| Oracle E2E (real database) | README § *Oracle integration tests* | `integration/oracle/test_oracle_ilm_lifecycle.py` |
 
 Each file adversarializes the contract it covers (R6): error paths
 (`ConfigurationError`, `SecretError`, `DatabaseConnectionError`, `ValidationError`,
@@ -98,7 +98,7 @@ tests/
 │
 └── integration/
     ├── oracle/
-    │   └── test_oracle_ephemeral.py         — E2E with ephemeral Oracle database
+    │   └── test_oracle_ilm_lifecycle.py     — E2E ILM lifecycle on Oracle
     └── postgresql/
 ```
 
@@ -122,5 +122,5 @@ tests/
    `test_run_ilm.py` to `adapters/oracle/test_oracle_sql_generation.py`; the
    equivalent core test verifies the snapshotting logic with an engine-neutral mock.
 3. Move `tests/integration/test_oracle_ephemeral.py` →
-   `tests/integration/oracle/test_oracle_ephemeral.py`.
+   `tests/integration/oracle/test_oracle_ilm_lifecycle.py`.
 4. Add `postgres_integration` to the markers in `pyproject.toml`.

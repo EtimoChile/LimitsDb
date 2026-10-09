@@ -300,9 +300,14 @@ def _fetch_related_filter_values(connection: oracledb.Connection, *, column_name
         cursor.close()
 
 
-def test_oracle_engine_table_ensure_is_idempotent(oracle_connection: oracledb.Connection):
+def test_bootstrap_table_creation_is_idempotent(oracle_connection: oracledb.Connection):
+    # Spec: README § Bootstrap Database Objects — ensure_tables creates missing tables
+    # and returns their qualified names; a second call with the same definition returns
+    # an empty list (no DDL executed)
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
     table_name = "LDBT_ENGINE_TABLE"
+
+    # Given: a table definition that does not yet exist in the test schema
     _drop_table_if_present(oracle_connection, table_name)
     table = TableDefinition(
         owner=username,
@@ -315,9 +320,11 @@ def test_oracle_engine_table_ensure_is_idempotent(oracle_connection: oracledb.Co
         indexes=(IndexDefinition(name="LDBT_ENGINE_VALUE_IX", columns=("VALUE",)),),
     )
     try:
+        # When: ensure_tables is called twice with the same definition
         first = OracleEngine.ensure_tables(oracle_connection, (table,))
         second = OracleEngine.ensure_tables(oracle_connection, (table,))
 
+        # Then: first call returns the table name; second call returns []; table exists
         assert len(first) == 1
         assert second == []
         cursor = oracle_connection.cursor()
@@ -330,13 +337,17 @@ def test_oracle_engine_table_ensure_is_idempotent(oracle_connection: oracledb.Co
         _drop_table_if_present(oracle_connection, table_name)
 
 
-def test_oracle_engine_recovers_after_partial_ddl_failure(oracle_connection: oracledb.Connection):
+def test_partial_ddl_failure_leaves_completed_tables_intact(oracle_connection: oracledb.Connection):
+    # Spec: README § Bootstrap Database Objects — if a table definition fails, tables
+    # that were already created in the same call remain; the failed table can be
+    # corrected and retried without affecting the already-created tables
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
     first_table_name = "LDBT_PARTIAL_A"
     second_table_name = "LDBT_PARTIAL_B"
     for table_name in (first_table_name, second_table_name):
         _drop_table_if_present(oracle_connection, table_name)
 
+    # Given: two table definitions, the second using an unsupported column type
     first_table = TableDefinition(
         owner=username,
         name=first_table_name,
@@ -356,9 +367,11 @@ def test_oracle_engine_recovers_after_partial_ddl_failure(oracle_connection: ora
     )
 
     try:
+        # When: ensure_tables is called with the invalid second definition
         with pytest.raises(ExecutionError):
             OracleEngine.ensure_tables(oracle_connection, (first_table, invalid_second_table))
 
+        # Then: the first table was created and persists; the second does not exist
         cursor = oracle_connection.cursor()
         try:
             cursor.execute(
@@ -369,7 +382,10 @@ def test_oracle_engine_recovers_after_partial_ddl_failure(oracle_connection: ora
         finally:
             cursor.close()
 
+        # When: the corrected definition is retried
         recovered = OracleEngine.ensure_tables(oracle_connection, (first_table, valid_second_table))
+
+        # Then: only the previously missing table is returned; a third call is a no-op
         assert recovered == [f"{username.lower()}.{second_table_name.lower()}"]
         assert OracleEngine.ensure_tables(oracle_connection, (first_table, valid_second_table)) == []
     finally:
@@ -377,11 +393,16 @@ def test_oracle_engine_recovers_after_partial_ddl_failure(oracle_connection: ora
             _drop_table_if_present(oracle_connection, table_name)
 
 
-def test_oracle_privileged_ensures_are_idempotent(oracle_connection: oracledb.Connection):
+def test_bootstrap_roles_users_and_privileges_are_idempotent(oracle_connection: oracledb.Connection):
+    # Spec: README § Bootstrap Database Objects — ensure_roles, ensure_users, and
+    # ensure_table_privileges each return the names of created objects on the first
+    # call and an empty list on any subsequent call with the same arguments
     owner = os.environ["LDB_ORACLE_TEST_USER"].upper()
     table_name = "LDBT_PRIV_TABLE"
     role_name = "LDBT_PRIV_ROLE"
     user_name = "LDBT_PRIV_USER"
+
+    # Given: no pre-existing role, user, or table with these names
     _execute_cleanup_ddl(oracle_connection, f"DROP USER {user_name} CASCADE", missing_error_code=1918)
     _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role_name}", missing_error_code=1919)
     _drop_table_if_present(oracle_connection, table_name)
@@ -403,6 +424,9 @@ def test_oracle_privileged_ensures_are_idempotent(oracle_connection: oracledb.Co
 
     try:
         OracleEngine.ensure_tables(oracle_connection, (table,))
+
+        # When: each ensure_* is called twice
+        # Then: first call returns the created name; second call returns []
         assert OracleEngine.ensure_roles(oracle_connection, (role,)) == [role_name.lower()]
         assert OracleEngine.ensure_roles(oracle_connection, (role,)) == []
         assert OracleEngine.ensure_users(oracle_connection, (user,)) == [user_name.lower()]
@@ -438,17 +462,24 @@ def test_oracle_privileged_ensures_are_idempotent(oracle_connection: oracledb.Co
         ),
     ],
 )
-def test_limitsdb_happy_path_archives_and_purges_between_schemas(
+def test_source_and_history_ilm_archive_and_purge_correct_rows(
     oracle_connection: oracledb.Connection,
     tmp_path: Path,
     predicate_case: str,
     source_filter: str | None,
     history_filter: str | None,
 ):
+    # Spec: README § Run ILM (SOURCE_ILM, HISTORY_ILM) — SOURCE_ILM moves rows that
+    # satisfy the retention predicate from source to history; HISTORY_ILM purges rows
+    # whose history retention has also elapsed; both actions are idempotent on re-run;
+    # related-table filter columns are snapshotted with a qualifier suffix
     source_user = "LDBT_E2E_SOURCE"
     history_user = "LDBT_E2E_HISTORY"
     source_role = "LDBT_E2E_SOURCE_ROLE"
     history_role = "LDBT_E2E_HISTORY_ROLE"
+
+    # Given: a clean schema bootstrapped by ldb-impl; source tables populated with
+    # rows at different ages relative to the configured retention windows
     for user in (source_user, history_user):
         _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
     for role in (source_role, history_role):
@@ -560,6 +591,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
         finally:
             source_cursor.close()
 
+        # When: SOURCE_ILM runs in EXECUTE mode
         source_run = _run_cli(
             "ldb-run",
             *common_arguments,
@@ -569,6 +601,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             "EXECUTE",
             environment=cli_environment,
         )
+
+        # Then: rows beyond the source retention window move to history; recent row stays
         assert len(_worker_process_names(source_run)) >= 2
 
         history_connection = oracledb.connect(user=history_user, password=history_password, dsn=dsn)
@@ -625,6 +659,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 == 1
             )
 
+        # When: SOURCE_ILM re-runs with nothing left to process
         source_rerun = _run_cli(
             "ldb-run",
             *common_arguments,
@@ -634,6 +669,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             "EXECUTE",
             environment=cli_environment,
         )
+
+        # Then: no workers spawned, counts unchanged, ldb_log not duplicated
         assert _worker_process_names(source_rerun) == set()
         assert "No tables to process." in source_rerun.stderr
         assert _fetch_ids(source_connection, "ilm_orders") == [1]
@@ -648,6 +685,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 == 1
             )
 
+        # When: HISTORY_ILM runs in EXECUTE mode
         history_run = _run_cli(
             "ldb-run",
             *common_arguments,
@@ -657,6 +695,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             "EXECUTE",
             environment=cli_environment,
         )
+
+        # Then: rows beyond the history retention window are purged; archivable row stays
         assert len(_worker_process_names(history_run)) >= 2
 
         assert _fetch_ids(source_connection, "ilm_orders") == [1]
@@ -699,6 +739,7 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
                 == 1
             )
 
+        # When: HISTORY_ILM re-runs with nothing left to purge
         history_rerun = _run_cli(
             "ldb-run",
             *common_arguments,
@@ -708,6 +749,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
             "EXECUTE",
             environment=cli_environment,
         )
+
+        # Then: no workers spawned, counts unchanged
         assert _worker_process_names(history_rerun) == set()
         assert "No tables to process." in history_rerun.stderr
         assert _fetch_ids(history_connection, "ilm_orders") == [2]
@@ -773,12 +816,18 @@ def _fetch_column_type(connection: oracledb.Connection, table_name: str, column_
         cursor.close()
 
 
-def test_oracle_engine_ensure_table_structure_reconciles_and_is_idempotent(
+def test_table_structure_reconciliation_adds_columns_and_indexes_idempotently(
     oracle_connection: oracledb.Connection,
 ):
+    # Spec: README § Bootstrap Database Objects — ensure_table_structure adds missing
+    # columns, widens columns whose precision or length increased, creates missing
+    # indexes, and preserves existing constraints (PK, FK); a second call is a no-op
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
     parent_table = "LDBT_STR_PARENT"
     test_table = "LDBT_STR_TEST"
+
+    # Given: an existing table that is missing a column, has a narrower VARCHAR2,
+    # and has no index; a parent table it references via FK
     _drop_table_if_present(oracle_connection, test_table)
     _drop_table_if_present(oracle_connection, parent_table)
 
@@ -811,8 +860,10 @@ def test_oracle_engine_ensure_table_structure_reconciles_and_is_idempotent(
     )
 
     try:
+        # When: ensure_table_structure is called with the desired definition
         OracleEngine.ensure_table_structure(oracle_connection, desired, {})
 
+        # Then: NAME widened to 40, NOTES added, PK created, FK preserved, index created
         dtype, length = _fetch_column_type(oracle_connection, test_table, "NAME")
         assert dtype == "VARCHAR2" and length == 40
 
@@ -827,9 +878,10 @@ def test_oracle_engine_ensure_table_structure_reconciles_and_is_idempotent(
 
         assert _fetch_index_columns(oracle_connection, "LDBT_STR_NAME_IX") == ["NAME"]
 
-        # Second call must be idempotent
+        # When: ensure_table_structure is called again with the same definition
         OracleEngine.ensure_table_structure(oracle_connection, desired, {})
 
+        # Then: constraints and index are unchanged (no duplicate DDL)
         assert _fetch_constraint_type(oracle_connection, test_table, "P") == pk_constraints
         assert _fetch_constraint_type(oracle_connection, test_table, "R") == fk_constraints
     finally:
@@ -837,13 +889,17 @@ def test_oracle_engine_ensure_table_structure_reconciles_and_is_idempotent(
         _drop_table_if_present(oracle_connection, parent_table)
 
 
-def test_oracle_engine_ensure_table_structure_replaces_pk_columns(
+def test_table_structure_reconciliation_replaces_diverged_primary_key(
     oracle_connection: oracledb.Connection,
 ):
+    # Spec: README § Bootstrap Database Objects — when the existing primary key covers
+    # more columns than the desired definition, ensure_table_structure drops the old
+    # constraint and creates a new one matching the desired key exactly
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
     table_name = "LDBT_PKC_TEST"
-    _drop_table_if_present(oracle_connection, table_name)
 
+    # Given: a table whose PK covers (A, B) while the desired definition requires only (A)
+    _drop_table_if_present(oracle_connection, table_name)
     cursor = oracle_connection.cursor()
     try:
         cursor.execute(f"CREATE TABLE {table_name} (a NUMBER(5) NOT NULL, b NUMBER(5) NOT NULL)")
@@ -863,26 +919,33 @@ def test_oracle_engine_ensure_table_structure_replaces_pk_columns(
     )
 
     try:
+        # When: ensure_table_structure reconciles the PK
         OracleEngine.ensure_table_structure(oracle_connection, desired, {})
 
+        # Then: exactly one PK constraint exists and it covers only column A
         pk_constraints = _fetch_constraint_type(oracle_connection, table_name, "P")
         assert len(pk_constraints) == 1
         assert _fetch_index_columns(oracle_connection, f"{table_name}_PK") == ["A"]
 
-        # Second call is idempotent
+        # When: called again (idempotency check)
         OracleEngine.ensure_table_structure(oracle_connection, desired, {})
+
+        # Then: PK is unchanged
         assert _fetch_constraint_type(oracle_connection, table_name, "P") == pk_constraints
     finally:
         _drop_table_if_present(oracle_connection, table_name)
 
 
-def test_oracle_engine_ensure_table_structure_drops_unmanaged_index(
+def test_table_structure_reconciliation_drops_unmanaged_indexes(
     oracle_connection: oracledb.Connection,
 ):
+    # Spec: README § Bootstrap Database Objects — indexes not present in the desired
+    # definition are dropped; the primary key constraint is not affected
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
     table_name = "LDBT_UMI_TEST"
-    _drop_table_if_present(oracle_connection, table_name)
 
+    # Given: a table with an extra index that is absent from the desired definition
+    _drop_table_if_present(oracle_connection, table_name)
     cursor = oracle_connection.cursor()
     try:
         cursor.execute(f"CREATE TABLE {table_name} (id NUMBER(10) NOT NULL, name VARCHAR2(20))")
@@ -904,8 +967,10 @@ def test_oracle_engine_ensure_table_structure_drops_unmanaged_index(
     )
 
     try:
+        # When: ensure_table_structure reconciles toward the desired definition
         OracleEngine.ensure_table_structure(oracle_connection, desired, {})
 
+        # Then: the extra index is gone; the PK constraint remains
         assert _fetch_index_columns(oracle_connection, "LDBT_UMI_EXTRA_IX") == []
         assert len(_fetch_constraint_type(oracle_connection, table_name, "P")) == 1
     finally:
@@ -1003,13 +1068,19 @@ def _fetch_error_log_count(connection: oracledb.Connection, *, owner: str, table
         cursor.close()
 
 
-def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
+def test_table_failure_is_recorded_and_run_recovers_on_next_execution(
     oracle_connection: oracledb.Connection, tmp_path: Path
 ):
+    # Spec: README § Run ILM + docs/exception-handling.md — a table failure writes
+    # ERROR status to ldb_ctl and an error entry to ldb_log; ldb-run exits non-zero;
+    # once the table schema is corrected the next run processes it normally
     source_user = "LDBT_ERR_SOURCE"
     history_user = "LDBT_ERR_HISTORY"
     source_role = "LDBT_ERR_SOURCE_ROLE"
     history_role = "LDBT_ERR_HISTORY_ROLE"
+
+    # Given: a bootstrapped schema; source table is deliberately missing CREATED_AT
+    # so the ILM SQL block fails at runtime with ORA-00904
     for user in (source_user, history_user):
         _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
     for role in (source_role, history_role):
@@ -1042,13 +1113,13 @@ def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
         source_connection = oracledb.connect(user=source_user, password=source_password, dsn=dsn)
         source_cursor = source_connection.cursor()
         try:
-            # Deliberately omit CREATED_AT so the ILM SQL block fails at runtime (ORA-00904)
             source_cursor.execute("CREATE TABLE ilm_errtbl (id NUMBER(10) PRIMARY KEY, payload VARCHAR2(40) NOT NULL)")
             source_cursor.execute("INSERT INTO ilm_errtbl (id, payload) VALUES (1, 'row-without-date')")
             source_connection.commit()
         finally:
             source_cursor.close()
 
+        # When: ldb-run executes SOURCE_ILM against a table missing the purge-date column
         failed_run = subprocess.run(
             [
                 shutil.which("ldb-run", path=cli_environment.get("PATH")),
@@ -1064,6 +1135,8 @@ def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
             text=True,
             timeout=180,
         )
+
+        # Then: ldb-run exits non-zero; ERROR status is persisted in ldb_ctl and ldb_log
         assert failed_run.returncode != 0, "expected ldb-run to exit non-zero after table failure"
 
         assert (
@@ -1075,7 +1148,7 @@ def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
             >= 1
         )
 
-        # Fix: recreate with the correct schema and insert an archivable row
+        # Given: the table is recreated with the correct schema and an archivable row
         source_cursor = source_connection.cursor()
         try:
             source_cursor.execute("DROP TABLE ilm_errtbl PURGE")
@@ -1093,10 +1166,12 @@ def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
         finally:
             source_cursor.close()
 
+        # When: ldb-run retries SOURCE_ILM
         _run_cli(
             "ldb-run", *common_arguments, "--action", "SOURCE_ILM", "--mode", "EXECUTE", environment=cli_environment
         )
 
+        # Then: the archivable row is moved to history; ldb_ctl records TEND
         history_connection = oracledb.connect(user=history_user, password=history_password, dsn=dsn)
         assert _fetch_ids(source_connection, "ilm_errtbl") == []
         assert _fetch_ids(history_connection, "ilm_errtbl") == [2]
@@ -1122,10 +1197,17 @@ def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
 def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
     oracle_connection: oracledb.Connection, tmp_path: Path
 ):
+    # Spec: README § Run ILM / source_orphan_purge — when source_orphan_purge is true,
+    # child rows with no matching parent are archived to history; LDB_IS_ORPHAN is set
+    # to 'Y' and LDB_DATE_<suffix> captures the process date so HISTORY_ILM can apply
+    # retention to them even without a relationship date
     source_user = "LDBT_ORPH_SOURCE"
     history_user = "LDBT_ORPH_HISTORY"
     source_role = "LDBT_ORPH_SOURCE_ROLE"
     history_role = "LDBT_ORPH_HISTORY_ROLE"
+
+    # Given: a bootstrapped schema with use_added_columns; source contains one child
+    # with a valid parent and one orphan (parent_id references a non-existent parent)
     for user in (source_user, history_user):
         _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
     for role in (source_role, history_role):
@@ -1176,6 +1258,7 @@ def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
         finally:
             source_cursor.close()
 
+        # When: SOURCE_ILM runs in EXECUTE mode
         _run_cli(
             "ldb-run",
             *common_arguments,
@@ -1186,6 +1269,8 @@ def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
             environment=cli_environment,
         )
 
+        # Then: the orphan row is in history with LDB_IS_ORPHAN='Y' and today's process date;
+        # the non-orphan child remains in source
         history_connection = oracledb.connect(user=history_user, password=history_password, dsn=dsn)
         assert _fetch_ids(source_connection, "orphan_children", "line_id") == [11]
         assert _fetch_ids(history_connection, "orphan_children", "line_id") == [99]
