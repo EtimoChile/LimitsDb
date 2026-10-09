@@ -183,6 +183,11 @@ once before the first `ldb-run`, and again whenever a new environment is
 provisioned. All operations are idempotent: existing objects are left unchanged
 and only missing ones are created.
 
+**`ldb-impl` is optional** if a DBA has already created all required objects
+manually. LimitsDb does not require objects to have been created through
+`ldb-impl`; it only requires that the objects exist with the expected structure
+before `ldb-run` is executed.
+
 What it creates in both source and history environments:
 
 - **Role** — grants the application user the privileges required by LimitsDb.
@@ -228,6 +233,18 @@ poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode PR
 # Apply quick overrides without editing files
 poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set chunk_size=200000 --set parallel_max=8
 ```
+
+### Admin credentials in ldb-run
+
+`ldb-run` uses admin credentials (`admin_source_password`,
+`admin_history_password`) for two operations: granting table privileges to the
+application role, and creating or altering history tables before an `EXECUTE`
+run. Both operations are idempotent.
+
+If admin credentials are absent from `secrets[.<PROFILE>].json`, the privilege
+grants are skipped silently — the assumption is that grants are already in
+place. History table management in `EXECUTE` mode still requires admin
+credentials in the current version.
 
 ### Configuration parameters reference
 
