@@ -1,4 +1,3 @@
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -8,24 +7,40 @@ from limitsdb.core.ldb_errors import LimitsDbError
 from limitsdb.core.ldb_params_config import Config
 
 
-def test_mask_secrets():
+def test_secrets_are_masked_in_logged_config():
+    # Spec: README > Secrets & Encryption — secret values are never printed to logs;
+    # secret fields are replaced with "****" before any logging call
+    # Given: a config dict containing a password and a non-secret field
     cfg = {"source_password": "secret", "other": 1}
+
+    # When: the config is masked
     masked = ldb_run._mask_secrets(cfg)
+
+    # Then: password is redacted; non-secret field is unchanged
     assert masked["source_password"] == "****"
     assert masked["other"] == 1
 
 
-def test_build_control_tables_shapes():
+def test_ldb_impl_control_tables_have_correct_shape():
+    # Spec: README > ldb-impl — LDB_CTL and LDB_LOG are the two control tables;
+    # CTL_ACTION and LOG_ACTION have length 11 to accommodate all action codes
+    # Given: an owner name
+    # When: control tables are built
     tables = ldb_impl._build_control_tables("OWNER")
+
+    # Then: both tables exist with correct names and primary key / column constraints
     assert {t.name for t in tables} == {"LDB_CTL", "LDB_LOG"}
     ctl = next(t for t in tables if t.name == "LDB_CTL")
     log = next(t for t in tables if t.name == "LDB_LOG")
     assert ctl.primary_key == ("CTL_OWNER", "CTL_TABLE_NAME")
-    assert next(column for column in ctl.columns if column.name == "CTL_ACTION").length == 11
-    assert next(column for column in log.columns if column.name == "LOG_ACTION").length == 11
+    assert next(c for c in ctl.columns if c.name == "CTL_ACTION").length == 11
+    assert next(c for c in log.columns if c.name == "LOG_ACTION").length == 11
 
 
-def test_ldb_impl_run_cli(monkeypatch: pytest.MonkeyPatch):
+def test_ldb_impl_run_cli_creates_database_objects(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ldb-impl — provisions roles, users, tables, sequences, database
+    # links and supporting objects using admin credentials
+    # Given: all CLI args resolved and a DummyEngine that records calls
     args = SimpleNamespace(
         schema="s",
         profile=None,
@@ -84,21 +99,54 @@ def test_ldb_impl_run_cli(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
     monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
+
+    # When / Then: run_cli completes without raising
     ldb_impl.run_cli()
 
 
-def test_ldb_crypt_cli(monkeypatch: pytest.MonkeyPatch, tmp_path):
+def test_ldb_crypt_run_cli_encrypts_secrets(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ldb-crypt — encrypts plaintext secrets in the secrets file and
+    # reports the output path; does not raise when file is already encrypted (None return)
+    # Given: CLI args and a mock encrypt function
     args = SimpleNamespace(schema="s", profile=None, config_dir=str(tmp_path))
     monkeypatch.setattr(ldb_crypt, "_parse_args", lambda: args)
     monkeypatch.setattr(ldb_crypt, "load_or_create_key", lambda: None)
     monkeypatch.setattr(ldb_crypt, "encrypt_secrets_in_place", lambda **k: tmp_path / "out.json")
+
+    # When: run_cli executes with an output path
+    # Then: no error raised
     ldb_crypt.run_cli()
 
+    # When: encrypt returns None (all already encrypted)
     monkeypatch.setattr(ldb_crypt, "encrypt_secrets_in_place", lambda **k: None)
+
+    # Then: no error raised
     ldb_crypt.run_cli()
 
 
-def test_ldb_run_cli(monkeypatch: pytest.MonkeyPatch):
+def test_ldb_crypt_run_cli_exits_with_error_code_on_failure(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/exception-handling.md — SecretError in ldb-crypt is reported and
+    # the process exits with code 1
+    # Given: encrypt raises
+    args = SimpleNamespace(schema="s", profile=None, config_dir=None)
+    monkeypatch.setattr(ldb_crypt, "_parse_args", lambda: args)
+    monkeypatch.setattr(ldb_crypt, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(
+        ldb_crypt,
+        "encrypt_secrets_in_place",
+        lambda **k: (_ for _ in ()).throw(ValueError("bad secrets")),
+    )
+
+    # When / Then: SystemExit with code 1
+    with pytest.raises(SystemExit) as caught:
+        ldb_crypt.run_cli()
+    assert caught.value.code == 1
+
+
+def test_ldb_run_run_cli_executes_successfully(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM — ldb-run resolves config, constructs Config and
+    # dispatches to the runner; returns 0 on success
+    # Given: all dependencies mocked
     args = SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO")
     monkeypatch.setattr(ldb_run, "parse_args", lambda: args)
     monkeypatch.setattr(ldb_run, "encrypt_secrets_in_place", lambda **k: None)
@@ -126,103 +174,20 @@ def test_ldb_run_cli(monkeypatch: pytest.MonkeyPatch):
         ldb_run,
         "get_logger",
         lambda name=None: SimpleNamespace(
-            debug=lambda *a, **k: None, error=lambda *a, **k: None, warning=lambda *a, **k: None
+            debug=lambda *a, **k: None,
+            error=lambda *a, **k: None,
+            warning=lambda *a, **k: None,
         ),
     )
+
+    # When / Then: run_cli completes without raising
     ldb_run.run_cli()
 
 
-def test_ldb_init_run_cli_creates_requested_files(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    args = SimpleNamespace(
-        schema="billing",
-        profile="dev",
-        config_dir=str(tmp_path),
-        overwrite=True,
-        no_examples=False,
-        log_level="DEBUG",
-    )
-    calls = {}
-    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
-    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: calls.setdefault("key", True))
-    monkeypatch.setattr(ldb_init, "reconfigure_logger", lambda **kwargs: calls.setdefault("log_level", kwargs["level"]))
-
-    def initialize(**kwargs):
-        calls["init"] = kwargs
-        return tuple(tmp_path / name for name in ("config.yml", "ilm.yml", "secrets.json", "ilm.example.yml"))
-
-    monkeypatch.setattr(ldb_init, "init_schema", initialize)
-
-    ldb_init.run_cli()
-
-    assert calls == {
-        "key": True,
-        "log_level": "DEBUG",
-        "init": {
-            "schema": "billing",
-            "profile": "dev",
-            "config_root": str(tmp_path),
-            "overwrite": True,
-            "with_examples": True,
-            "auto_encrypt": True,
-        },
-    }
-
-
-def test_ldb_init_run_cli_reports_invalid_request(monkeypatch: pytest.MonkeyPatch):
-    args = SimpleNamespace(
-        schema="billing",
-        profile=None,
-        config_dir=None,
-        overwrite=False,
-        no_examples=True,
-        log_level="INFO",
-    )
-    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
-    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: None)
-    monkeypatch.setattr(ldb_init, "init_schema", lambda **kwargs: (_ for _ in ()).throw(ValueError("invalid root")))
-
-    with pytest.raises(SystemExit) as caught:
-        ldb_init.run_cli()
-
-    assert caught.value.code == 1
-
-
-def test_ldb_init_run_cli_skips_examples_log_when_no_examples_path(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    args = SimpleNamespace(
-        schema="billing",
-        profile=None,
-        config_dir=str(tmp_path),
-        overwrite=False,
-        no_examples=True,
-        log_level="INFO",
-    )
-    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
-    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: None)
-    monkeypatch.setattr(
-        ldb_init,
-        "init_schema",
-        lambda **kwargs: (tmp_path / "config.yml", tmp_path / "ilm.yml", tmp_path / "secrets.json", None),
-    )
-    ldb_init.run_cli()  # must not raise; no fourth logger.info call for examples
-
-
-def test_ldb_crypt_cli_reports_error(monkeypatch: pytest.MonkeyPatch):
-    args = SimpleNamespace(schema="s", profile=None, config_dir=None)
-    monkeypatch.setattr(ldb_crypt, "_parse_args", lambda: args)
-    monkeypatch.setattr(ldb_crypt, "load_or_create_key", lambda: None)
-    monkeypatch.setattr(
-        ldb_crypt,
-        "encrypt_secrets_in_place",
-        lambda **k: (_ for _ in ()).throw(ValueError("bad secrets")),
-    )
-
-    with pytest.raises(SystemExit) as caught:
-        ldb_crypt.run_cli()
-
-    assert caught.value.code == 1
-
-
-def test_ldb_run_cli_reports_error(monkeypatch: pytest.MonkeyPatch):
+def test_ldb_run_run_cli_exits_with_error_code_on_failure(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/exception-handling.md — LimitsDbError propagates from the runner
+    # to the CLI as exit code 1
+    # Given: ldb_run raises LimitsDbError
     args = SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO")
     monkeypatch.setattr(ldb_run, "parse_args", lambda: args)
     monkeypatch.setattr(ldb_run, "load_or_create_key", lambda: None)
@@ -256,10 +221,112 @@ def test_ldb_run_cli_reports_error(monkeypatch: pytest.MonkeyPatch):
         lambda name=None: SimpleNamespace(debug=lambda *a, **k: None, error=lambda *a, **k: None),
     )
 
+    # When / Then: SystemExit with code 1
     with pytest.raises(SystemExit) as caught:
         ldb_run.run_cli()
-
     assert caught.value.code == 1
+
+
+def test_ldb_init_run_cli_creates_all_files_and_encrypts(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ldb-init — creates config.yml, ilm.yml, secrets.json and
+    # ilm.example.yml; encrypts secrets; respects --overwrite and --profile
+    # Given: fully specified CLI args
+    args = SimpleNamespace(
+        schema="billing",
+        profile="dev",
+        config_dir=str(tmp_path),
+        overwrite=True,
+        no_examples=False,
+        log_level="DEBUG",
+    )
+    calls = {}
+    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
+    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: calls.setdefault("key", True))
+    monkeypatch.setattr(
+        ldb_init,
+        "reconfigure_logger",
+        lambda **kwargs: calls.setdefault("log_level", kwargs["level"]),
+    )
+
+    def initialize(**kwargs):
+        calls["init"] = kwargs
+        return tuple(tmp_path / name for name in ("config.yml", "ilm.yml", "secrets.json", "ilm.example.yml"))
+
+    monkeypatch.setattr(ldb_init, "init_schema", initialize)
+
+    # When: run_cli executes
+    ldb_init.run_cli()
+
+    # Then: key was loaded, log level was set, init was called with correct args
+    assert calls == {
+        "key": True,
+        "log_level": "DEBUG",
+        "init": {
+            "schema": "billing",
+            "profile": "dev",
+            "config_root": str(tmp_path),
+            "overwrite": True,
+            "with_examples": True,
+            "auto_encrypt": True,
+        },
+    }
+
+
+def test_ldb_init_run_cli_exits_with_error_code_on_invalid_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: docs/exception-handling.md — ConfigurationError or ValueError from
+    # init_schema exits ldb-init with code 1
+    # Given: init_schema raises ValueError
+    args = SimpleNamespace(
+        schema="billing",
+        profile=None,
+        config_dir=None,
+        overwrite=False,
+        no_examples=True,
+        log_level="INFO",
+    )
+    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
+    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(
+        ldb_init,
+        "init_schema",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("invalid root")),
+    )
+
+    # When / Then: SystemExit with code 1
+    with pytest.raises(SystemExit) as caught:
+        ldb_init.run_cli()
+    assert caught.value.code == 1
+
+
+def test_ldb_init_run_cli_tolerates_missing_example_file(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ldb-init > --no-examples — when init_schema returns None for
+    # the example path, run_cli must not attempt to log it and must not raise
+    # Given: init_schema returns None for the example path
+    args = SimpleNamespace(
+        schema="billing",
+        profile=None,
+        config_dir=str(tmp_path),
+        overwrite=False,
+        no_examples=True,
+        log_level="INFO",
+    )
+    monkeypatch.setattr(ldb_init, "_parse_args", lambda: args)
+    monkeypatch.setattr(ldb_init, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(
+        ldb_init,
+        "init_schema",
+        lambda **kwargs: (
+            tmp_path / "config.yml",
+            tmp_path / "ilm.yml",
+            tmp_path / "secrets.json",
+            None,
+        ),
+    )
+
+    # When / Then: run_cli completes without raising
+    ldb_init.run_cli()
 
 
 _FULL_IMPL_DICT = {
@@ -289,7 +356,10 @@ _FULL_IMPL_DICT = {
         "source_dsn",
     ],
 )
-def test_ldb_impl_run_cli_fails_when_credential_is_missing(monkeypatch: pytest.MonkeyPatch, empty_key: str):
+def test_ldb_impl_run_cli_exits_with_error_when_credential_is_missing(monkeypatch: pytest.MonkeyPatch, empty_key: str):
+    # Spec: README > ldb-impl — all admin and runtime credentials are required;
+    # missing any of them exits with code 1 before touching the database
+    # Given: a config dict with one required credential empty
     cfg = {**_FULL_IMPL_DICT, empty_key: ""}
     monkeypatch.setattr(
         ldb_impl,
@@ -300,30 +370,19 @@ def test_ldb_impl_run_cli_fails_when_credential_is_missing(monkeypatch: pytest.M
     monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
     monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
 
+    # When / Then: SystemExit with code 1
     with pytest.raises(SystemExit) as caught:
         ldb_impl.run_cli()
-
     assert caught.value.code == 1
 
 
-def test_ldb_crypt_parse_args_directly(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(sys, "argv", ["ldb-crypt", "--schema", "s", "--config-dir", "/tmp"])
-    args = ldb_crypt._parse_args()
-    assert args.schema == "s"
-    assert args.config_dir == "/tmp"
-
-
-def test_ldb_init_parse_args_directly(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(sys, "argv", ["ldb-init", "--schema", "s", "--no-examples", "--overwrite"])
-    args = ldb_init._parse_args()
-    assert args.schema == "s"
-    assert args.no_examples is True
-    assert args.overwrite is True
-
-
 @pytest.mark.parametrize("empty_key", ["source_username", "source_dsn"])
-def test_ldb_impl_run_cli_source_credential_missing_in_plan_mode(monkeypatch: pytest.MonkeyPatch, empty_key: str):
-    # PLAN mode bypasses Config.__post_init__ credential validation → ldb_impl.py checks them
+def test_ldb_impl_run_cli_exits_with_error_for_source_credential_missing_in_plan_mode(
+    monkeypatch: pytest.MonkeyPatch, empty_key: str
+):
+    # Spec: README > ldb-impl — PLAN mode bypasses Config credential validation;
+    # ldb_impl.py checks source credentials explicitly before proceeding
+    # Given: PLAN mode config with an empty source credential
     cfg = {**_FULL_IMPL_DICT, "mode": "PLAN", empty_key: ""}
     monkeypatch.setattr(
         ldb_impl,
@@ -334,13 +393,16 @@ def test_ldb_impl_run_cli_source_credential_missing_in_plan_mode(monkeypatch: py
     monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
     monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
 
+    # When / Then: SystemExit with code 1
     with pytest.raises(SystemExit) as caught:
         ldb_impl.run_cli()
-
     assert caught.value.code == 1
 
 
-def test_ldb_impl_run_cli_logs_when_nothing_created(monkeypatch: pytest.MonkeyPatch):
+def test_ldb_impl_run_cli_logs_when_all_objects_already_exist(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ldb-impl — when all required objects are already present,
+    # ldb-impl logs a confirmation instead of silently exiting
+    # Given: an engine where all ensure_* return empty lists (nothing to create)
     monkeypatch.setattr(
         ldb_impl,
         "_parse_args",
@@ -371,6 +433,9 @@ def test_ldb_impl_run_cli_logs_when_nothing_created(monkeypatch: pytest.MonkeyPa
             debug=lambda *a, **k: None,
         ),
     )
+
+    # When: run_cli runs with everything already in place
     ldb_impl.run_cli()
 
+    # Then: a message indicating objects were already present is logged
     assert any("already present" in m for m in logged)

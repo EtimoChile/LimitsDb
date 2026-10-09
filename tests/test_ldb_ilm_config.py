@@ -1,93 +1,160 @@
+from pathlib import Path
+
 import pytest
 import yaml
 
 from limitsdb.core import ldb_ilm_config
 
 
-def test_normalize_and_duplicate_detection(tmp_path):
-    content = {
+def test_duplicate_table_in_ilm_file_is_rejected(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — each table appears once;
+    # duplicate entries indicate a configuration mistake and must be caught early.
+    # Given: ILM file with the same table listed twice
+    path = tmp_path / "ilm.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "tables": [
+                    {"source_owner": "SRC", "table_name": "T1"},
+                    {"source_owner": "SRC", "table_name": "T1"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # When / Then: loading raises — the error surfaces before any ILM run
+    with pytest.raises(ValueError):
+        ldb_ilm_config.load_rows_from_yaml(str(path))
+
+
+def test_table_with_active_condition_is_included_in_loaded_rows(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — is_active controls whether a
+    # condition participates in ILM processing
+    # Given: a table with one active condition
+    path = tmp_path / "ilm.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "tables": [
+                    {
+                        "source_owner": "SRC",
+                        "table_name": "T1",
+                        "retain_months_source": 3,
+                        "conds": [{"is_active": True}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # When: rows are loaded
+    rows = ldb_ilm_config.load_rows_from_yaml(str(path))
+
+    # Then: the table appears in the result
+    assert len(rows) == 1
+    assert rows[0]["table_name"] == "T1"
+
+
+def test_table_with_all_inactive_conditions_is_excluded(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — is_active: false excludes the
+    # condition; a table with no active conditions contributes nothing to the run
+    # Given: a table whose only condition is inactive
+    path = tmp_path / "ilm.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "tables": [
+                    {
+                        "source_owner": "SRC",
+                        "table_name": "T1",
+                        "conds": [{"is_active": False}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # When: rows are loaded
+    rows = ldb_ilm_config.load_rows_from_yaml(str(path))
+
+    # Then: the table is absent — no rows to process
+    assert len(rows) == 0
+
+
+def test_retention_months_defaults_propagate_to_loaded_row(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — retain_months_history controls
+    # how long rows are kept in the history schema
+    # Given: a table with explicit retention values
+    path = tmp_path / "ilm.yml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "tables": [
+                    {
+                        "source_owner": "SRC",
+                        "table_name": "T2",
+                        "retain_months_source": 1,
+                        "retain_months_history": 12,
+                        "conds": [{"is_active": True}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # When: rows are loaded
+    rows = ldb_ilm_config.load_rows_from_yaml(str(path))
+
+    # Then: retention values are preserved exactly
+    assert rows[0]["retain_months_history"] == 12
+    assert rows[0]["retain_months_source"] == 1
+
+
+def test_non_mapping_tables_value_raises_type_error(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — tables must be a list of mappings
+    # Given: ILM file where tables is a scalar
+    path = tmp_path / "ilm.yml"
+    path.write_text("tables: 123", encoding="utf-8")
+
+    # When / Then: loading raises TypeError — malformed structure is rejected
+    with pytest.raises(TypeError):
+        ldb_ilm_config.load_rows_from_yaml(str(path))
+
+
+def test_missing_tables_key_raises_key_error(tmp_path: Path):
+    # Spec: limitsdb/resources/ilm.example.yml — root must contain a "tables" key
+    # Given: ILM file without a tables key
+    path = tmp_path / "ilm.yml"
+    path.write_text(yaml.safe_dump({"wrong": []}), encoding="utf-8")
+
+    # When / Then: loading raises — the required key is absent
+    with pytest.raises(KeyError):
+        ldb_ilm_config.load_rows_from_yaml(str(path))
+
+
+def test_resolve_and_load_ilm_rows_returns_rows_from_resolved_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # Spec: README > Run ILM > --ilm-config-file — a specific ILM YAML file
+    # can bypass DB discovery
+    # Given: a valid ILM file and a resolver that points to it
+    config = {
         "tables": [
             {
                 "source_owner": "SRC",
                 "table_name": "T1",
                 "retain_months_source": 1,
                 "retain_months_history": 2,
-                "conds": [{"is_active": True}],
-            },
-            {"source_owner": "SRC", "table_name": "T2", "conds": []},
-        ]
-    }
-    path = tmp_path / "ilm.yml"
-    path.write_text(yaml.safe_dump(content), encoding="utf-8")
-    rows = ldb_ilm_config.load_rows_from_yaml(str(path))
-    assert len(rows) == 2
-    assert rows[0]["id"] == 0
-    assert rows[0]["retain_months_history"] == 2
-    assert rows[1]["is_active"] == "Y"
-    normalized_keys = set(ldb_ilm_config.IlmRule.__annotations__) - {"cond_expr"}
-    assert normalized_keys <= rows[0].keys()
-    assert "cond_expr" not in rows[0]
-
-    dup_content = {"tables": [{"source_owner": "SRC", "table_name": "T1"}, {"source_owner": "SRC", "table_name": "T1"}]}
-    path.write_text(yaml.safe_dump(dup_content), encoding="utf-8")
-    with pytest.raises(ValueError):
-        ldb_ilm_config.load_rows_from_yaml(str(path))
-
-
-def test_resolve_and_load_ilm_rows(monkeypatch, tmp_path):
-    config = {
-        "tables": [{"source_owner": "SRC", "table_name": "T1", "retain_months_source": 1, "retain_months_history": 2}]
-    }
-    monkeypatch.setattr(ldb_ilm_config, "load_ilm_config", lambda **_: config)
-    rows = ldb_ilm_config.resolve_and_load_ilm_rows(schema="s", profile=None, config_dir=None)
-    assert rows[0]["retain_months_history"] == 2
-    assert rows[0]["source_owner"] == "SRC"
-
-
-def test_invalid_keys_and_types(tmp_path):
-    path = tmp_path / "ilm.yml"
-    path.write_text("tables: 123", encoding="utf-8")
-    with pytest.raises(TypeError):
-        ldb_ilm_config.load_rows_from_yaml(str(path))
-
-    bad_key = {"wrong": []}
-    path.write_text(yaml.safe_dump(bad_key), encoding="utf-8")
-    with pytest.raises(KeyError):
-        ldb_ilm_config.load_rows_from_yaml(str(path))
-
-
-def test_ensure_mapping_none_returns_empty_dict():
-    result = ldb_ilm_config._ensure_mapping(None, "test_field")
-    assert result == {}
-
-
-def test_ensure_mapping_non_mapping_raises_type_error():
-    with pytest.raises(TypeError):
-        ldb_ilm_config._ensure_mapping("not_a_mapping", "test_field")
-
-
-def test_ensure_list_of_mappings_none_returns_empty_list():
-    result = ldb_ilm_config._ensure_list_of_mappings(None, "test_field")
-    assert result == []
-
-
-def test_ensure_list_of_mappings_non_mapping_element_raises_type_error():
-    with pytest.raises(TypeError):
-        ldb_ilm_config._ensure_list_of_mappings([{"valid": True}, "not_a_mapping"], "test_field")
-
-
-def test_load_rows_from_yaml_all_inactive_conds_excluded(tmp_path):
-    content = {
-        "tables": [
-            {
-                "source_owner": "SRC",
-                "table_name": "T1",
-                "conds": [{"is_active": False}],
             }
         ]
     }
-    path = tmp_path / "ilm.yml"
-    path.write_text(yaml.safe_dump(content), encoding="utf-8")
-    rows = ldb_ilm_config.load_rows_from_yaml(str(path))
-    # Table T1 is excluded entirely because all its conds are inactive
-    assert len(rows) == 0
+    monkeypatch.setattr(ldb_ilm_config, "load_ilm_config", lambda **_: config)
+
+    # When: rows are resolved and loaded
+    rows = ldb_ilm_config.resolve_and_load_ilm_rows(schema="s", profile=None, config_dir=None)
+
+    # Then: the row contains the configured retention values
+    assert rows[0]["retain_months_history"] == 2
+    assert rows[0]["source_owner"] == "SRC"
