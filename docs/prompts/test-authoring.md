@@ -27,7 +27,12 @@ In order of precedence:
    invariants
 3. `docs/configuration-contract.md` — configuration contract
 4. `docs/exception-handling.md` — documented error contracts
-5. Public module and class docstrings (not private function docstrings)
+5. `docs/ai-state/DECISIONS.md` — design decisions and their invariants;
+   consult it when the behavior under test corresponds to a recorded decision
+   (e.g., historical snapshotting, orphan handling, environment-variable
+   restrictions). The decision rationale identifies what must hold and what the
+   test must protect.
+6. Public module and class docstrings (not private function docstrings)
 
 **Do not read the source code of the function under test before drafting the
 test.** Read the specification first. Write the test. Only then verify that
