@@ -395,7 +395,7 @@ def test_oracle_privileged_ensures_are_idempotent(oracle_connection: oracledb.Co
     role = RoleDefinition(name=role_name)
     user = UserDefinition(
         name=user_name,
-        password=f"LdbCI_{secrets.token_hex(16)}",
+        password=f"LdbCI_{secrets.token_hex(11)}",
         default_tablespace="USERS",
         roles=(role_name,),
         system_privileges=("CREATE SESSION",),
@@ -457,8 +457,8 @@ def test_limitsdb_happy_path_archives_and_purges_between_schemas(
     dsn = os.environ["LDB_ORACLE_TEST_DSN"]
     admin_user = os.environ["LDB_ORACLE_TEST_USER"]
     admin_password = os.environ["LDB_ORACLE_TEST_PASSWORD"]
-    source_password = f"LdbE2E_{secrets.token_hex(16)}"
-    history_password = f"LdbE2E_{secrets.token_hex(16)}"
+    source_password = f"LdbE2E_{secrets.token_hex(11)}"
+    history_password = f"LdbE2E_{secrets.token_hex(11)}"
     config_root = tmp_path / "config"
     _write_e2e_configuration(
         config_root,
@@ -759,11 +759,16 @@ def _fetch_column_type(connection: oracledb.Connection, table_name: str, column_
     cursor = connection.cursor()
     try:
         cursor.execute(
-            "SELECT data_type, data_length FROM user_tab_columns WHERE table_name = :1 AND column_name = :2",
+            "SELECT data_type, data_length, char_length, char_used FROM user_tab_columns WHERE table_name = :1 AND column_name = :2",
             [table_name.upper(), column_name.upper()],
         )
         row = cursor.fetchone()
-        return (row[0], row[1]) if row else ("", None)
+        if not row:
+            return ("", None)
+        data_type, data_length, char_length, char_used = row
+        if data_type in ("VARCHAR2", "VARCHAR", "CHAR") and char_used == "C" and char_length is not None:
+            return (data_type, int(char_length))
+        return (data_type, int(data_length) if data_length is not None else None)
     finally:
         cursor.close()
 
@@ -1013,8 +1018,8 @@ def test_e2e_controlled_failure_records_error_status_and_allows_recovery(
     dsn = os.environ["LDB_ORACLE_TEST_DSN"]
     admin_user = os.environ["LDB_ORACLE_TEST_USER"]
     admin_password = os.environ["LDB_ORACLE_TEST_PASSWORD"]
-    source_password = f"LdbErr_{secrets.token_hex(16)}"
-    history_password = f"LdbErr_{secrets.token_hex(16)}"
+    source_password = f"LdbErr_{secrets.token_hex(11)}"
+    history_password = f"LdbErr_{secrets.token_hex(11)}"
     config_root = tmp_path / "err-config"
     _write_failure_e2e_configuration(
         config_root,
@@ -1129,8 +1134,8 @@ def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
     dsn = os.environ["LDB_ORACLE_TEST_DSN"]
     admin_user = os.environ["LDB_ORACLE_TEST_USER"]
     admin_password = os.environ["LDB_ORACLE_TEST_PASSWORD"]
-    source_password = f"LdbOrph_{secrets.token_hex(16)}"
-    history_password = f"LdbOrph_{secrets.token_hex(16)}"
+    source_password = f"LdbOrph_{secrets.token_hex(11)}"
+    history_password = f"LdbOrph_{secrets.token_hex(11)}"
     config_root = tmp_path / "orphan-config"
     _write_orphan_e2e_configuration(
         config_root,

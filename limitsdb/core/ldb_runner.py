@@ -481,7 +481,6 @@ def ldb_exec_ilm(
                     table_info["conds"][0]["ctl_status"] = Status.TABLE_START
                     cycle_launched = True
                     process_launched = True
-                    break  # Launch only one process at a time
                 if not cycle_launched:
                     break  # There are no processes to launch, so go to waiting some process to end
             logger.debug(f"Active processes: {len(processes)}")

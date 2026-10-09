@@ -135,17 +135,44 @@ and Coverage data files are retained as a workflow artifact for 14 days. No
 minimum coverage percentage is enforced until a combined baseline is verified.
 
 The integration tests are excluded from the default test command. To run them
-against an explicitly disposable Oracle instance:
+you need a dedicated Oracle instance (never a shared or production database):
+the suite creates and drops objects whose names begin with `LDBT_`, and the
+E2E tests provision and tear down entire schemas.
+
+Set three environment variables that point to that instance, then run:
+
+**Linux / macOS**
 
 ```bash
-LDB_ORACLE_TEST_DSN=localhost:1521/FREEPDB1 \
+export LDB_ORACLE_TEST_DSN=host:1521/SERVICE
+export LDB_ORACLE_TEST_USER=system
+export LDB_ORACLE_TEST_PASSWORD=<test-only-password>
+poetry run pytest -m oracle_integration
+```
+
+Or inline for a single run:
+
+```bash
+LDB_ORACLE_TEST_DSN=host:1521/SERVICE \
 LDB_ORACLE_TEST_USER=system \
 LDB_ORACLE_TEST_PASSWORD=<test-only-password> \
 poetry run pytest -m oracle_integration
 ```
 
-Never point these tests at an operational or shared database: they create and
-drop objects whose names begin with `LDBT_`.
+**Windows (PowerShell)**
+
+```powershell
+$env:LDB_ORACLE_TEST_DSN      = "host:1521/SERVICE"
+$env:LDB_ORACLE_TEST_USER     = "system"
+$env:LDB_ORACLE_TEST_PASSWORD = "<test-only-password>"
+poetry run pytest -m oracle_integration
+```
+
+If any variable is missing, the tests are skipped rather than failing.
+
+> **Oracle 12.1 compatibility** — Oracle 12.1 limits identifiers to 30
+> characters. The test suite generates passwords within that limit.
+> Oracle 12.2+ raised the limit to 128 characters and is not affected.
 
 ## CLI Commands
 

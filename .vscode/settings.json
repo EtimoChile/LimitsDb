@@ -1,6 +1,6 @@
 {
   "python.analysis.extraPaths": ["."],
-  "python.defaultInterpreterPath": ".venv/Scripts/python.exe",  // en Windows
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
   "python.analysis.typeCheckingMode": "basic",
   "markdown.styles": [
     ".vscode/markdown-preview.css"
