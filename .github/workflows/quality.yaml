@@ -51,7 +51,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: unit-coverage-${{ github.run_id }}
-          path: .coverage-data/unit/.coverage
+          path: .coverage-data/unit/
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
