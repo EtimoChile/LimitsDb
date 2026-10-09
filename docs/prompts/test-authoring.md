@@ -190,6 +190,6 @@ Include the content of this file at the start of any session or prompt
 intended to generate or review tests in LimitsDb, before providing the source
 code of the modules under test.
 
-Before writing a new test, also consult [`docs/test-organization.md`](../test-organization.md)
+Before writing a new test, also consult [`docs/prompts/test-organization.md`](test-organization.md)
 to determine which file the test belongs in. The two documents are complementary:
 this one defines **how** to write each test; that one defines **where** it lives.

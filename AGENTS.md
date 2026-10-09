@@ -97,7 +97,7 @@ documents:
 
 - `docs/prompts/test-authoring.md` — mandatory authoring rules (R1–R7): tests
   must be derived from the specification, not from the implementation.
-- `docs/test-organization.md` — which file each test belongs in: each test file
+- `docs/prompts/test-organization.md` — which file each test belongs in: each test file
   covers one functional contract defined in the specification; the file to use
   is determined by the spec section that governs the behavior under test.
 

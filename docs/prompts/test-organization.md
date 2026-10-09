@@ -1,6 +1,6 @@
 # LimitsDb — Test organization
 
-Complements [`docs/prompts/test-authoring.md`](prompts/test-authoring.md) (R1–R7):
+Complements [`docs/prompts/test-authoring.md`](test-authoring.md) (R1–R7):
 that document defines **how** to write each test; this one defines **where** it lives.
 
 ---

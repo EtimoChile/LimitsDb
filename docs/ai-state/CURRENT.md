@@ -34,7 +34,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - The test suite lives in `tests/`. Local tests are 146 (non-oracle-integration)
   and 11 E2E (oracle_integration). Ruff validates format and lint, and strict
   `mypy` completes without findings across the 23 package modules. The test
-  layout follows `docs/test-organization.md`: core contracts in `tests/test_*.py`,
+  layout follows `docs/prompts/test-organization.md`: core contracts in `tests/test_*.py`,
   Oracle adapter tests (no real DB) in `tests/adapters/oracle/`, and E2E with an
   ephemeral Oracle DB in `tests/integration/oracle/`. `PEND-018` is resolved:
   `test_ldb_meta_status.py` (R5 violations; behaviors covered elsewhere) and
