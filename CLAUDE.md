@@ -1,7 +1,7 @@
-# Instrucciones para agentes
+# Agent instructions
 
-La única constitución operativa vigente es [`AGENTS.md`](AGENTS.md).
+The only operative constitution in force is [`AGENTS.md`](AGENTS.md).
 
-Este archivo existe sólo como punto de entrada compatible con herramientas que
-buscan `CLAUDE.md`. No replica reglas y no constituye una fuente de verdad
-independiente.
+This file exists solely as a compatibility entry point for tools that look for
+`CLAUDE.md`. It does not replicate rules and is not an independent source of
+truth.

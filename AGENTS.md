@@ -1,98 +1,102 @@
-# Constitución operativa de LimitsDb
+# LimitsDb operative constitution
 
-LimitsDb es un ejecutor de Information Lifecycle Management (ILM) dirigido
-por configuración. Archiva y elimina datos operacionales, por lo que una
-modificación aparentemente pequeña puede afectar datos, privilegios o esquemas
-reales. Las reglas siguientes son obligatorias para cualquier agente.
+LimitsDb is a configuration-driven Information Lifecycle Management (ILM)
+executor. It archives and deletes operational data, so an apparently small
+change can affect real data, privileges, or schemas. The following rules are
+mandatory for any agent.
 
-## Precedencia y fuentes de verdad
+## Precedence and sources of truth
 
-En caso de conflicto, aplicar este orden:
+In case of conflict, apply this order:
 
-1. `AGENTS.md`: proceso, límites y autoridad documental.
-2. `README.md`: comportamiento público, configuración, CLI y flujo operativo.
-3. `limitsdb/resources/ilm.example.yml`: contrato de ejemplo de las políticas
-   ILM; los modelos y validadores bajo `limitsdb/core/` definen su
-   interpretación ejecutable vigente.
-4. `limitsdb/db/ldb_engines.py`: contrato independiente del motor; cada
-   adaptador bajo `limitsdb/db/<motor>/` implementa ese contrato.
-5. Código, configuración y pruebas vigentes, para hechos verificables de
-   implementación.
-6. `CHANGELOG.md`, para historia publicada; no sustituye el estado actual.
+1. `AGENTS.md`: process, boundaries, and documentary authority.
+2. `README.md`: public behavior, configuration, CLI, and operational flow.
+3. `limitsdb/resources/ilm.example.yml`: example contract for ILM policies;
+   the models and validators under `limitsdb/core/` define their current
+   executable interpretation.
+4. `limitsdb/db/ldb_engines.py`: engine-independent contract; each adapter
+   under `limitsdb/db/<engine>/` implements that contract.
+5. Current code, configuration, and tests, for verifiable implementation facts.
+6. `CHANGELOG.md`, for published history; does not substitute current state.
 
-`CONTRIBUTING.md` rige las contribuciones externas. `LICENSE`,
-`LICENSE-DUAL.md`, `COMMERCIAL-EDITION-NOTICE.md`, `NOTICE` y
-`THIRD_PARTY_LICENSES.md` son autoritativos para licencias, atribuciones y
-ediciones comerciales. No reinterpretar ni modificar esos términos como parte
-de una tarea técnica ordinaria.
+`CONTRIBUTING.md` governs external contributions. `LICENSE`,
+`LICENSE-DUAL.md`, `COMMERCIAL-EDITION-NOTICE.md`, `NOTICE`, and
+`THIRD_PARTY_LICENSES.md` are authoritative for licenses, attributions, and
+commercial editions. Do not reinterpret or modify those terms as part of an
+ordinary technical task.
 
-Si dos fuentes del mismo rango discrepan, no elegir silenciosamente. Registrar
-el conflicto en `docs/ai-state/PENDING.md` y limitar el cambio a lo que siga
-siendo inequívoco.
+If two sources at the same rank disagree, do not choose silently. Record the
+conflict in `docs/ai-state/PENDING.md` and limit the change to what remains
+unambiguous.
 
-## Estado persistente y uso eficiente del contexto
+## Persistent state and efficient context use
 
-Después de este archivo, toda tarea debe leer primero
-`docs/ai-state/CURRENT.md` y `docs/ai-state/PENDING.md`. Consultar
-`docs/ai-state/DECISIONS.md` sólo para los IDs o ámbitos relacionados con la
-tarea; no releerlo indiscriminadamente cuando crezca.
+After this file, every task must first read `docs/ai-state/CURRENT.md` and
+`docs/ai-state/PENDING.md`. Consult `docs/ai-state/DECISIONS.md` only for
+IDs or scopes related to the task; do not reread it indiscriminately as it
+grows.
 
-Estos archivos son memoria operativa autoritativa, no una especificación nueva:
+These files are authoritative operational memory, not a new specification:
 
-- `CURRENT.md` resume hechos vigentes y verificables;
-- `PENDING.md` contiene únicamente trabajo abierto con una próxima acción;
-- `DECISIONS.md` conserva decisiones duraderas y evita reabrir alternativas sin
-  evidencia nueva.
+- `CURRENT.md` summarizes current, verifiable facts;
+- `PENDING.md` contains only open work with a next action;
+- `DECISIONS.md` preserves durable decisions and avoids reopening alternatives
+  without new evidence.
 
-Al cerrar cada interacción, revisar los tres archivos y modificarlos sólo si
-cambió el estado, surgió o se resolvió un pendiente, o se adoptó, reemplazó o
-descartó una decisión. No usarlos como diario de sesiones ni hacer ediciones
-artificiales.
+At the close of each interaction, review all three files and modify them only
+if the state changed, a pending item arose or was resolved, or a decision was
+adopted, replaced, or discarded. Do not use them as a session diary or make
+artificial edits.
 
-## Arquitectura y límites de cambio
+## Language
 
-- Mantener `limitsdb/core/` independiente del motor. No introducir SQL,
-  tipos, excepciones ni supuestos exclusivos de Oracle en el núcleo.
-- Mantener las particularidades de Oracle en `limitsdb/db/oracle/`. Una nueva
-  capacidad de motor debe exponerse primero en `DatabaseEngine` y después
-  implementarse y probarse en los adaptadores afectados.
-- Las entradas de consola viven en `limitsdb/cli/`; deben delegar la lógica de
-  negocio al núcleo y conservar códigos de salida útiles para automatización.
-- Los recursos empaquetados viven en `limitsdb/resources/`. Si se agregan o
-  renombran, verificar que la configuración de empaquetado en `pyproject.toml`
-  los incluya.
-- No cambiar a la vez comportamiento, formato de configuración y documentación
-  sin pruebas que demuestren la migración o compatibilidad prevista.
-- Preservar Python `>=3.12,<4.0`, tipado estricto y las convenciones declaradas
-  en `pyproject.toml` y `.pre-commit-config.yaml`, salvo decisión
-  explícita que actualice esos contratos.
+All project files — source code, tests, documentation, configuration comments,
+and commit messages — are written in **English**. This rule applies to every
+file in the repository, including files under `docs/`, `docs/ai-state/`, and
+`docs/prompts/`. Do not create or modify files in any other language.
 
-## Seguridad, secretos y datos
+## Architecture and change boundaries
 
-- Nunca versionar credenciales, DSN privados, claves de cifrado, volcados de
-  datos, identificadores personales ni logs con valores sensibles.
-- No imprimir ni copiar secretos descifrados. Las rutas normales deben mantener
-  `enforce_encrypted_secrets=True`; relajar esa protección requiere una tarea
-  explícita y una justificación documentada.
-- Tratar `SOURCE_ILM`, `HISTORY_ILM`, purgas, DDL, grants, usuarios, enlaces de
-  base de datos y ejecución de bloques SQL/PLSQL como operaciones destructivas
-  o privilegiadas.
-- No ejecutar `ldb-run`, `ldb-impl` ni SQL contra una base real sin autorización
-  explícita, entorno identificado y revisión previa de esquema, perfil y
-  acción. Para pruebas automatizadas usar dobles, fixtures o conexiones que el
-  usuario haya declarado desechables.
-- No debilitar validaciones, controles de estado, transacciones o registro de
-  errores para hacer pasar un caso. Un fallo parcial debe conservar evidencia
-  suficiente para recuperación sin exponer datos sensibles.
+- Keep `limitsdb/core/` engine-independent. Do not introduce SQL, types,
+  exceptions, or Oracle-specific assumptions into the core.
+- Keep Oracle specifics in `limitsdb/db/oracle/`. A new engine capability must
+  first be exposed in `DatabaseEngine` and then implemented and tested in the
+  affected adapters.
+- Console entry points live in `limitsdb/cli/`; they must delegate business
+  logic to the core and preserve useful exit codes for automation.
+- Packaged resources live in `limitsdb/resources/`. If added or renamed,
+  verify that the packaging configuration in `pyproject.toml` includes them.
+- Do not change behavior, configuration format, and documentation simultaneously
+  without tests that demonstrate the intended migration or compatibility.
+- Preserve Python `>=3.12,<4.0`, strict typing, and the conventions declared
+  in `pyproject.toml` and `.pre-commit-config.yaml`, unless an explicit decision
+  updates those contracts.
 
-## Pruebas y criterios de cierre
+## Security, secrets, and data
 
-Toda tarea que genere o modifique tests debe leer primero
-`docs/prompts/test-authoring.md`. Ese documento define las reglas obligatorias
-de autoría: los tests deben derivarse de la especificación, no de la
-implementación.
+- Never version credentials, private DSNs, encryption keys, data dumps,
+  personal identifiers, or logs with sensitive values.
+- Do not print or copy decrypted secrets. Normal paths must maintain
+  `enforce_encrypted_secrets=True`; relaxing that protection requires an
+  explicit task and documented justification.
+- Treat `SOURCE_ILM`, `HISTORY_ILM`, purges, DDL, grants, users, database
+  links, and execution of SQL/PLSQL blocks as destructive or privileged
+  operations.
+- Do not execute `ldb-run`, `ldb-impl`, or SQL against a real database without
+  explicit authorization, an identified environment, and prior review of the
+  schema, profile, and action. For automated tests use doubles, fixtures, or
+  connections the user has declared disposable.
+- Do not weaken validations, state controls, transactions, or error logging to
+  make a case pass. A partial failure must preserve sufficient evidence for
+  recovery without exposing sensitive data.
 
-Aplicar una verificación proporcional al cambio. La secuencia completa es:
+## Tests and completion criteria
+
+Any task that generates or modifies tests must first read
+`docs/prompts/test-authoring.md`. That document defines the mandatory authoring
+rules: tests must be derived from the specification, not from the implementation.
+
+Apply a verification proportional to the change. The full sequence is:
 
 ```bash
 poetry run pytest
@@ -104,23 +108,22 @@ poetry build
 poetry run twine check dist/*
 ```
 
-No afirmar que una comprobación pasó si no fue ejecutada en la interacción.
-Una prueba que necesita Oracle real no se improvisa ni se apunta a un entorno
-desconocido; se documenta como limitación o pendiente.
+Do not claim a check passed if it was not executed in the interaction.
+A test that requires a real Oracle instance is not improvised or pointed at an
+unknown environment; it is documented as a limitation or pending item.
 
-Todo cambio de comportamiento debe incluir o actualizar pruebas y la
-documentación pública correspondiente. Todo cambio publicable debe evaluar si
-requiere actualizar versión y `CHANGELOG.md`; no efectuar una liberación, crear
-tags ni publicar artefactos sin solicitud explícita.
+Every behavior change must include or update tests and the corresponding public
+documentation. Every publishable change must evaluate whether a version bump and
+`CHANGELOG.md` update are needed; do not perform a release, create tags, or
+publish artifacts without an explicit request.
 
-## Gobierno y propiedad
+## Governance and ownership
 
-Inversiones Etimo SpA mantiene la arquitectura, el roadmap y las liberaciones.
-Las contribuciones comunitarias se reciben mediante issues y pull requests de
-acuerdo con `CONTRIBUTING.md`.
+Inversiones Etimo SpA maintains the architecture, roadmap, and releases.
+Community contributions are received through issues and pull requests in
+accordance with `CONTRIBUTING.md`.
 
-Las decisiones técnicas nuevas se registran en
-`docs/ai-state/DECISIONS.md` cuando sean duraderas, afecten más de una tarea o
-descarten una alternativa razonable. Usar IDs consecutivos `DEC-NNN`, estados
-`VIGENTE`, `REEMPLAZADA` o `DESCARTADA`, y enlazar los artefactos donde la
-decisión queda implementada.
+New technical decisions are recorded in `docs/ai-state/DECISIONS.md` when they
+are durable, affect more than one task, or rule out a reasonable alternative.
+Use consecutive IDs `DEC-NNN`, states `ACTIVE`, `REPLACED`, or `DISCARDED`,
+and link to the artifacts where the decision is implemented.

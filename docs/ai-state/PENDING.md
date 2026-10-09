@@ -2,18 +2,18 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-08
+last-reviewed: 2026-10-09
 ---
 
-# Pendientes vigentes
+# Open pending items
 
-Cola compacta. Cada pendiente debe identificar un artefacto propietario y una
-próxima acción. Al resolverlo, retirarlo de esta tabla y conservar en
-`DECISIONS.md` cualquier decisión duradera que haya resultado.
+Compact queue. Each pending item must identify an owner artifact and a next
+action. When resolved, remove it from this table and record any durable
+decision that resulted in `DECISIONS.md`.
 
-Estados permitidos: `OPEN`, `IN_PROGRESS`, `DEFERRED` y `FUTURE`.
+Allowed states: `OPEN`, `IN_PROGRESS`, `DEFERRED`, and `FUTURE`.
 
-| ID | Estado | Ámbito | Pendiente | Artefacto propietario | Próxima acción |
+| ID | Status | Scope | Pending | Owner artifact | Next action |
 |---|---|---|---|---|---|
-| `PEND-006` | `OPEN` | Publicación/CI | Completar la barrera de publicación sobre el CI de calidad vigente: publicar sólo desde una versión etiquetada y autorizada, con procedencia y entorno protegidos. | `.github/workflows/quality.yaml`; workflow futuro de release; `pyproject.toml`; `CHANGELOG.md` | Definir el canal y las credenciales protegidas, validar primero en TestPyPI o un registro privado y diseñar la autorización de release; no publicar ni crear tags sin solicitud explícita. Requiere `PEND-014`. |
-| `PEND-008` | `OPEN` | Distribución | Definir los canales soportados para contenedor y eventual ejecutable autónomo sin asumir que un binario impide copia o reemplaza las obligaciones de licencia; el wheel ya cuenta con instalación limpia automatizada. | `pyproject.toml`; `README.md`; `.github/workflows/quality.yaml`; configuración futura de empaquetado y release | Evaluar contenedor, PyInstaller o Nuitka con el driver Oracle y documentar la matriz elegida antes de ofrecer binarios. |
+| `PEND-006` | `OPEN` | Publication/CI | Complete the publication gate on the current quality CI: publish only from a tagged, authorized version with provenance and a protected environment. | `.github/workflows/quality.yaml`; future release workflow; `pyproject.toml`; `CHANGELOG.md` | Define the channel and protected credentials, validate first on TestPyPI or a private registry, and design the release authorization; do not publish or create tags without an explicit request. Requires `PEND-014`. |
+| `PEND-008` | `OPEN` | Distribution | Define the supported channels for a container and eventual standalone executable without assuming a binary prevents copying or replaces license obligations; the wheel already has automated clean installation. | `pyproject.toml`; `README.md`; `.github/workflows/quality.yaml`; future packaging and release configuration | Evaluate container, PyInstaller, or Nuitka with the Oracle driver and document the chosen matrix before offering binaries. |

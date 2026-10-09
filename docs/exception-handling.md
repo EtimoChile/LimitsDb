@@ -23,7 +23,7 @@ it is not permission to add new broad catches without an equivalent boundary.
 |---|---:|---|
 | `ldb_crypto.py` | 3 | One unsafe permission silence now raises `SecretError`; two base64 fallbacks catch only expected decoding errors. |
 | `ldb_utils.py` | 2 | Unsafe malformed-JSON silences removed; both paths raise `SecretError` and preserve the file. |
-| `cli/ldb_run.py`, `cli/ldb_impl.py` | 2 | Unsafe auto-encryption “log and continue” catches removed; secret failures now stop before execution or administration. |
+| `cli/ldb_run.py`, `cli/ldb_impl.py` | 2 | Unsafe auto-encryption "log and continue" catches removed; secret failures now stop before execution or administration. |
 | `ldb_runner.py` | 4 | Connection probing and VALIDATE convert failures into explicit unsuccessful outcomes; worker execution and recovery persistence are process boundaries that log evidence and return a typed error result. |
 | `oracle/ldb_engine_impl.py` | 14 | Connection, configuration, query, status, and DDL boundaries translate and chain domain errors. Transactional DDL/admin boundaries roll back before raising. Connection close is the sole best-effort cleanup boundary and logs the failure. |
 

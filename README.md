@@ -2,8 +2,6 @@
 
 Configuration-driven ILM (Information Lifecycle Management) runner for operational databases. It applies retention policies to your application tables—archiving, purging, and keeping datasets lean—so source stays fast while history remains auditable. LimitsDb is designed to support multiple database engines; **Oracle** is supported today, with an engine-agnostic ILM model that can extend to others.
 
-> **Renamed project:** LimitsDb replaces the former TerminusDB name. The rename is intentionally consistent and breaking: Python imports now use `limitsdb`, commands use `ldb-*`, environment variables and database objects use `LDB_*`, and local state is stored under LimitsDb/limitsdb paths. Existing installations must migrate those names before upgrading.
-
 ## Overview (What it does)
 
 - **Executes ILM policies on real schemas.** You describe which tables are in scope, how they relate (parents/children), and the rules that decide when rows move to history or are purged.
@@ -52,6 +50,8 @@ cd limitsdb
 poetry install
 ```
 
+For development setup, running tests, and CI details see [DEVELOPMENT.md](DEVELOPMENT.md).
+
 ## Quickstart
 
 Spin up a minimal end-to-end run with the built-in scaffolding tools:
@@ -82,103 +82,11 @@ Spin up a minimal end-to-end run with the built-in scaffolding tools:
    poetry run ldb-run --schema billing --profile dev --action SOURCE_ILM --mode EXECUTE
    ```
 
-## Development & Testing
-
-Install the development dependencies with Poetry 2.5.1 or newer:
-
-```bash
-poetry install --with dev
-```
-
-Then execute the tests (optionally collecting coverage):
-
-```bash
-poetry run pytest -q
-poetry run coverage run -m pytest -q && poetry run coverage report
-```
-
-Install the Git hook so Ruff, mypy, and pytest run automatically on commits:
-
-```bash
-poetry run pre-commit install
-# or, if you are using the active Python environment directly:
-python -m pre_commit install
-```
-
-You can lint/test everything locally without committing via:
-
-```bash
-poetry run pre-commit run --all-files
-```
-
-Pull requests and pushes to `development` or `main` run the same quality gates
-in GitHub Actions, then build and validate the distributions and install the
-wheel in a clean environment.
-
-Changes that affect the Oracle adapter, runner, or integration suite also run a
-separate Oracle integration workflow. It starts an Oracle Database Free
-container inside the Linux runner, uses only credentials local to that job, and
-destroys the database when the job finishes. The workflow does not connect to a
-shared or production database. These tests exercise LimitsDb adapter behavior
-against a real Oracle instance; they do not attempt to test Oracle itself. The
-end-to-end happy path invokes the installed `ldb-impl` and `ldb-run` entry
-points, provisions separate source and history schemas, and processes related
-order/header and line/detail tables through both `SOURCE_ILM` and `HISTORY_ILM`.
-An independent table exercises a second worker concurrently. The test verifies
-dependency-safe movement and purge results, multiple worker processes, and the
-resulting audit records. It then repeats both actions for the same process date
-and verifies that completed tables launch no workers or duplicate audit results.
-The same job measures branch and line coverage across the local and Oracle E2E
-suites, including the CLI subprocesses and multiprocessing workers. Its GitHub
-Actions summary shows the combined result, and the complete text, XML, HTML,
-and Coverage data files are retained as a workflow artifact for 14 days. No
-minimum coverage percentage is enforced until a combined baseline is verified.
-
-The integration tests are excluded from the default test command. To run them
-you need a dedicated Oracle instance (never a shared or production database):
-the suite creates and drops objects whose names begin with `LDBT_`, and the
-E2E tests provision and tear down entire schemas.
-
-Set three environment variables that point to that instance, then run:
-
-**Linux / macOS**
-
-```bash
-export LDB_ORACLE_TEST_DSN=host:1521/SERVICE
-export LDB_ORACLE_TEST_USER=system
-export LDB_ORACLE_TEST_PASSWORD=<test-only-password>
-poetry run pytest -m oracle_integration
-```
-
-Or inline for a single run:
-
-```bash
-LDB_ORACLE_TEST_DSN=host:1521/SERVICE \
-LDB_ORACLE_TEST_USER=system \
-LDB_ORACLE_TEST_PASSWORD=<test-only-password> \
-poetry run pytest -m oracle_integration
-```
-
-**Windows (PowerShell)**
-
-```powershell
-$env:LDB_ORACLE_TEST_DSN      = "host:1521/SERVICE"
-$env:LDB_ORACLE_TEST_USER     = "system"
-$env:LDB_ORACLE_TEST_PASSWORD = "<test-only-password>"
-poetry run pytest -m oracle_integration
-```
-
-If any variable is missing, the tests are skipped rather than failing.
-
-> **Oracle 12.1 compatibility** — Oracle 12.1 limits identifiers to 30
-> characters. The test suite generates passwords within that limit.
-> Oracle 12.2+ raised the limit to 128 characters and is not affected.
-
 ## CLI Commands
 
 After `poetry install`, the following executables are available:
 
-- `ldb-init` — scaffold per-schema configuration files
+- `ldb-init` — scaffold configuration files for a named configuration set
 - `ldb-crypt` — encrypt cleartext secrets in place
 - `ldb-impl` — verify and create DB control schemas and objects
 - `ldb-run` — main ILM runner
@@ -194,14 +102,32 @@ poetry run ldb-run --help
 
 ## Initialize Configuration
 
-Create the schema/profile structure and template files:
+Scaffold the configuration files for a named configuration set and optional environment:
 
 ```bash
-poetry run ldb-init --schema <SCHEMA> --profile <PROFILE>
+poetry run ldb-init --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>] [--overwrite] [--no-examples]
 # examples:
+# poetry run ldb-init --schema billing
 # poetry run ldb-init --schema billing --profile prod
 # poetry run ldb-init --schema billing --profile dev --config-dir /etc/limitsdb
+# poetry run ldb-init --schema billing --profile dev --no-examples
 ```
+
+`--schema` is a name you choose to group all configuration files for one
+system or application (e.g., `billing`, `crm`). It is not a database schema;
+it is simply the folder name under which the files live.
+
+`--profile` is optional. Use it when the same configuration set targets
+multiple environments (e.g., `dev`, `prod`). When supplied, the profile name
+becomes part of every file name as `.<PROFILE>`. When omitted, file names carry
+no extra suffix.
+
+`--overwrite` replaces existing files. Without it, any file that already exists
+is left unchanged; only missing files are created.
+
+`--no-examples` skips copying the ILM example file (`ilm[.<PROFILE>].example.yml`).
+
+`--config-dir` scaffolds under a custom root instead of `~/.config/LimitsDb`.
 
 Generated files (default root is `~/.config/LimitsDb`):
 
@@ -209,23 +135,19 @@ Generated files (default root is `~/.config/LimitsDb`):
 ~/.config/LimitsDb/
 └─ schemas/
    └─ <SCHEMA>/
-      ├─ config.<PROFILE>.yml        # commented defaults + help (from the Config model)
-      ├─ ilm.<PROFILE>.yml           # empty list (you fill it)
-      ├─ ilm.<PROFILE>.example.yml   # example copied verbatim from the package
-      └─ secrets.<PROFILE>.json      # secret fields with empty values
+      ├─ config[.<PROFILE>].yml        # commented defaults + help (from the Config model)
+      ├─ ilm[.<PROFILE>].yml           # empty list (you fill it)
+      ├─ ilm[.<PROFILE>].example.yml   # example copied verbatim from the package
+      └─ secrets[.<PROFILE>].json      # secret fields with empty values
 ```
-
-Note: the profile parameter is optional. If omitted, the `.<PROFILE>` filename part is omitted as well.
-
-Options:
-
-- `--overwrite` — replace existing files
-- `--no-examples` — skip copying the ILM example
-- `--config-dir` — scaffold under a custom root instead of `~/.config/LimitsDb`
 
 ## Secrets & Encryption
 
-1. Edit `secrets.<PROFILE>.json` and set plaintext credentials, e.g.:
+```bash
+poetry run ldb-crypt --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>]
+```
+
+1. Edit `secrets[.<PROFILE>].json` and fill in the credentials:
 
 ```json
 {
@@ -239,27 +161,49 @@ Options:
 2. Encrypt in place:
 
 ```bash
-poetry run ldb-crypt --schema <SCHEMA> --profile <PROFILE>
+poetry run ldb-crypt --schema billing --profile prod
 ```
 
-LimitsDb derives the list of secrets from the configuration model. Currently, `secret_keys_from_config()` produces the following keys, which must live in `secrets.<PROFILE>.json` and are always stored encrypted:
+`ldb-crypt` creates or reuses a local encryption key and replaces every
+non-empty plaintext value in `secrets[.<PROFILE>].json` with an
+`enc:v1:aes256gcm:…` token. Already-encrypted values are left unchanged.
+If this step is skipped, `ldb-run` will reject the plaintext secrets by default.
 
-- `source_password`
-- `history_password`
-- `admin_source_password`
-- `admin_history_password`
+The encryption key is stored in your user context and protected by OS
+permissions. Never version or copy the key file.
 
-The tool ensures an encryption key exists locally and replaces any non-empty plaintext with `enc:v1:aes256gcm:...`.
-If you forget this step, the main loader will reject plaintext secrets by default.
+## Bootstrap Database Objects
 
-Note: the local key is created in your user context and must be protected by OS permissions.
+```bash
+poetry run ldb-impl --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>] [--config-file <YAML>] [--set key=value] [--log-level LEVEL]
+```
+
+`ldb-impl` creates the database objects that LimitsDb needs to operate. Run it
+once before the first `ldb-run`, and again whenever a new environment is
+provisioned. All operations are idempotent: existing objects are left unchanged
+and only missing ones are created.
+
+What it creates in both source and history environments:
+
+- **Role** — grants the application user the privileges required by LimitsDb.
+- **User** — the application user with its default tablespace and role.
+- **Control tables** — `LDB_CTL` (execution state per table) and `LDB_LOG`
+  (audit log of each run).
+- **Sequence** — `LDB_LOG_ID` for audit log identifiers.
+- **Database link** — bidirectional links between source and history so the ILM
+  engine can reach both environments from either side.
+
+`ldb-impl` requires all four credential pairs to be present and encrypted in
+`secrets[.<PROFILE>].json`: `source_password`, `history_password`,
+`admin_source_password`, and `admin_history_password`. Run `ldb-crypt` first.
 
 ## Run ILM
 
 ```bash
-poetry run ldb-run --schema <SCHEMA> --profile <PROFILE> --action SOURCE_ILM
-# or
-poetry run ldb-run --schema <SCHEMA> --profile <PROFILE> --action HISTORY_ILM
+poetry run ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM [options]
+# examples:
+# poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM
+# poetry run ldb-run --schema billing --action HISTORY_ILM
 ```
 
 Common overrides:
@@ -297,8 +241,8 @@ poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EX
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
 | `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
-| `schema`                 | Schema name (folder under `schemas/`).                                                                                                                          | Required on CLI; no persisted default.                                               |
-| `profile`                | Profile name (e.g., `dev`, `prod`).                                                                                                                             | Optional; default `null`.                                                            |
+| `schema`                 | Configuration set name: identifies a system or application (e.g., `billing`). Not a database schema — it is the folder that groups all configuration files for one target. | Required on CLI; no persisted default. |
+| `profile`                | Environment name (e.g., `dev`, `prod`). Differentiates configuration files for different environments within the same configuration set. | Optional; default `null`. |
 | `ilm_config_file`        | YAML file with tables (bypass DB discovery).                                                                                                                    | Optional; default `null`.                                                            |
 | `source_dsn`             | Source DSN / connection descriptor.                                                                                                                             | Default empty string.                                                                |
 | `source_username`        | Source username.                                                                                                                                                | Default empty string.                                                                |
@@ -315,41 +259,41 @@ poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EX
 
 | Parameter                | CLI flag                   | Environment variable         | YAML key                                         |
 | ------------------------ | -------------------------- | ---------------------------- | ------------------------------------------------ |
-| `action`                 | `--action`                 | `LDB_ACTION`                 | `config.<PROFILE>.yml: action`                   |
-| `mode`                   | `--mode`                   | `LDB_MODE`                   | `config.<PROFILE>.yml: mode`                     |
-| `chunk_size`             | `--chunk-size`             | `LDB_CHUNK_SIZE`             | `config.<PROFILE>.yml: chunk_size`               |
-| `use_added_columns`      | —                          | —                            | `config.<PROFILE>.yml: use_added_columns`        |
-| `add_ldb_columns`        | —                          | —                            | `config.<PROFILE>.yml: add_ldb_columns`          |
-| `parallel_max`           | `--parallel-max`           | `LDB_PARALLEL_MAX`           | `config.<PROFILE>.yml: parallel_max`             |
-| `db_engine`              | `--db-engine`              | `LDB_DB_ENGINE`              | `config.<PROFILE>.yml: db_engine`                |
-| `log_level`              | `--log-level`              | `LDB_LOG_LEVEL`              | `config.<PROFILE>.yml: log_level`                |
-| `schema`                 | `--schema`                 | `LDB_SCHEMA`                 | CLI only (not stored).                           |
-| `profile`                | `--profile`                | `LDB_PROFILE`                | CLI only (not stored).                           |
-| `ilm_config_file`        | `--ilm-config-file`        | `LDB_ILM_CONFIG_FILE`        | CLI only (not stored).                           |
-| `source_dsn`             | `--source-dsn`             | `LDB_SOURCE_DSN`             | `config.<PROFILE>.yml: source_dsn`               |
-| `source_username`        | `--source-username`        | `LDB_SOURCE_USERNAME`        | `config.<PROFILE>.yml: source_username`          |
-| `source_password`        | —                          | —                            | `secrets.<PROFILE>.json: source_password`        |
-| `history_dsn`            | `--history-dsn`            | `LDB_HISTORY_DSN`            | `config.<PROFILE>.yml: history_dsn`              |
-| `history_username`       | `--history-username`       | `LDB_HISTORY_USERNAME`       | `config.<PROFILE>.yml: history_username`         |
-| `history_password`       | —                          | —                            | `secrets.<PROFILE>.json: history_password`       |
-| `admin_source_username`  | `--admin-source-username`  | `LDB_ADMIN_SOURCE_USERNAME`  | `config.<PROFILE>.yml: admin_source_username`    |
-| `admin_source_password`  | —                          | —                            | `secrets.<PROFILE>.json: admin_source_password`  |
-| `admin_history_username` | `--admin-history-username` | `LDB_ADMIN_HISTORY_USERNAME` | `config.<PROFILE>.yml: admin_history_username`   |
-| `admin_history_password` | —                          | —                            | `secrets.<PROFILE>.json: admin_history_password` |
+| `action`                 | `--action`                 | `LDB_ACTION`                 | `config[.<PROFILE>].yml: action`                   |
+| `mode`                   | `--mode`                   | `LDB_MODE`                   | `config[.<PROFILE>].yml: mode`                     |
+| `chunk_size`             | `--chunk-size`             | `LDB_CHUNK_SIZE`             | `config[.<PROFILE>].yml: chunk_size`               |
+| `use_added_columns`      | —                          | —                            | `config[.<PROFILE>].yml: use_added_columns`        |
+| `add_ldb_columns`        | —                          | —                            | `config[.<PROFILE>].yml: add_ldb_columns`          |
+| `parallel_max`           | `--parallel-max`           | `LDB_PARALLEL_MAX`           | `config[.<PROFILE>].yml: parallel_max`             |
+| `db_engine`              | `--db-engine`              | `LDB_DB_ENGINE`              | `config[.<PROFILE>].yml: db_engine`                |
+| `log_level`              | `--log-level`              | `LDB_LOG_LEVEL`              | `config[.<PROFILE>].yml: log_level`                |
+| `schema`                 | `--schema`                 | `LDB_SCHEMA`                 | CLI only (not stored).                             |
+| `profile`                | `--profile`                | `LDB_PROFILE`                | CLI only (not stored).                             |
+| `ilm_config_file`        | `--ilm-config-file`        | `LDB_ILM_CONFIG_FILE`        | CLI only (not stored).                             |
+| `source_dsn`             | `--source-dsn`             | `LDB_SOURCE_DSN`             | `config[.<PROFILE>].yml: source_dsn`               |
+| `source_username`        | `--source-username`        | `LDB_SOURCE_USERNAME`        | `config[.<PROFILE>].yml: source_username`          |
+| `source_password`        | —                          | —                            | `secrets[.<PROFILE>].json: source_password`        |
+| `history_dsn`            | `--history-dsn`            | `LDB_HISTORY_DSN`            | `config[.<PROFILE>].yml: history_dsn`              |
+| `history_username`       | `--history-username`       | `LDB_HISTORY_USERNAME`       | `config[.<PROFILE>].yml: history_username`         |
+| `history_password`       | —                          | —                            | `secrets[.<PROFILE>].json: history_password`       |
+| `admin_source_username`  | `--admin-source-username`  | `LDB_ADMIN_SOURCE_USERNAME`  | `config[.<PROFILE>].yml: admin_source_username`    |
+| `admin_source_password`  | —                          | —                            | `secrets[.<PROFILE>].json: admin_source_password`  |
+| `admin_history_username` | `--admin-history-username` | `LDB_ADMIN_HISTORY_USERNAME` | `config[.<PROFILE>].yml: admin_history_username`   |
+| `admin_history_password` | —                          | —                            | `secrets[.<PROFILE>].json: admin_history_password` |
 
-Builder-only flags (`--config-dir`, `--config-file`, `--set`) control how overlays are discovered and do not map to configuration keys.
+Builder-only flags (`--config-dir`, `--config-file`, `--set`) control how overlays are discovered and have no equivalent entry in the configuration files.
 
 ## ILM Rule Semantics
 
-Each entry in `ilm.<PROFILE>.yml` merges table-level attributes with one or more rule conditions defined under `conds`. When `conds` is omitted, LimitsDb assumes a single active rule so the table remains eligible for processing.
+Each entry in `ilm[.<PROFILE>].yml` merges table-level attributes with one or more rule conditions defined under `conds`. When `conds` is omitted, LimitsDb assumes a single active rule so the table remains eligible for processing.
 
 - **Activation:** A condition runs only when `is_active: true`. Deactivating the sole condition for a table effectively removes that table from the run.
 - **Retention windows:** `retain_months_source` is required whenever `purge_date_expr` is present. `retain_months_history` extends the history window but also depends on defining the source retention. During `HISTORY_ILM` runs, the engine sums source and history months to determine the cut-off date.
 - **Date expressions:** `purge_date_expr` identifies the date column (or expression) that anchors retention. Prefix column references with `@` (for example, `"@DSP_DATE"`); the runner swaps the prefix for the proper table alias at execution time.
 - **Additional filters:** Add optional filters through `additional_filter_expr` (source runs) and `history_addtl_filter_expr` (history runs). Both accept the same `@column` syntax, and the history expression falls back to the source expression when omitted.
 - **Referencing tables:** Use `referencing_tables` to pull parent conditions into child tables. List entries as `<TABLE> <ALIAS>` (optionally `<OWNER>.<TABLE> <ALIAS>`) and supply matching `join_expr` fragments. The runner inherits active conditions from each referenced table and rewrites the join fragments—`@` becomes `inner` joins by default or `left outer` joins when `source_orphan_purge: true` to find orphans.
-- **Historical predicate snapshot:** With `use_added_columns` enabled, every archived row preserves the values needed to reevaluate all its predicates in history, including values sourced from related tables. Distinct cut-off dates use helper columns such as `ldb_date_<suffix>`; that suffix differentiates stored dates and is not a SQL table alias. Predicates that share a date reuse its helper column while retaining their own filters and retention windows. Other columns sourced from related tables are materialized as `<column>_<table_alias>`; in this separate convention the suffix is the SQL alias and disambiguates the column's origin.
-- **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to archive source rows whose referenced parent is absent. The source query uses `left outer` joins and treats the row as an orphan when any comma-separated check column is `NULL`. `referencing_tables`, `join_expr`, `orphan_check_column`, `use_added_columns: true`, and a positive historical retention are required. Orphans follow the table's normal source-to-history flow rather than being deleted directly. LimitsDb snapshots this state in `LDB_IS_ORPHAN`; when a related retention-date expression evaluates to `NULL`, it stores the process date in its `LDB_DATE_<suffix>` snapshot. `HISTORY_ILM` can therefore apply the configured retention without querying the missing parent or depending on its filters.
+- **Historical predicate snapshot:** With `use_added_columns` enabled, every archived row preserves the values needed to reevaluate all its predicates in history, including values sourced from related tables. Distinct cut-off dates are stored in helper columns such as `ldb_date_<suffix>`. Predicates that share a date reuse the same helper column while retaining their own filters and retention windows. Other values sourced from related tables are materialized as `<column>_<table_alias>`.
+- **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to archive source rows whose referenced parent is absent. The source query uses `left outer` joins and treats the row as an orphan when any comma-separated check column is `NULL`. `referencing_tables`, `join_expr`, `orphan_check_column`, `use_added_columns: true`, and a positive historical retention are required. Orphans follow the table's normal source-to-history flow rather than being deleted directly. LimitsDb snapshots this state in `LDB_IS_ORPHAN` and stores a fallback date so `HISTORY_ILM` can apply the configured retention without accessing the missing parent.
 
 ## Configuration Resolution (Overlay Order)
 
@@ -361,15 +305,14 @@ Lowest → highest priority:
 4. Registered environment variables (`Env("LDB_*")` metadata)
 5. `--<param> value` or `--set key=value`
 
-After overlays, secrets from `secrets.<PROFILE>.json` are loaded and decrypted. If any secret is plaintext and enforcement is enabled (default), the loader raises an error.
+After overlays, secrets from `secrets[.<PROFILE>].json` are loaded and decrypted. If any secret is plaintext and enforcement is enabled (default), the loader raises an error.
 
 Tip: you can redirect both “system” and “user” roots to the same place with `--config-dir`.
 
 ## Configuration Files
 
-### `config.<PROFILE>.yml` (commented defaults + help)
+### `config[.<PROFILE>].yml` (commented defaults + help)
 
-Generated from the Config model (single source of truth).
 Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
@@ -383,27 +326,25 @@ Every key is commented; the default value and short help appear inline. Example:
 # log_level: "INFO"     # Logging level
 ```
 
-`oracle` is the only supported `db_engine`. PostgreSQL remains a future implementation; values such as `postgres`
-are rejected during argument or configuration validation, before any database connection is attempted.
+`oracle` is the only supported `db_engine`. PostgreSQL remains a future implementation; any other value is rejected.
 
-Uncomment and set values as needed. Secrets are not listed here (they live in `secrets.<PROFILE>.json`).
+Uncomment and set values as needed. Secrets are not listed here (they live in `secrets[.<PROFILE>].json`).
 
-### `ilm.<PROFILE>.yml`
+### `ilm[.<PROFILE>].yml`
 
 Empty list scaffolded by `ldb-init`. You define your ILM tables here.
 
-### `ilm.<PROFILE>.example.yml`
+### `ilm[.<PROFILE>].example.yml`
 
 Comprehensive, commented example shipped in the package and copied verbatim by `ldb-init`.
 
-### `secrets.<PROFILE>.json`
+### `secrets[.<PROFILE>].json`
 
 Holds only secret fields (empty by default). Must be encrypted (run `ldb-crypt`) before the main runner will accept them.
 
 ## Environment Variables
 
-Only variables explicitly registered with `Env(...)` in the Config model become overrides. The declared name maps
-directly to its Config field; unregistered `LDB_*` variables are ignored. Examples:
+Only the variables listed in the table above work as overrides; any other `LDB_*` variable is ignored. Examples:
 
 - `LDB_PARALLEL_MAX=8` → `parallel_max: 8`
 - `LDB_LOG_LEVEL=DEBUG` → `log_level: "DEBUG"`
@@ -413,33 +354,10 @@ Booleans accept `true/false`, `1/0`, `on/off` (case-insensitive).
 `use_added_columns` and `add_ldb_columns` are intentionally file-only because changing the historical table shape
 between runs can destabilize history processing. They cannot be overridden through environment variables or `--set`.
 
-## Development
-
-Format, lint, type-check:
-
-```bash
-poetry run ruff format .
-poetry run ruff check .
-poetry run mypy limitsdb
-poetry run pytest
-```
-
-Add dependencies:
-
-```bash
-poetry add <package>
-```
-
-Update dependencies:
-
-```bash
-poetry update
-```
-
 ## Troubleshooting
 
 - Plaintext secret detected  
-  Run `poetry run ldb-crypt --schema <SCHEMA> --profile <PROFILE>`. Or set the value to `""` until you’re ready.
+  Run `poetry run ldb-crypt --schema <SCHEMA> [--profile <PROFILE>]`. Or set the value to `""` until you’re ready.
 
 - Oracle thick mode required  
   Install Oracle Instant Client and configure library paths (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux/macOS).
