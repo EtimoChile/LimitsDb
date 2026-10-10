@@ -22,6 +22,6 @@
 - Use dedicated `LDB_CTL` and `LDB_LOG` tables to track process control metadata and provide end-to-end traceability.
 - Process independent tables in parallel using a configurable worker pool (`--parallel-max` / `LDB_PARALLEL_MAX`, default 10); tables with dependencies are sequenced automatically across execution stages.
 - Basic CLI module (`ldb-init`, `ldb-crypt`, `ldb-run`, `ldb-impl`).
-- Encrypt database credentials at rest using AES-256-GCM; `ldb-crypt` encrypts `secrets.json` in place using a per-user key stored in `~/.limitsdb/ldb.key` (or `LDB_MASTER_KEY`); plaintext secrets are rejected at runtime by default.
+- Encrypt database credentials at rest using AES-256-GCM; `ldb-run` and `ldb-impl` automatically encrypt any plaintext secrets in `secrets.json` at startup before the first ILM run; `ldb-crypt` encrypts them in advance without executing ILM; the per-user key is stored in `~/.limitsdb/ldb.key` (or `LDB_MASTER_KEY`).
 - Centralized Config definition with defaults, YAML configurations, CLI, and environment variables.
 - Improved logger to include process and thread names.
