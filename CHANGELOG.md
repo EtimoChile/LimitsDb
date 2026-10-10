@@ -24,7 +24,3 @@
 - Basic CLI module (`ldb-init`, `ldb-crypt`, `ldb-run`).
 - Centralized Config definition with defaults, YAML configurations, CLI, and environment variables.
 - Improved logger to include process and thread names.
-
-## [0.4.0] - 2025-10-30
-
-- First public open-source release of LimitsDb (Apache 2.0).
