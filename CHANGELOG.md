@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-10
+
 - Archive source orphans selected by `left outer` joins and `orphan_check_column IS NULL`, snapshotting `LDB_IS_ORPHAN` and the process date whenever a related retention-date expression is null so historical retention remains evaluable.
 - Reject PostgreSQL as a configured database engine until its adapter exists; Oracle is the sole accepted engine in configuration, CLI help, and engine loading.
 - Make `Env(...)` metadata authoritative for environment overrides, normalize the ILM file variable to `LDB_ILM_CONFIG_FILE`, and keep history-column shape settings file-only by rejecting environment and `--set` overrides.
