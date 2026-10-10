@@ -18,7 +18,7 @@
 - Add chained domain errors for configuration, secrets, validation, database connections, and execution; fail closed on unreadable secret files; and make worker failures recoverable by the coordinator.
 - Replace YAPF, Flake8, and Pyright with a unified Ruff formatter/linter profile, retain strict mypy as the type-checking authority, and add reproducible pre-commit and CI quality gates.
 - **Breaking:** rename the project and Python package from `TerminusDB` / `terminusdb` to `LimitsDb` / `limitsdb`, and replace the `tdb` / `TDB` prefix with `ldb` / `LDB` across CLI commands, environment variables, local paths, configuration keys, generated columns, and Oracle control objects.
-- Dynamic table configuration from `LDB_CONF`
+- **Breaking:** retire `LDB_CNF` and `LDB_CNF_ID`; ILM policies are now loaded exclusively from configuration files (`LDB_ILM_CONFIG_FILE` or the default path).
 - Use dedicated `LDB_CTL` and `LDB_LOG` tables to track process control metadata and provide end-to-end traceability.
 - Support for parallel execution on Oracle.
 - Basic CLI module (`ldb-init`, `ldb-crypt`, `ldb-run`).
