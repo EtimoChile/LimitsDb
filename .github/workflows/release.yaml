@@ -41,6 +41,7 @@ jobs:
 
   publish-testpypi:
     needs: build
+    continue-on-error: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -61,7 +62,7 @@ jobs:
           repository-url: https://upload.test.pypi.org/legacy/
 
   publish-pypi:
-    needs: publish-testpypi
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
