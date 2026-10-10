@@ -87,19 +87,20 @@ but does not replace the sources defined in `AGENTS.md`.
   (`contents: read`); the workflow level fixes `permissions: {}` as default
   deny. `.github/CODEOWNERS` requires review from `@etimochile` on all changes.
   Branch protection rules in the GitHub UI remain to be configured (`PEND-014`).
-- The workflow `.github/workflows/oracle-integration.yaml` starts an ephemeral
-  Oracle Free instance in a Linux runner for relevant pull requests and manual
-  runs; it does not run on every `push`. It uses a digest-pinned image and
-  per-job random credentials, masked before exposing them to later steps. Its
-  first real GitHub execution completed successfully: image download in 49
-  seconds, Oracle availability about 28 seconds after startup, 2.393 GiB of
-  memory and 5.4 GiB of disk free when running tests. The expanded suite took
-  4.16 seconds and maintained 5.4 GiB free. The workflow also measures combined
-  line and branch coverage for the local and E2E suites, including CLI
-  subprocesses and workers, and retains text, XML, and HTML reports for 14 days.
-  Run `37689648223` on `faa3209` verified 80 local tests and 6 E2E passing, with
-  81.42% lines, 67.46% branches, and 78% combined; `PEND-013` is resolved and
-  no minimum threshold is enforced yet.
+- Both CI workflows (`quality` and `oracle-integration`) are consolidated into
+  `.github/workflows/quality.yaml` as two sequential jobs. `quality` runs on
+  all triggers; `oracle-integration` depends on `quality` and runs only on
+  `pull_request` and `workflow_dispatch`. Both are required status checks on
+  `development` and `main`. The combined coverage report (local + E2E) is
+  produced by the `oracle-integration` job and retained for 14 days.
+- The release pipeline is in `.github/workflows/release.yaml`: triggered by a
+  version tag (`v*`) on any branch, it builds once and publishes sequentially
+  to TestPyPI then PyPI via Trusted Publisher (OIDC, no stored credentials).
+  Both publish jobs require manual approval through GitHub Environments
+  `testpypi` and `pypi` (required reviewer: `gcantiza`). The repo is public;
+  Trusted Publishers registered on test.pypi.org and pypi.org under
+  `gustavo.cantizano@etimo.cl`; transfer to PyPI org `EtimoChile` pending org
+  approval. `PEND-006` resolved; `DEC-019`.
 - `docs/prompts/test-authoring.md` defines the mandatory test authoring rules:
   tests must be derived from the specification (README, ilm.example.yml, docs/),
   not from the implementation. `AGENTS.md` references it as required reading
