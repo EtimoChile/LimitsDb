@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-10
+
 - Archive source orphans selected by `left outer` joins and `orphan_check_column IS NULL`, snapshotting `LDB_IS_ORPHAN` and the process date whenever a related retention-date expression is null so historical retention remains evaluable.
 - Reject PostgreSQL as a configured database engine until its adapter exists; Oracle is the sole accepted engine in configuration, CLI help, and engine loading.
 - Make `Env(...)` metadata authoritative for environment overrides, normalize the ILM file variable to `LDB_ILM_CONFIG_FILE`, and keep history-column shape settings file-only by rejecting environment and `--set` overrides.
@@ -16,13 +18,10 @@
 - Add chained domain errors for configuration, secrets, validation, database connections, and execution; fail closed on unreadable secret files; and make worker failures recoverable by the coordinator.
 - Replace YAPF, Flake8, and Pyright with a unified Ruff formatter/linter profile, retain strict mypy as the type-checking authority, and add reproducible pre-commit and CI quality gates.
 - **Breaking:** rename the project and Python package from `TerminusDB` / `terminusdb` to `LimitsDb` / `limitsdb`, and replace the `tdb` / `TDB` prefix with `ldb` / `LDB` across CLI commands, environment variables, local paths, configuration keys, generated columns, and Oracle control objects.
-- Dynamic table configuration from `LDB_CONF`
+- **Breaking:** retire `LDB_CNF` and `LDB_CNF_ID`; ILM policies are now loaded exclusively from configuration files (`LDB_ILM_CONFIG_FILE` or the default path).
 - Use dedicated `LDB_CTL` and `LDB_LOG` tables to track process control metadata and provide end-to-end traceability.
-- Support for parallel execution on Oracle.
-- Basic CLI module (`ldb-init`, `ldb-crypt`, `ldb-run`).
+- Process independent tables in parallel using a configurable worker pool (`--parallel-max` / `LDB_PARALLEL_MAX`, default 10); tables with dependencies are sequenced automatically across execution stages.
+- Basic CLI module (`ldb-init`, `ldb-crypt`, `ldb-run`, `ldb-impl`).
+- Encrypt database credentials at rest using AES-256-GCM; `ldb-run` and `ldb-impl` automatically encrypt any plaintext secrets in `secrets.json` at startup before the first ILM run; `ldb-crypt` encrypts them in advance without executing ILM; the per-user key is stored in `~/.limitsdb/ldb.key` (or `LDB_MASTER_KEY`).
 - Centralized Config definition with defaults, YAML configurations, CLI, and environment variables.
 - Improved logger to include process and thread names.
-
-## [0.4.0] - 2025-10-30
-
-- First public open-source release of LimitsDb (Apache 2.0).

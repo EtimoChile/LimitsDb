@@ -122,6 +122,13 @@ documentation. Every publishable change must evaluate whether a version bump and
 `CHANGELOG.md` update are needed; do not perform a release, create tags, or
 publish artifacts without an explicit request.
 
+Before tagging a release version, verify that `CHANGELOG.md` has a dated entry
+for that version whose user-facing lines are derived from `DECISIONS.md` entries
+marked with a `changelog:` field. Each `DEC-NNN` entry that introduces a
+user-visible behavior change should include a `changelog:` line with the text to
+appear in `CHANGELOG.md`. When preparing a release, collect those lines, group
+them under the new version header, and remove any stale or superseded entries.
+
 ## Governance and ownership
 
 Inversiones Etimo SpA maintains the architecture, roadmap, and releases.
