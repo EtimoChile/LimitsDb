@@ -20,7 +20,7 @@
 - **Breaking:** rename the project and Python package from `TerminusDB` / `terminusdb` to `LimitsDb` / `limitsdb`, and replace the `tdb` / `TDB` prefix with `ldb` / `LDB` across CLI commands, environment variables, local paths, configuration keys, generated columns, and Oracle control objects.
 - **Breaking:** retire `LDB_CNF` and `LDB_CNF_ID`; ILM policies are now loaded exclusively from configuration files (`LDB_ILM_CONFIG_FILE` or the default path).
 - Use dedicated `LDB_CTL` and `LDB_LOG` tables to track process control metadata and provide end-to-end traceability.
-- Support for parallel execution on Oracle.
+- Process independent tables in parallel using a configurable worker pool (`--parallel-max` / `LDB_PARALLEL_MAX`, default 10); tables with dependencies are sequenced automatically across execution stages.
 - Basic CLI module (`ldb-init`, `ldb-crypt`, `ldb-run`).
 - Centralized Config definition with defaults, YAML configurations, CLI, and environment variables.
 - Improved logger to include process and thread names.
