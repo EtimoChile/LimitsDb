@@ -168,8 +168,9 @@ poetry run ldb-crypt --schema billing --profile prod
 non-empty plaintext value in `secrets[.<PROFILE>].json` with an
 `enc:v1:aes256gcm:…` token. Already-encrypted values are left unchanged.
 If this step is skipped, `ldb-run` and `ldb-impl` will encrypt any plaintext
-secrets automatically before the first run. `ldb-crypt` is a convenience to
-encrypt them without executing ILM.
+secrets automatically before the first run, provided the secrets file is in the
+default user configuration directory or an explicit `--config-dir` is supplied.
+`ldb-crypt` is a convenience to encrypt them without executing ILM.
 
 The encryption key is stored in your user context and protected by OS
 permissions. Never version or copy the key file.
