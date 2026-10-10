@@ -32,25 +32,36 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
 
 ## Requirements
 
-- **Python**: 3.12+
-- **Poetry**: 1.6+ (install from https://python-poetry.org/docs/#installation)
-- **Database drivers**
-  - **Oracle**: `oracledb` (thin mode works out of the box; for thick mode, install Oracle Instant Client and set PATH/LD_LIBRARY_PATH).
-  - **PostgreSQL**: planned for a future adapter; it is not currently accepted in configuration.
-
-All Python dependencies are defined in `pyproject.toml`. For source installations, they are installed through Poetry.
+- **Python**: 3.12+ — https://www.python.org/downloads/
+- **Oracle**: `oracledb` runs in thin mode (pure Python, no Oracle Instant Client required).
+- **PostgreSQL**: planned for a future adapter; not currently accepted in configuration.
 
 ## Installation
 
-Clone the repository and install dependencies with Poetry:
+### Recommended — pipx (no virtual environment management needed)
 
 ```bash
-git clone https://github.com/etimochile/limitsdb.git
-cd limitsdb
-poetry install
+pip install pipx
+pipx install limitsdb
 ```
 
-For development setup, running tests, and CI details see [DEVELOPMENT.md](DEVELOPMENT.md).
+`pipx` creates and manages the virtual environment automatically. After installation,
+`ldb-run`, `ldb-impl`, `ldb-crypt`, and `ldb-init` are available in your terminal
+on any platform without activation.
+
+### Alternative — pip with a virtual environment
+
+```bash
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS / Linux:
+source .venv/bin/activate
+
+pip install limitsdb
+```
+
+For development setup (cloning the repo, running tests, CI) see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
 
@@ -59,7 +70,7 @@ Spin up a minimal end-to-end run with the built-in scaffolding tools:
 1. **Create config files** for a schema/profile pair:
 
    ```bash
-   poetry run ldb-init --schema billing --profile dev
+   ldb-init --schema billing --profile dev
    ```
 
 2. **Fill in connection details** in `~/.config/LimitsDb/schemas/billing/config.dev.yml` and secrets in `secrets.dev.json`.
@@ -67,37 +78,35 @@ Spin up a minimal end-to-end run with the built-in scaffolding tools:
 3. **Encrypt secrets** in place:
 
    ```bash
-   poetry run ldb-crypt --schema billing --profile dev
+   ldb-crypt --schema billing --profile dev
    ```
 
 4. **Dry-run the ILM plan** (no data changes):
 
    ```bash
-   poetry run ldb-run --schema billing --profile dev --action SOURCE_ILM --mode PREVIEW
+   ldb-run --schema billing --profile dev --action SOURCE_ILM --mode PREVIEW
    ```
 
 5. **Execute for real** once you are satisfied with the plan:
 
    ```bash
-   poetry run ldb-run --schema billing --profile dev --action SOURCE_ILM --mode EXECUTE
+   ldb-run --schema billing --profile dev --action SOURCE_ILM --mode EXECUTE
    ```
 
 ## CLI Commands
 
-After `poetry install`, the following executables are available:
+After installation, the following commands are available directly in your terminal:
 
 - `ldb-init` — scaffold configuration files for a named configuration set
 - `ldb-crypt` — encrypt cleartext secrets in place
 - `ldb-impl` — verify and create DB control schemas and objects
 - `ldb-run` — main ILM runner
 
-From shell:
-
 ```bash
-poetry run ldb-init --help
-poetry run ldb-crypt --help
-poetry run ldb-impl --help
-poetry run ldb-run --help
+ldb-init --help
+ldb-crypt --help
+ldb-impl --help
+ldb-run --help
 ```
 
 ## Initialize Configuration
@@ -105,12 +114,12 @@ poetry run ldb-run --help
 Scaffold the configuration files for a named configuration set and optional environment:
 
 ```bash
-poetry run ldb-init --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>] [--overwrite] [--no-examples]
+ldb-init --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>] [--overwrite] [--no-examples]
 # examples:
-# poetry run ldb-init --schema billing
-# poetry run ldb-init --schema billing --profile prod
-# poetry run ldb-init --schema billing --profile dev --config-dir /etc/limitsdb
-# poetry run ldb-init --schema billing --profile dev --no-examples
+# ldb-init --schema billing
+# ldb-init --schema billing --profile prod
+# ldb-init --schema billing --profile dev --config-dir /etc/limitsdb
+# ldb-init --schema billing --profile dev --no-examples
 ```
 
 `--schema` is a name you choose to group all configuration files for one
@@ -144,7 +153,7 @@ Generated files (default root is `~/.config/LimitsDb`):
 ## Secrets & Encryption
 
 ```bash
-poetry run ldb-crypt --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>]
+ldb-crypt --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>]
 ```
 
 1. Edit `secrets[.<PROFILE>].json` and fill in the credentials:
@@ -161,7 +170,7 @@ poetry run ldb-crypt --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>
 2. Encrypt in place:
 
 ```bash
-poetry run ldb-crypt --schema billing --profile prod
+ldb-crypt --schema billing --profile prod
 ```
 
 `ldb-crypt` creates or reuses a local encryption key and replaces every
@@ -178,7 +187,7 @@ permissions. Never version or copy the key file.
 ## Bootstrap Database Objects
 
 ```bash
-poetry run ldb-impl --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>] [--config-file <YAML>] [--set key=value] [--log-level LEVEL]
+ldb-impl --schema <SCHEMA> [--profile <PROFILE>] [--config-dir <DIR>] [--config-file <YAML>] [--set key=value] [--log-level LEVEL]
 ```
 
 `ldb-impl` creates the database objects that LimitsDb needs to operate. Run it
@@ -208,10 +217,10 @@ What it creates in both source and history environments:
 ## Run ILM
 
 ```bash
-poetry run ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM [options]
+ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM [options]
 # examples:
-# poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM
-# poetry run ldb-run --schema billing --action HISTORY_ILM
+# ldb-run --schema billing --profile prod --action SOURCE_ILM
+# ldb-run --schema billing --action HISTORY_ILM
 ```
 
 Common overrides:
@@ -231,10 +240,10 @@ Examples:
 
 ```bash
 # Dry-run with verbose logging
-poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode PREVIEW --log-level DEBUG
+ldb-run --schema billing --profile prod --action SOURCE_ILM --mode PREVIEW --log-level DEBUG
 
 # Apply quick overrides without editing files
-poetry run ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set chunk_size=200000 --set parallel_max=8
+ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set chunk_size=200000 --set parallel_max=8
 ```
 
 ### Admin credentials in ldb-run
@@ -377,7 +386,7 @@ between runs can destabilize history processing. They cannot be overridden throu
 ## Troubleshooting
 
 - Plaintext secret detected  
-  Run `poetry run ldb-crypt --schema <SCHEMA> [--profile <PROFILE>]`. Or set the value to `""` until you’re ready.
+  Run `ldb-crypt --schema <SCHEMA> [--profile <PROFILE>]`. Or set the value to `""` until you’re ready.
 
 - Oracle thick mode required  
   Install Oracle Instant Client and configure library paths (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux/macOS).

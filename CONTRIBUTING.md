@@ -55,9 +55,41 @@ Small, focused pull requests are preferred.
 
 ## Development Setup
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for setup instructions, how to run tests,
-and CI details. Before opening a pull request, run:
+### Prerequisites
+
+- Python 3.12+
+- [Poetry 1.6+](https://python-poetry.org/docs/#installation)
+
+### Clone and install
 
 ```bash
+git clone https://github.com/EtimoChile/LimitsDb.git
+cd LimitsDb
+poetry install
+```
+
+### Run the quality suite
+
+```bash
+poetry run pytest
+poetry run mypy limitsdb
+poetry run ruff check .
+poetry run ruff format --check .
 poetry run pre-commit run --all-files
+```
+
+Before opening a pull request, all checks must pass. The CI pipeline runs the
+same suite automatically on every push to `development` and `main`.
+
+### Oracle integration tests
+
+End-to-end tests require a running Oracle instance. They are run automatically
+in CI via an ephemeral Oracle Database Free container. To run them locally,
+set the following environment variables and pass the `e2e` marker:
+
+```bash
+export LDB_ORACLE_TEST_DSN=localhost:1521/FREEPDB1
+export LDB_ORACLE_TEST_USER=system
+export LDB_ORACLE_TEST_PASSWORD=<password>
+poetry run pytest -m e2e
 ```
