@@ -61,6 +61,52 @@ source .venv/bin/activate
 pip install limitsdb
 ```
 
+### Air-gapped or internet-restricted servers
+
+For production database servers without internet access (common in enterprise Oracle
+environments on Linux, AIX, or Solaris), download the packages on a machine that
+does have access and transfer them to the target server.
+
+**Step 1 — Download on a connected machine**
+
+If the target server is Linux x86_64:
+
+```bash
+pip download limitsdb \
+  --dest ./limitsdb-bundle \
+  --platform linux_x86_64 \
+  --python-version 312 \
+  --only-binary=:all:
+```
+
+For the same platform as the current machine (Windows or macOS build host
+copying to an identical Linux target, omit `--platform` and `--python-version`):
+
+```bash
+pip download limitsdb --dest ./limitsdb-bundle
+```
+
+**Step 2 — Transfer to the target server**
+
+```bash
+scp -r ./limitsdb-bundle user@server:/opt/limitsdb-bundle
+```
+
+**Step 3 — Install on the target server (no internet required)**
+
+```bash
+python3 -m venv /opt/limitsdb-venv
+source /opt/limitsdb-venv/bin/activate
+pip install --no-index --find-links /opt/limitsdb-bundle limitsdb
+ldb-run --help
+```
+
+> **Note for AIX and Solaris**: `oracledb` may not have a prebuilt wheel for your
+> platform. If `pip download --only-binary=:all:` finds nothing, the package must
+> be compiled from source on the target, which requires Python development headers
+> and a C compiler (`gcc` or `xlc`). Contact your system administrator before
+> proceeding.
+
 For development setup (cloning the repo, running tests, CI) see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
