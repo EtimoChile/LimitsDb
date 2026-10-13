@@ -1450,6 +1450,144 @@ def test_failed_history_ddl_goes_to_pending_file_and_run_exits_1_after_trying_al
     assert capsys.readouterr().out == ""
 
 
+def _make_tables_config(*table_names: str) -> ldb_runner.TablesConfig:  # type: ignore[return-value]
+    """Return a TablesConfig with one active entry per table name."""
+    config: dict = {}
+    for name in table_names:
+        base = _make_tables_config_with_one_table()[("SRC", "T1")]
+        row = {**base["conds"][0], "table_name": name}
+        config[("SRC", name)] = {"conds": [row], "referencing_tables": [], "skip": False}
+    return config  # type: ignore[return-value]
+
+
+_MULTILINE_DDL = """ALTER TABLE HIST.{table} ADD (
+    C1 NUMBER
+)"""
+
+
+class _PerTableDdlEngine(_RuntimeDdlEngine):
+    """Engine double whose delta depends on the table being inspected."""
+
+    def __init__(self, failing: dict[str, str] | None = None) -> None:
+        super().__init__([], failing)
+
+    def generate_table_structure_script(self, conn, table, table_cnf):
+        return [_MULTILINE_DDL.format(table=table.name)]
+
+
+def test_failed_ddl_from_several_tables_is_collected_in_one_pending_file_in_order(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — any DDL statement that
+    # fails is written to the pending file; statements keep their order and form, and
+    # one run produces one file regardless of how many tables had failures.
+    # Given: two tables whose DDL is rejected
+    first = _MULTILINE_DDL.format(table="T1")
+    second = _MULTILINE_DDL.format(table="T2")
+    engine = _PerTableDdlEngine(failing={first: "ORA-01031: insufficient privileges", second: "ORA-00942: no table"})
+    pending_dir = tmp_path / "pending"
+
+    # When
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+            engine,  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config("T1", "T2"),
+        )
+
+    # Then: exit 1 and one file holding both statements, complete and in order
+    assert exc_info.value.code == 1
+    files = list(pending_dir.glob("*.sql"))
+    assert len(files) == 1
+    content = files[0].read_text(encoding="utf-8")
+    assert f"{first};" in content and f"{second};" in content
+    assert content.index(first) < content.index(second)
+    assert "-- Failed with: ORA-01031" in content and "-- Failed with: ORA-00942" in content
+
+
+def test_all_failed_history_ddl_statements_are_written_when_every_statement_fails(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when no statement can be
+    # applied the file contains every statement and ldb-run exits with code 1.
+    # Given: a delta where Oracle rejects every statement
+    statements = ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)", "ALTER TABLE HIST.T1 ADD (C2 NUMBER)"]
+    engine = _RuntimeDdlEngine(statements, failing={st: "ORA-01031: insufficient privileges" for st in statements})
+    pending_dir = tmp_path / "pending"
+
+    # When
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+            engine,  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+        )
+
+    # Then
+    assert exc_info.value.code == 1
+    (pending_file,) = pending_dir.glob("*.sql")
+    content = pending_file.read_text(encoding="utf-8")
+    assert all(f"{statement};" in content for statement in statements)
+
+
+def test_history_ddl_with_admin_credentials_is_applied_by_admin_and_leaves_no_pending_file(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — with admin credentials and
+    # required DDL, the admin connection applies the changes; the pending-DDL file is only
+    # for runs without admin credentials.
+    # Given: admin history credentials and a one-statement delta
+    admin_applied = []
+
+    class AdminEngine(_RuntimeDdlEngine):
+        def get_connection(self, config, *, admin=False, env=None):
+            return SimpleNamespace(admin=admin, env=env)
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            admin_applied.append((conn.admin, conn.env, table.name))
+
+        def execute_ddl_statements(self, conn, statements):
+            raise AssertionError("pending-file path must not run when admin credentials exist")
+
+    pending_dir = tmp_path / "pending"
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_with_history_admin(ddl_pending_dir=str(pending_dir)),
+        AdminEngine(["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]),  # type: ignore[arg-type]
+        SimpleNamespace(admin=True, env=None),
+        _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+    )
+
+    # Then
+    assert admin_applied == [(True, "HISTORY", "T1")]
+    assert not pending_dir.exists()
+
+
+def test_run_exits_1_when_history_cannot_be_inspected_and_admin_credentials_are_absent(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin credentials,
+    # if the history schema cannot be inspected, ldb-run exits with code 1 and applies no
+    # DDL; it never runs ILM against a history schema in an unknown state.
+    # Given: a runtime history connection that fails
+    class FailingEngine(_RuntimeDdlEngine):
+        def get_connection(self, config, *, admin=False, env=None):
+            if env == "HISTORY":
+                raise ConfigurationError("history database unreachable")
+            return SimpleNamespace(admin=admin, env=env)
+
+        def execute_ddl_statements(self, conn, statements):
+            raise AssertionError("no DDL may run when the state is unknown")
+
+    pending_dir = tmp_path / "pending"
+
+    # When / Then
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+            FailingEngine([]),  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+        )
+    assert exc_info.value.code == 1
+    assert not pending_dir.exists()
+
+
 def test_no_output_and_no_admin_conn_when_tables_up_to_date_without_admin_credentials(
     capsys: pytest.CaptureFixture,
 ):
@@ -1495,3 +1633,36 @@ def test_no_output_and_no_admin_conn_when_tables_up_to_date_without_admin_creden
     # Then: no DDL script is printed; execution reaches this point without error
     out = capsys.readouterr().out
     assert out == ""
+
+
+def test_run_exits_1_and_logs_failed_statements_when_pending_file_cannot_be_written(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — if the pending file cannot
+    # be written, ldb-run logs the error with the failed statements and exits with code 1.
+    # Given: ddl_pending_dir points below a regular file, so it cannot be created
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    engine = _RuntimeDdlEngine([statement], failing={statement: "ORA-01031: insufficient privileges"})
+    errors: list[str] = []
+
+    class _RecordingLogger:
+        def error(self, msg, *args):
+            errors.append(msg % args)
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(ldb_runner, "logger", _RecordingLogger())
+
+    # When / Then
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(blocker / "sub")),
+            engine,  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+        )
+    assert exc_info.value.code == 1
+    assert any(statement in message and "could not be written" in message for message in errors)

@@ -1367,3 +1367,188 @@ def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
             _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
         for role in (source_role, history_role):
             _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+
+def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run(oracle_connection: oracledb.Connection):
+    # Spec: README § Run ILM > Admin credentials in ldb-run — a DDL statement that fails
+    # is reported with its Oracle error and the remaining statements are still attempted
+    test_table = "LDBT_DDLX_TABLE"
+
+    # Given: a table plus a batch whose first statement targets a missing table
+    _drop_table_if_present(oracle_connection, test_table)
+    cursor = oracle_connection.cursor()
+    try:
+        cursor.execute(f"CREATE TABLE {test_table} (id NUMBER(10))")
+    finally:
+        cursor.close()
+    failing = "ALTER TABLE LDBT_DDLX_MISSING ADD (c1 NUMBER)"
+    valid = f"ALTER TABLE {test_table} ADD (c2 NUMBER)"
+
+    try:
+        # When: the batch is executed
+        failures = OracleEngine.execute_ddl_statements(oracle_connection, [failing, valid])
+
+        # Then: only the first statement is reported (with ORA-00942) and the second was applied
+        assert [statement for statement, _ in failures] == [failing]
+        assert "ORA-00942" in failures[0][1]
+        assert "C2" in _fetch_column_names(oracle_connection, test_table)
+    finally:
+        _drop_table_if_present(oracle_connection, test_table)
+
+
+def _write_ddl_pending_e2e_configuration(root: Path, *, with_history_admin: bool, **credentials: str) -> None:
+    schema_dir = root / "schemas" / "ddl-e2e"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "db_engine: oracle",
+        f"source_dsn: {json.dumps(credentials['dsn'])}",
+        f"source_username: {credentials['source_user']}",
+        f"history_dsn: {json.dumps(credentials['dsn'])}",
+        f"history_username: {credentials['history_user']}",
+        f"admin_source_username: {credentials['admin_user']}",
+        "source_default_tablespace: USERS",
+        "history_default_tablespace: USERS",
+        "source_to_history_dblink_name: LDBT_DDL_HIST",
+        "history_to_source_dblink_name: LDBT_DDL_SRC",
+        "source_role_name: LDBT_DDL_SOURCE_ROLE",
+        "history_role_name: LDBT_DDL_HISTORY_ROLE",
+        "parallel_max: 1",
+        "chunk_size: 10",
+    ]
+    secrets_data = {
+        "source_password": credentials["source_password"],
+        "history_password": credentials["history_password"],
+        "admin_source_password": credentials["admin_password"],
+    }
+    if with_history_admin:
+        lines.append(f"admin_history_username: {credentials['admin_user']}")
+        secrets_data["admin_history_password"] = credentials["admin_password"]
+    (schema_dir / "config.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (schema_dir / "secrets.json").write_text(json.dumps(secrets_data), encoding="utf-8")
+    (schema_dir / "ilm.yml").write_text(
+        """tables:
+  - source_owner: LDBT_DDL_SOURCE
+    history_owner: LDBT_DDL_HISTORY
+    table_name: ILM_DDLTBL
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true
+        retain_months_source: 2
+        retain_months_history: 3
+        purge_date_expr: "@CREATED_AT"
+""",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("history_table_locked", [False, True], ids=["owner-applies-ddl", "failed-ddl-goes-to-file"])
+def test_ldb_run_without_history_admin_applies_ddl_or_writes_pending_file(
+    oracle_connection: oracledb.Connection, tmp_path: Path, history_table_locked: bool
+):
+    # Spec: README § Run ILM > Admin credentials in ldb-run — without admin history
+    # credentials ldb-run applies the history DDL with its runtime connection (the history
+    # user owns the table); a statement that fails is written to ddl_pending_dir as plain
+    # SQL, the other statements are still tried, and the run exits with code 1
+    source_user = "LDBT_DDL_SOURCE"
+    history_user = "LDBT_DDL_HISTORY"
+    roles = ("LDBT_DDL_SOURCE_ROLE", "LDBT_DDL_HISTORY_ROLE")
+
+    for user in (source_user, history_user):
+        _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+    for role in roles:
+        _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+    credentials = {
+        "dsn": os.environ["LDB_ORACLE_TEST_DSN"],
+        "admin_user": os.environ["LDB_ORACLE_TEST_USER"],
+        "admin_password": os.environ["LDB_ORACLE_TEST_PASSWORD"],
+        "source_user": source_user,
+        "source_password": f"LdbDdl_{secrets.token_hex(11)}",
+        "history_user": history_user,
+        "history_password": f"LdbDdl_{secrets.token_hex(11)}",
+    }
+    config_root = tmp_path / "ddl-config"
+    pending_dir = tmp_path / "pending"
+    cli_environment = _e2e_environment(tmp_path / "ddl-home")
+    common_arguments = ("--schema", "ddl-e2e", "--config-dir", str(config_root))
+
+    source_connection: oracledb.Connection | None = None
+    try:
+        # Given: bootstrapped schemas, a source table, and a history table that lacks columns
+        _write_ddl_pending_e2e_configuration(config_root, with_history_admin=True, **credentials)
+        _run_cli("ldb-impl", *common_arguments, environment=cli_environment)
+        source_connection = oracledb.connect(
+            user=source_user, password=credentials["source_password"], dsn=credentials["dsn"]
+        )
+        source_cursor = source_connection.cursor()
+        try:
+            source_cursor.execute(
+                "CREATE TABLE ilm_ddltbl (id NUMBER(10) PRIMARY KEY, created_at DATE NOT NULL, payload VARCHAR2(40))"
+            )
+        finally:
+            source_cursor.close()
+        admin_cursor = oracle_connection.cursor()
+        try:
+            admin_cursor.execute(f"CREATE TABLE {history_user}.ilm_ddltbl (id NUMBER(10))")
+            if history_table_locked:
+                # An uncommitted insert holds a table lock, so any ALTER fails with ORA-00054
+                admin_cursor.execute(f"INSERT INTO {history_user}.ilm_ddltbl (id) VALUES (1)")
+        finally:
+            admin_cursor.close()
+
+        # Given: the configuration no longer carries admin history credentials
+        _write_ddl_pending_e2e_configuration(config_root, with_history_admin=False, **credentials)
+
+        # When: ldb-run executes without admin history credentials
+        result = subprocess.run(
+            [
+                shutil.which("ldb-run", path=cli_environment.get("PATH")),
+                *common_arguments,
+                "--action",
+                "SOURCE_ILM",
+                "--mode",
+                "EXECUTE",
+                "--ddl-pending-dir",
+                str(pending_dir),
+            ],
+            check=False,
+            capture_output=True,
+            env=cli_environment,
+            text=True,
+            timeout=180,
+        )
+
+        if history_table_locked:
+            # Then: exit 1, one plain-SQL file with the failed statements and their errors
+            assert result.returncode == 1, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            (pending_file,) = pending_dir.glob("*.sql")
+            content = pending_file.read_text(encoding="utf-8")
+            assert "whenever sqlerror exit failure" in content
+            assert "ILM_DDLTBL" in content.upper()
+            assert "-- Failed with: " in content and "ORA-00054" in content
+            assert content.rstrip().endswith("exit success")
+            assert pending_file.name in result.stderr
+            assert "ALTER TABLE" not in result.stdout.upper()
+        else:
+            # Then: exit 0, no pending file, and the history table now has the source columns
+            assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            assert not pending_dir.exists()
+            column_cursor = oracle_connection.cursor()
+            try:
+                column_cursor.execute(
+                    "SELECT column_name FROM all_tab_columns WHERE owner = :1 AND table_name = 'ILM_DDLTBL'",
+                    [history_user],
+                )
+                history_columns = {row[0] for row in column_cursor}
+            finally:
+                column_cursor.close()
+            assert {"CREATED_AT", "PAYLOAD"} <= history_columns
+    finally:
+        oracle_connection.rollback()
+        if source_connection is not None:
+            source_connection.close()
+        for user in (source_user, history_user):
+            _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+        for role in roles:
+            _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)

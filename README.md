@@ -313,11 +313,15 @@ History table management follows the same principle:
 - **Admin credentials absent, tables already up to date**: `ldb-run` proceeds
   without an admin connection. This is the normal case for environments where a
   DBA pre-creates all history objects and admin credentials are not stored.
+- **Admin credentials absent, history schema cannot be inspected** (for example
+  the runtime connection or dictionary query fails): `ldb-run` exits with code 1
+  and logs the cause. It does not run ILM against a history schema whose state is
+  unknown.
 - **Admin credentials absent, DDL changes are required**: `ldb-run` applies the
   DDL directly over the runtime history connection, with no prior privilege
   check. It succeeds when the runtime user owns the objects or holds the needed
-  privileges (for example `ALTER`). Each statement that Oracle rejects is
-  recorded and the remaining statements are still attempted. If at least one
+  privileges (for example `ALTER`). Any DDL statement that fails, for whatever
+  reason, is recorded and the remaining statements are still attempted. If at least one
   statement failed, `ldb-run` writes the failed statements, each preceded by its
   error, to `history_ddl_<schema>_<YYYYMMDD_HHMMSS>.sql` under `ddl_pending_dir`
   (default `ldb_ddl_pending`), logs an error naming the file, and exits with
@@ -326,6 +330,8 @@ History table management follows the same principle:
   final `LimitsDb: OK` banner applied everything. The recorded errors are
   comments. A DBA reviews and runs the file, then `ldb-run` is rerun. Nothing is
   written to stdout, and the directory is created only when a file is written.
+  If the file cannot be written (for example the directory is not writable),
+  `ldb-run` logs the error with the failed statements and exits with code 1.
   This is unrelated to `--mode SCRIPT`, which emits the ILM SQL blocks.
 
 ### Configuration parameters reference

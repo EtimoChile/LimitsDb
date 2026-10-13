@@ -517,6 +517,25 @@ def test_env_metadata_is_authoritative_and_ilm_name_is_normalized(monkeypatch: p
     }
 
 
+def test_ddl_pending_dir_defaults_and_is_overridable_by_env_and_cli(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Configuration parameters reference — ddl_pending_dir defaults to
+    # ldb_ddl_pending and can be set with --ddl-pending-dir or LDB_DDL_PENDING_DIR.
+    # Given: the live parameter schema
+    bindings = ldb_params_config.env_bindings_from_config()
+    parser = ldb_params_config.build_argparser_from_config()
+
+    # Then: default, env binding, and CLI flag are all exposed
+    assert ldb_params_config.Config.__dataclass_fields__["ddl_pending_dir"].default == "ldb_ddl_pending"
+    assert bindings["LDB_DDL_PENDING_DIR"] == "ddl_pending_dir"
+    assert parser.parse_args(["--schema", "s", "--ddl-pending-dir", "out"]).ddl_pending_dir == "out"
+
+    # When: the env var is set
+    monkeypatch.setenv("LDB_DDL_PENDING_DIR", "from_env")
+
+    # Then: the env override is read
+    assert ldb_params_config.read_env_overrides(bindings)["ddl_pending_dir"] == "from_env"
+
+
 def test_persistent_column_settings_cannot_be_overridden_via_cli_set(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/configuration-contract.md (DEC-013) — use_added_columns and
     # add_ldb_columns are set in persistent YAML only; --set must reject them to
