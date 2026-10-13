@@ -1715,10 +1715,14 @@ def test_probe_accept_hide_stdin():
     )
     subprocess.run(["docker", "exec", "-i", container, "bash", "-c", f"printf '{script}' > /tmp/p.sql"], check=True)
     outputs = []
-    for hide_variant, text in (("hide", "x1\nx2\nx3\n"), ("hide", "x1\n\nx2\n\nx3\n\n")):
+    for text in ("x1\nx2\nx3\n", "x1\n\nx2\n\nx3\n\n"):
         result = subprocess.run(
             ["docker", "exec", "-i", container, "sqlplus", "-L", "-s", "/nolog", "@/tmp/p.sql"],
-            capture_output=True, input=text, text=True, timeout=60, check=False,
+            capture_output=True,
+            input=text,
+            text=True,
+            timeout=60,
+            check=False,
         )
         outputs.append(repr(result.stdout + result.stderr))
     pytest.fail("\n".join(outputs))
