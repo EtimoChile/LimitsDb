@@ -2,8 +2,10 @@ import json
 import os
 import re
 import secrets
+import select
 import shutil
 import subprocess
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -1590,19 +1592,51 @@ def _write_bootstrap_e2e_configuration(root: Path, **credentials: str) -> None:
 
 
 def _run_script_in_oracle_container(container: str, script: Path, *, admin_login: str, answers: list[str]) -> str:
-    """Run a generated script with SQL*Plus inside the Oracle container, answering its prompts from stdin."""
+    """Run a generated script with SQL*Plus inside the Oracle container, answering its hidden prompts.
+
+    SQL*Plus only reads hidden answers from a terminal, so the container command runs on a pseudo-terminal
+    and each answer is typed when its prompt (the next ``accept`` of the script) appears.
+    """
+    import pty  # POSIX only; the E2E job runs on Linux
+
     remote_path = f"/tmp/{script.name}"
     subprocess.run(["docker", "cp", str(script), f"{container}:{remote_path}"], check=True, timeout=60)
-    result = subprocess.run(
-        ["docker", "exec", "-i", container, "sqlplus", "-L", "-s", admin_login, f"@{remote_path}"],
-        check=False,
-        capture_output=True,
-        input="\n".join(answers) + "\n",
-        text=True,
-        timeout=120,
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        ["docker", "exec", "-it", container, "sqlplus", "-L", "-s", admin_login, f"@{remote_path}"],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        close_fds=True,
     )
-    output = result.stdout + result.stderr
-    assert result.returncode == 0, f"{script.name} failed with exit code {result.returncode}\n{output}"
+    os.close(slave)
+    output = ""
+    typed = 0
+    deadline = time.monotonic() + 120
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 1.0)
+            if ready:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk.decode(errors="replace")
+                prompts_seen = len(re.findall(r"^(?:Password .*): $", output.replace(chr(13), ""), flags=re.MULTILINE))
+                while typed < prompts_seen and typed < len(answers):
+                    os.write(master, (answers[typed] + chr(10)).encode())
+                    typed += 1
+            elif process.poll() is not None:
+                break
+        returncode = process.wait(timeout=30)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        os.close(master)
+    assert returncode == 0, f"{script.name} failed with exit code {returncode}: {output}"
+    assert typed == len(answers), f"{script.name} asked for {typed} passwords, expected {len(answers)}: {output}"
     assert "LimitsDb: OK" in output, output
     return output
 
@@ -1703,26 +1737,3 @@ def test_ldb_impl_without_admin_credentials_generates_scripts_a_dba_can_run_and_
             _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
         for role in roles:
             _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
-
-
-def test_probe_accept_hide_stdin():
-    container = os.getenv("LDB_ORACLE_TEST_CONTAINER")
-    if not container:
-        pytest.skip("no container")
-    script = (
-        "accept a char prompt 'a: ' hide\naccept b char prompt 'b: ' hide\naccept c char prompt 'c: ' hide\n"
-        "prompt [&a][&b][&c]\nexit success\n"
-    )
-    subprocess.run(["docker", "exec", "-i", container, "bash", "-c", f"printf '{script}' > /tmp/p.sql"], check=True)
-    outputs = []
-    for text in ("x1\nx2\nx3\n", "x1\n\nx2\n\nx3\n\n"):
-        result = subprocess.run(
-            ["docker", "exec", "-i", container, "sqlplus", "-L", "-s", "/nolog", "@/tmp/p.sql"],
-            capture_output=True,
-            input=text,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        outputs.append(repr(result.stdout + result.stderr))
-    pytest.fail("\n".join(outputs))
