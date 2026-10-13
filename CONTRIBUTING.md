@@ -58,7 +58,7 @@ Small, focused pull requests are preferred.
 ### Prerequisites
 
 - Python 3.12+
-- [Poetry 1.6+](https://python-poetry.org/docs/#installation)
+- [Poetry 2.5.1 or newer](https://python-poetry.org/docs/#installation)
 
 ### Clone and install
 
@@ -76,20 +76,27 @@ poetry run mypy limitsdb
 poetry run ruff check .
 poetry run ruff format --check .
 poetry run pre-commit run --all-files
+poetry build
+poetry run twine check dist/*
 ```
 
-Before opening a pull request, all checks must pass. The CI pipeline runs the
-same suite automatically on every push to `development` and `main`.
+Before opening a pull request, all checks must pass. The CI pipeline runs
+these checks (plus a clean-wheel installation) on every push and pull request
+targeting `development` and `main`.
 
 ### Oracle integration tests
 
-End-to-end tests require a running Oracle instance. They are run automatically
-in CI via an ephemeral Oracle Database Free container. To run them locally,
-set the following environment variables and pass the `e2e` marker:
+End-to-end tests require a dedicated, disposable Oracle instance — never a
+shared or production database. The suite connects as `SYSTEM` and drops and
+recreates fixed-name objects (for example `DROP USER LDBT_E2E_SOURCE CASCADE`,
+plus `LDBT_`-prefixed roles and tables). In CI they run against an ephemeral
+Oracle Database Free container. To run them locally against your own disposable
+instance, set the following environment variables and pass the
+`oracle_integration` marker:
 
 ```bash
 export LDB_ORACLE_TEST_DSN=localhost:1521/FREEPDB1
 export LDB_ORACLE_TEST_USER=system
 export LDB_ORACLE_TEST_PASSWORD=<password>
-poetry run pytest -m e2e
+poetry run pytest -m oracle_integration
 ```

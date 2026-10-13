@@ -1161,3 +1161,508 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
 
     # Then: ERROR status — the table run did not succeed
     assert result[2] == Status.ERROR
+
+
+# ---------------------------------------------------------------------------
+# History table DDL — conditional admin connection (PEND-015) and script
+# emission when admin credentials are absent (PEND-016)
+# R2 exception: _ensure_history_tables is the sole entry point to the history
+# DDL contract documented in README > Run ILM > Admin credentials in ldb-run
+# ---------------------------------------------------------------------------
+
+
+def _execute_config_with_history_admin(**extra) -> Config:
+    """Return an EXECUTE-mode Config that includes source and history admin credentials."""
+    return Config(
+        schema="s",
+        mode="EXECUTE",
+        source_dsn="src-dsn",
+        source_username="src-user",
+        source_password="src-pw",
+        history_dsn="hist-dsn",
+        history_username="hist-user",
+        history_password="hist-pw",
+        admin_source_username="admin-src",
+        admin_source_password="admin-src-pw",
+        admin_history_username="admin-hist",
+        admin_history_password="admin-hist-pw",
+        **extra,
+    )
+
+
+def _execute_config_no_history_admin(**extra) -> Config:
+    """Return an EXECUTE-mode Config with no history admin credentials."""
+    return Config(
+        schema="s",
+        mode="EXECUTE",
+        source_dsn="src-dsn",
+        source_username="src-user",
+        source_password="src-pw",
+        history_dsn="hist-dsn",
+        history_username="hist-user",
+        history_password="hist-pw",
+        admin_source_username="admin-src",
+        admin_source_password="admin-src-pw",
+        **extra,
+    )
+
+
+def _make_tables_config_with_one_table() -> ldb_runner.TablesConfig:  # type: ignore[return-value]
+    """Return a minimal TablesConfig with one active table entry."""
+    row: dict = {
+        "source_owner": "SRC",
+        "history_owner": "HIST",
+        "table_name": "T1",
+        "referencing_tables": "",
+        "ctl_status": None,
+        "cond_expr": "",
+        "source_orphan_purge": "N",
+        "retain_months_source": 3,
+        "retain_months_history": None,
+        "purge_date_expr": None,
+        "additional_filter_expr": None,
+        "history_addtl_filter_expr": None,
+        "has_lob_columns": "N",
+        "long_columns": None,
+        "orphan_check_column": None,
+        "join_expr": None,
+    }
+    return {("SRC", "T1"): {"conds": [row], "referencing_tables": [], "skip": False}}
+
+
+def test_history_admin_connection_not_opened_when_tables_are_up_to_date(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when history admin
+    # credentials are present but tables already match the required definition,
+    # the admin connection is not opened and no DDL is executed.
+    # Given: engine where generate_table_structure_script reports no delta
+    admin_opened = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            conn = SimpleNamespace(admin=admin, env=env)
+            if admin and env == "HISTORY":
+                admin_opened.append(conn)
+            return conn
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 13)
+
+        def close_connection(self, conn):
+            pass
+
+        def generate_table_structure_script(self, conn, table, table_cnf):
+            return []  # No delta — tables are up to date
+
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ()
+
+        def get_table_columns(self, conn, owner, table_name):
+            return [], {}
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            raise AssertionError("should not execute DDL when tables are up to date")
+
+    tables_config = _make_tables_config_with_one_table()
+    source_admin_conn = SimpleNamespace(admin=True, env=None)
+
+    # When: _ensure_history_tables runs
+    ldb_runner._ensure_history_tables(
+        _execute_config_with_history_admin(),
+        DummyEngine(),
+        source_admin_conn,
+        tables_config,  # type: ignore[arg-type]
+    )
+
+    # Then: no history admin connection was opened
+    assert admin_opened == []
+    out = capsys.readouterr().out
+    assert out == ""
+
+
+def test_history_admin_connection_opened_when_ddl_changes_are_needed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when admin credentials
+    # are present and a DDL delta is detected, the admin connection is opened and DDL
+    # is executed via ensure_table_structure.
+    # Given: engine where generate_table_structure_script reports a non-empty delta
+    admin_opened = []
+    ddl_executed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            conn = SimpleNamespace(admin=admin, env=env)
+            if admin and env == "HISTORY":
+                admin_opened.append(conn)
+            return conn
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 13)
+
+        def close_connection(self, conn):
+            pass
+
+        def generate_table_structure_script(self, conn, table, table_cnf):
+            return ["CREATE TABLE HIST.T1 (ID NUMBER)"]
+
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ()
+
+        def get_table_columns(self, conn, owner, table_name):
+            return [], {}
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            ddl_executed.append(table)
+
+    tables_config = _make_tables_config_with_one_table()
+    source_admin_conn = SimpleNamespace(admin=True, env=None)
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_with_history_admin(),
+        DummyEngine(),
+        source_admin_conn,
+        tables_config,  # type: ignore[arg-type]
+    )
+
+    # Then: history admin connection was opened and DDL was applied
+    assert len(admin_opened) == 1
+    assert len(ddl_executed) == 1
+
+
+class _RuntimeDdlEngine:
+    """Engine double: reports a fixed delta and records DDL run over the runtime connection."""
+
+    def __init__(self, delta: list[str], failing: dict[str, str] | None = None) -> None:
+        self.delta = delta
+        self.failing = failing or {}
+        self.attempted: list[str] = []
+        self.envs_used: list[tuple[bool, str | None]] = []
+
+    def get_connection(self, config, *, admin=False, env=None):
+        if admin and env == "HISTORY":
+            raise AssertionError("history admin connection must not be opened")
+        self.envs_used.append((admin, env))
+        return SimpleNamespace(admin=admin, env=env)
+
+    def get_system_date(self, conn):
+        return datetime(2026, 10, 13)
+
+    def close_connection(self, conn):
+        pass
+
+    def generate_table_structure_script(self, conn, table, table_cnf):
+        return list(self.delta)
+
+    def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+        return ()
+
+    def get_table_columns(self, conn, owner, table_name):
+        return [], {}
+
+    def ensure_table_structure(self, conn, table, table_cnf):
+        raise AssertionError("ensure_table_structure needs the admin path")
+
+    def execute_ddl_statements(self, conn, statements):
+        assert conn.admin is False and conn.env == "HISTORY"
+        failures = []
+        for statement in statements:
+            self.attempted.append(statement)
+            if statement in self.failing:
+                failures.append((statement, self.failing[statement]))
+        return failures
+
+
+def test_history_ddl_is_applied_with_runtime_connection_when_admin_absent(tmp_path, capsys: pytest.CaptureFixture):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin history
+    # credentials, a DDL delta is applied over the runtime history connection; when
+    # every statement succeeds the run continues and no pending file is written.
+    # Given: a two-statement delta that the runtime user can apply
+    engine = _RuntimeDdlEngine(["ALTER TABLE HIST.T1 ADD (C1 NUMBER)", "ALTER TABLE HIST.T1 ADD (C2 NUMBER)"])
+    pending_dir = tmp_path / "pending"
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+        engine,  # type: ignore[arg-type]
+        SimpleNamespace(admin=True, env=None),
+        _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+    )
+
+    # Then: both statements ran, nothing was written to disk or stdout
+    assert engine.attempted == engine.delta
+    assert not pending_dir.exists()
+    assert capsys.readouterr().out == ""
+
+
+def test_failed_history_ddl_goes_to_pending_file_and_run_exits_1_after_trying_all(
+    tmp_path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — every statement that fails
+    # is written to a file under ddl_pending_dir, the remaining statements are still
+    # attempted, the error log names the file, and ldb-run exits with code 1.
+    # Given: three statements, the middle one is rejected by the database
+    ok_1, bad, ok_2 = (
+        "ALTER TABLE HIST.T1 ADD (C1 NUMBER)",
+        "ALTER TABLE HIST.T1 ADD (C2 NUMBER)",
+        "ALTER TABLE HIST.T1 ADD (C3 NUMBER)",
+    )
+    engine = _RuntimeDdlEngine([ok_1, bad, ok_2], failing={bad: "ORA-01031: insufficient privileges"})
+    pending_dir = tmp_path / "pending"
+    errors: list[str] = []
+
+    class _RecordingLogger:
+        def error(self, msg, *args):
+            errors.append(msg % args)
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(ldb_runner, "logger", _RecordingLogger())
+
+    # When
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+            engine,  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+        )
+
+    # Then: exit 1 after attempting all three; the file holds only the failed one
+    assert exc_info.value.code == 1
+    assert engine.attempted == [ok_1, bad, ok_2]
+    files = list(pending_dir.glob("history_ddl_s_*.sql"))
+    assert len(files) == 1
+    content = files[0].read_text(encoding="utf-8")
+    assert f"{bad};" in content
+    assert "-- Failed with: ORA-01031" in content
+    # Runnable as plain SQL*Plus: stops on error and ends with an explicit OK banner
+    lines = content.splitlines()
+    assert "whenever sqlerror exit failure" in lines
+    assert lines.index("whenever sqlerror exit failure") < lines.index(f"{bad};")
+    assert lines[-1] == "exit success" and "LimitsDb: OK" in lines[-2]
+    assert ok_1 not in content and ok_2 not in content
+    assert len(errors) == 1 and str(files[0]) in errors[0]
+    assert capsys.readouterr().out == ""
+
+
+def _make_tables_config(*table_names: str) -> ldb_runner.TablesConfig:  # type: ignore[return-value]
+    """Return a TablesConfig with one active entry per table name."""
+    config: dict = {}
+    for name in table_names:
+        base = _make_tables_config_with_one_table()[("SRC", "T1")]
+        row = {**base["conds"][0], "table_name": name}
+        config[("SRC", name)] = {"conds": [row], "referencing_tables": [], "skip": False}
+    return config  # type: ignore[return-value]
+
+
+_MULTILINE_DDL = """ALTER TABLE HIST.{table} ADD (
+    C1 NUMBER
+)"""
+
+
+class _PerTableDdlEngine(_RuntimeDdlEngine):
+    """Engine double whose delta depends on the table being inspected."""
+
+    def __init__(self, failing: dict[str, str] | None = None) -> None:
+        super().__init__([], failing)
+
+    def generate_table_structure_script(self, conn, table, table_cnf):
+        return [_MULTILINE_DDL.format(table=table.name)]
+
+
+def test_failed_ddl_from_several_tables_is_collected_in_one_pending_file_in_order(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — any DDL statement that
+    # fails is written to the pending file; statements keep their order and form, and
+    # one run produces one file regardless of how many tables had failures.
+    # Given: two tables whose DDL is rejected
+    first = _MULTILINE_DDL.format(table="T1")
+    second = _MULTILINE_DDL.format(table="T2")
+    engine = _PerTableDdlEngine(failing={first: "ORA-01031: insufficient privileges", second: "ORA-00942: no table"})
+    pending_dir = tmp_path / "pending"
+
+    # When
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+            engine,  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config("T1", "T2"),
+        )
+
+    # Then: exit 1 and one file holding both statements, complete and in order
+    assert exc_info.value.code == 1
+    files = list(pending_dir.glob("*.sql"))
+    assert len(files) == 1
+    content = files[0].read_text(encoding="utf-8")
+    assert f"{first};" in content and f"{second};" in content
+    assert content.index(first) < content.index(second)
+    assert "-- Failed with: ORA-01031" in content and "-- Failed with: ORA-00942" in content
+
+
+def test_all_failed_history_ddl_statements_are_written_when_every_statement_fails(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when no statement can be
+    # applied the file contains every statement and ldb-run exits with code 1.
+    # Given: a delta where Oracle rejects every statement
+    statements = ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)", "ALTER TABLE HIST.T1 ADD (C2 NUMBER)"]
+    engine = _RuntimeDdlEngine(statements, failing={st: "ORA-01031: insufficient privileges" for st in statements})
+    pending_dir = tmp_path / "pending"
+
+    # When
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+            engine,  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+        )
+
+    # Then
+    assert exc_info.value.code == 1
+    (pending_file,) = pending_dir.glob("*.sql")
+    content = pending_file.read_text(encoding="utf-8")
+    assert all(f"{statement};" in content for statement in statements)
+
+
+def test_history_ddl_with_admin_credentials_is_applied_by_admin_and_leaves_no_pending_file(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — with admin credentials and
+    # required DDL, the admin connection applies the changes; the pending-DDL file is only
+    # for runs without admin credentials.
+    # Given: admin history credentials and a one-statement delta
+    admin_applied = []
+
+    class AdminEngine(_RuntimeDdlEngine):
+        def get_connection(self, config, *, admin=False, env=None):
+            return SimpleNamespace(admin=admin, env=env)
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            admin_applied.append((conn.admin, conn.env, table.name))
+
+        def execute_ddl_statements(self, conn, statements):
+            raise AssertionError("pending-file path must not run when admin credentials exist")
+
+    pending_dir = tmp_path / "pending"
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_with_history_admin(ddl_pending_dir=str(pending_dir)),
+        AdminEngine(["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]),  # type: ignore[arg-type]
+        SimpleNamespace(admin=True, env=None),
+        _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+    )
+
+    # Then
+    assert admin_applied == [(True, "HISTORY", "T1")]
+    assert not pending_dir.exists()
+
+
+def test_run_exits_1_when_history_cannot_be_inspected_and_admin_credentials_are_absent(tmp_path):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin credentials,
+    # if the history schema cannot be inspected, ldb-run exits with code 1 and applies no
+    # DDL; it never runs ILM against a history schema in an unknown state.
+    # Given: a runtime history connection that fails
+    class FailingEngine(_RuntimeDdlEngine):
+        def get_connection(self, config, *, admin=False, env=None):
+            if env == "HISTORY":
+                raise ConfigurationError("history database unreachable")
+            return SimpleNamespace(admin=admin, env=env)
+
+        def execute_ddl_statements(self, conn, statements):
+            raise AssertionError("no DDL may run when the state is unknown")
+
+    pending_dir = tmp_path / "pending"
+
+    # When / Then
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(pending_dir)),
+            FailingEngine([]),  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+        )
+    assert exc_info.value.code == 1
+    assert not pending_dir.exists()
+
+
+def test_no_output_and_no_admin_conn_when_tables_up_to_date_without_admin_credentials(
+    capsys: pytest.CaptureFixture,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when admin history
+    # credentials are absent and tables are already up to date (empty delta), ldb-run
+    # proceeds without opening an admin connection or emitting a script.
+    # Given: engine reporting an empty delta; no admin history credentials
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            if admin and env == "HISTORY":
+                raise AssertionError("history admin connection must not be opened")
+            return SimpleNamespace(admin=admin, env=env)
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 13)
+
+        def close_connection(self, conn):
+            pass
+
+        def generate_table_structure_script(self, conn, table, table_cnf):
+            return []  # No delta
+
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ()
+
+        def get_table_columns(self, conn, owner, table_name):
+            return [], {}
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            raise AssertionError("DDL must not be executed when admin credentials are absent")
+
+    tables_config = _make_tables_config_with_one_table()
+    source_admin_conn = SimpleNamespace(admin=True, env=None)
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_no_history_admin(),
+        DummyEngine(),
+        source_admin_conn,
+        tables_config,  # type: ignore[arg-type]
+    )
+
+    # Then: no DDL script is printed; execution reaches this point without error
+    out = capsys.readouterr().out
+    assert out == ""
+
+
+def test_run_exits_1_and_logs_failed_statements_when_pending_file_cannot_be_written(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — if the pending file cannot
+    # be written, ldb-run logs the error with the failed statements and exits with code 1.
+    # Given: ddl_pending_dir points below a regular file, so it cannot be created
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    engine = _RuntimeDdlEngine([statement], failing={statement: "ORA-01031: insufficient privileges"})
+    errors: list[str] = []
+
+    class _RecordingLogger:
+        def error(self, msg, *args):
+            errors.append(msg % args)
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(ldb_runner, "logger", _RecordingLogger())
+
+    # When / Then
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(ddl_pending_dir=str(blocker / "sub")),
+            engine,  # type: ignore[arg-type]
+            SimpleNamespace(admin=True, env=None),
+            _make_tables_config_with_one_table(),  # type: ignore[arg-type]
+        )
+    assert exc_info.value.code == 1
+    assert any(statement in message and "could not be written" in message for message in errors)

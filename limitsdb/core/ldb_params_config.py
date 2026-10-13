@@ -51,6 +51,7 @@ class ExecutionConfig:
     generate_script: bool
     parallel_max: int
     log_level: LogLevel
+    ddl_pending_dir: str
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,12 @@ class Config:
     parallel_max: Annotated[
         int, Help("Maximum number of parallel processes"), Cli("--parallel-max"), Env("LDB_PARALLEL_MAX")
     ] = 10
+    ddl_pending_dir: Annotated[
+        str,
+        Help("Directory where ldb-run writes history DDL that could not be applied, for a DBA to run"),
+        Cli("--ddl-pending-dir"),
+        Env("LDB_DDL_PENDING_DIR"),
+    ] = "ldb_ddl_pending"
     db_engine: Annotated[
         DatabaseEngineName,
         Help("Database engine (Oracle only)"),
@@ -244,6 +251,7 @@ class Config:
             generate_script=self.generate_script,
             parallel_max=self.parallel_max,
             log_level=self.log_level,
+            ddl_pending_dir=self.ddl_pending_dir,
         )
 
     @property

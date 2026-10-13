@@ -302,6 +302,22 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def generate_table_structure_script(conn: Any, table: TableDefinition, table_cnf: Mapping[str, Any]) -> list[str]:
+        """Return DDL statements to synchronize the table to the definition without executing them.
+        Uses accessible dictionary views and can be called with a non-administrative connection.
+        Returns an empty list when the table already matches the required definition."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def execute_ddl_statements(conn: Any, statements: Sequence[str]) -> list[tuple[str, str]]:
+        """Execute DDL statements in order, continuing after a failed statement.
+        Returns one (statement, error message) pair for each statement that failed;
+        an empty list means every statement was applied."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def ensure_sequences(conn: Any, sequences: Sequence[SequenceDefinition]) -> list[str]:
         """Ensure that the provided sequences exist, returning newly created ones."""
         pass

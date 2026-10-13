@@ -890,6 +890,215 @@ end;"""
                 cursor.close()
 
     @staticmethod
+    def _compute_table_structure_delta(
+        conn: oracledb.Connection, cursor: oracledb.Cursor, table: TableDefinition
+    ) -> list[str]:
+        """Compute DDL statements to bring the table to the required structure using accessible views.
+
+        Uses ALL_TABLES, ALL_TAB_COLUMNS, ALL_CONSTRAINTS, ALL_CONS_COLUMNS, ALL_INDEXES and
+        ALL_IND_COLUMNS — readable by any user with object-level SELECT access — so this method
+        can be called with a non-administrative connection.
+        Returns an empty list when no changes are required.
+        """
+        statements: list[str] = []
+        fmttd_owner = OracleEngine._format_identifier(table.owner)
+        fmttd_table_name = OracleEngine._format_identifier(table.name)
+
+        cursor.execute(
+            "SELECT 1 FROM all_tables WHERE owner = :1 AND table_name = :2",
+            [table.owner, table.name],
+        )
+        if cursor.fetchone() is None:
+            fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+            statements.append(f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )")
+            desired_pk = tuple(table.primary_key or ())
+            if desired_pk:
+                fmttd_pk = tuple(OracleEngine._format_identifier(c) for c in desired_pk)
+                desired_constraint_name = f"{table.name}_PK"
+                fmttd_cn = OracleEngine._format_identifier(desired_constraint_name)
+                statements.append(
+                    f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_cn}"
+                    f" PRIMARY KEY ({', '.join(fmttd_pk)})"
+                )
+            desired_indexes = OracleEngine._prepare_desired_indexes(table)
+            for index_name, (columns, is_unique) in desired_indexes.items():
+                fmttd_iname = OracleEngine._format_identifier(index_name)
+                fmttd_cols = ", ".join(OracleEngine._format_identifier(c) for c in columns)
+                unique_clause = "UNIQUE " if is_unique else ""
+                statements.append(
+                    f"CREATE {unique_clause}INDEX {fmttd_owner}.{fmttd_iname}"
+                    f" ON {fmttd_owner}.{fmttd_table_name} ({fmttd_cols})"
+                )
+            return statements
+
+        # Table exists: check columns
+        _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
+        for column in table.columns:
+            column_definition = OracleEngine._column_sql(column)
+            if column.name not in existing_columns:
+                statements.append(f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD ({column_definition})")
+            elif OracleEngine._column_needs_update(existing_columns[column.name], column):
+                statements.append(f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} MODIFY ({column_definition})")
+
+        # Get current PK using all_constraints / all_cons_columns
+        cursor.execute(
+            """
+            SELECT constraint_name, index_name
+              FROM all_constraints
+             WHERE owner = :1 AND table_name = :2 AND constraint_type = 'P'
+            """,
+            [table.owner, table.name],
+        )
+        row = cursor.fetchone()
+        existing_pk_name: str | None = None
+        existing_pk_cols: tuple[str, ...] = ()
+        existing_pk_index: str | None = None
+        if row:
+            existing_pk_name, existing_pk_index = row[0], row[1]
+            cursor.execute(
+                "SELECT column_name FROM all_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+                [table.owner, existing_pk_name],
+            )
+            existing_pk_cols = tuple(r[0] for r in cast(Iterable[tuple[str]], cursor))
+
+        # Get current indexes using all_indexes / all_ind_columns
+        cursor.execute(
+            """
+            SELECT i.index_name, i.uniqueness, c.column_name
+              FROM all_indexes i
+              JOIN all_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name
+             WHERE i.owner = :owner AND i.table_name = :table_name
+             ORDER BY i.index_name, c.column_position
+            """,
+            owner=table.owner,
+            table_name=table.name,
+        )
+        idx_map: dict[str, dict[str, Any]] = {}
+        for index_name, uniqueness, column_name in cast(Iterable[tuple[str, str, str]], cursor):
+            info = idx_map.setdefault(index_name, {"columns": [], "unique": uniqueness == "UNIQUE"})
+            info["columns"].append(column_name)
+        # Keys and desired_constraint_name are uppercase (Oracle internal storage); keep them consistent.
+        effective_indexes: dict[str, tuple[tuple[str, ...], bool]] = {
+            name: (tuple(info["columns"]), bool(info["unique"])) for name, info in idx_map.items()
+        }
+
+        desired_pk = tuple(table.primary_key or ())
+        fmttd_desired_pk = tuple(OracleEngine._format_identifier(c) for c in desired_pk)
+        desired_constraint_name = f"{table.name}_PK"
+        fmttd_desired_cn = OracleEngine._format_identifier(desired_constraint_name)
+        effective_pk_name = existing_pk_name
+        effective_pk_index = existing_pk_index
+
+        if desired_pk:
+            if not existing_pk_cols:
+                existing_index_info = effective_indexes.get(desired_constraint_name)
+                if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
+                    statements.append(f"DROP INDEX {fmttd_owner}.{fmttd_desired_cn}")
+                    effective_indexes.pop(desired_constraint_name, None)
+                statements.append(
+                    f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_cn}"
+                    f" PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
+                )
+                effective_pk_name = desired_constraint_name
+                effective_pk_index = desired_constraint_name
+            elif existing_pk_cols != desired_pk:
+                if existing_pk_name:
+                    statements.append(
+                        f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT"
+                        f" {OracleEngine._format_identifier(existing_pk_name)}"
+                    )
+                    # Use the raw (uppercase) name for dict lookup; format only for the SQL statement.
+                    index_to_drop = existing_pk_index or existing_pk_name
+                    if index_to_drop and index_to_drop in effective_indexes:
+                        statements.append(f"DROP INDEX {fmttd_owner}.{OracleEngine._format_identifier(index_to_drop)}")
+                        effective_indexes.pop(index_to_drop, None)
+                    effective_pk_name = None
+                    effective_pk_index = None
+                existing_index_info = effective_indexes.get(desired_constraint_name)
+                if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
+                    statements.append(f"DROP INDEX {fmttd_owner}.{fmttd_desired_cn}")
+                    effective_indexes.pop(desired_constraint_name, None)
+                statements.append(
+                    f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_cn}"
+                    f" PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
+                )
+                effective_pk_name = desired_constraint_name
+                effective_pk_index = desired_constraint_name
+        elif existing_pk_cols and existing_pk_name:
+            statements.append(
+                f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT"
+                f" {OracleEngine._format_identifier(existing_pk_name)}"
+            )
+            index_to_drop = existing_pk_index or existing_pk_name
+            if index_to_drop and index_to_drop in effective_indexes:
+                statements.append(f"DROP INDEX {fmttd_owner}.{OracleEngine._format_identifier(index_to_drop)}")
+                effective_indexes.pop(index_to_drop, None)
+            effective_pk_name = None
+            effective_pk_index = None
+
+        # Desired indexes
+        desired_indexes = OracleEngine._prepare_desired_indexes(table)
+        for index_name, (columns, is_unique) in desired_indexes.items():
+            fmttd_iname = OracleEngine._format_identifier(index_name)
+            existing_index = effective_indexes.get(index_name)
+            if existing_index == (columns, is_unique):
+                continue
+            if existing_index is not None:
+                statements.append(f"DROP INDEX {fmttd_owner}.{fmttd_iname}")
+                effective_indexes.pop(index_name, None)
+            fmttd_cols = ", ".join(OracleEngine._format_identifier(c) for c in columns)
+            unique_clause = "UNIQUE " if is_unique else ""
+            statements.append(
+                f"CREATE {unique_clause}INDEX {fmttd_owner}.{fmttd_iname}"
+                f" ON {fmttd_owner}.{fmttd_table_name} ({fmttd_cols})"
+            )
+            effective_indexes[index_name] = (columns, is_unique)
+
+        # Unmanaged indexes: drop those not in the desired set and not backing the final PK
+        expected_indexes: set[str] = set(desired_indexes.keys())
+        if effective_pk_name:
+            expected_indexes.add(effective_pk_name)
+        if effective_pk_index:
+            expected_indexes.add(effective_pk_index)
+        for index_name in list(effective_indexes.keys()):
+            if index_name not in expected_indexes:
+                fmttd_iname = OracleEngine._format_identifier(index_name)
+                logger.info("Unmanaged index %s on %s.%s will be dropped", fmttd_iname, fmttd_owner, fmttd_table_name)
+                statements.append(f"DROP INDEX {fmttd_owner}.{fmttd_iname}")
+
+        return statements
+
+    @staticmethod
+    def generate_table_structure_script(
+        conn: oracledb.Connection, table: TableDefinition, table_cnf: Mapping[str, Any]
+    ) -> list[str]:
+        cursor: oracledb.Cursor | None = None
+        try:
+            cursor = conn.cursor()
+            return OracleEngine._compute_table_structure_delta(conn, cursor, table)
+        except Exception as exc:
+            raise ExecutionError("Failed to generate table structure script") from exc
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def execute_ddl_statements(conn: oracledb.Connection, statements: Sequence[str]) -> list[tuple[str, str]]:
+        failures: list[tuple[str, str]] = []
+        cursor = conn.cursor()
+        try:
+            for statement in statements:
+                try:
+                    OracleEngine._execute_ddl(conn, cursor, statement)
+                except oracledb.Error as exc:
+                    message = " ".join(str(exc).split())
+                    logger.warning("DDL statement failed and was left pending: %s", message)
+                    failures.append((statement, message))
+        finally:
+            cursor.close()
+        return failures
+
+    @staticmethod
     def get_primary_key_columns(
         conn: oracledb.Connection, owner: str, table_name: str, table_cnf: Mapping[str, Any]
     ) -> tuple[str, ...]:
