@@ -1007,7 +1007,7 @@ def test_table_structure_reconciliation_fails_when_not_null_column_added_to_popu
     oracle_connection: oracledb.Connection,
 ):
     # Spec: README § Bootstrap Database Objects — if Oracle rejects an ALTER TABLE
-    # (e.g. ORA-01031: adding a NOT NULL column to a table that already has rows),
+    # (e.g. ORA-01758: adding a NOT NULL column to a table that already has rows),
     # the error is raised as ExecutionError; the table is left in the state Oracle
     # reached before the failure
     username = os.environ["LDB_ORACLE_TEST_USER"].upper()
@@ -1537,7 +1537,7 @@ def test_ldb_run_without_history_admin_applies_ddl_or_writes_pending_file(
             content = pending_file.read_text(encoding="utf-8")
             assert "whenever sqlerror exit failure" in content
             assert "ILM_DDLTBL" in content.upper()
-            assert "-- Failed with: " in content and "ORA-01758" in content
+            assert "-- Failed with: " in content and "ORA-01031" in content
             assert content.rstrip().endswith("exit success")
             assert pending_file.name in result.stderr
             assert "ALTER TABLE" not in result.stdout.upper()
