@@ -301,8 +301,26 @@ run. Both operations are idempotent.
 
 If admin credentials are absent from `secrets[.<PROFILE>].json`, the privilege
 grants are skipped silently — the assumption is that grants are already in
-place. History table management in `EXECUTE` mode still requires admin
-credentials in the current version.
+place.
+
+History table management follows the same principle:
+
+- **Admin credentials present, tables already up to date**: the admin connection
+  is not opened. No DDL is executed.
+- **Admin credentials present, DDL changes are required**: the admin connection
+  is opened and the changes are applied as before.
+- **Admin credentials absent, tables already up to date**: `ldb-run` proceeds
+  without an admin connection. This is the normal case for environments where a
+  DBA pre-creates all history objects and admin credentials are not stored.
+- **Admin credentials absent, DDL changes are required**: `ldb-run` emits a
+  DDL script to standard output describing the structural delta (equivalent to
+  `--mode SCRIPT` scoped to the history schema), logs a warning, and continues
+  without applying the changes. The DBA should review and apply the script
+  before the next run. If the history tables are not fully set up, the ILM
+  execution will fail at the point of the first INSERT or SELECT.
+
+The emitted DDL script contains plain SQL DDL statements (one per line,
+terminated with `;`) suitable for review and manual execution.
 
 ### Configuration parameters reference
 

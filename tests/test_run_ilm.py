@@ -1161,3 +1161,267 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
 
     # Then: ERROR status — the table run did not succeed
     assert result[2] == Status.ERROR
+
+
+# ---------------------------------------------------------------------------
+# History table DDL — conditional admin connection (PEND-015) and script
+# emission when admin credentials are absent (PEND-016)
+# R2 exception: _ensure_history_tables is the sole entry point to the history
+# DDL contract documented in README > Run ILM > Admin credentials in ldb-run
+# ---------------------------------------------------------------------------
+
+
+def _execute_config_with_history_admin(**extra) -> Config:
+    """Return an EXECUTE-mode Config that includes source and history admin credentials."""
+    return Config(
+        schema="s",
+        mode="EXECUTE",
+        source_dsn="src-dsn",
+        source_username="src-user",
+        source_password="src-pw",
+        history_dsn="hist-dsn",
+        history_username="hist-user",
+        history_password="hist-pw",
+        admin_source_username="admin-src",
+        admin_source_password="admin-src-pw",
+        admin_history_username="admin-hist",
+        admin_history_password="admin-hist-pw",
+        **extra,
+    )
+
+
+def _execute_config_no_history_admin(**extra) -> Config:
+    """Return an EXECUTE-mode Config with no history admin credentials."""
+    return Config(
+        schema="s",
+        mode="EXECUTE",
+        source_dsn="src-dsn",
+        source_username="src-user",
+        source_password="src-pw",
+        history_dsn="hist-dsn",
+        history_username="hist-user",
+        history_password="hist-pw",
+        admin_source_username="admin-src",
+        admin_source_password="admin-src-pw",
+        **extra,
+    )
+
+
+def _make_tables_config_with_one_table() -> ldb_runner.TablesConfig:  # type: ignore[return-value]
+    """Return a minimal TablesConfig with one active table entry."""
+    row: dict = {
+        "source_owner": "SRC",
+        "history_owner": "HIST",
+        "table_name": "T1",
+        "referencing_tables": "",
+        "ctl_status": None,
+        "cond_expr": "",
+        "source_orphan_purge": "N",
+        "retain_months_source": 3,
+        "retain_months_history": None,
+        "purge_date_expr": None,
+        "additional_filter_expr": None,
+        "history_addtl_filter_expr": None,
+        "has_lob_columns": "N",
+        "long_columns": None,
+        "orphan_check_column": None,
+        "join_expr": None,
+    }
+    return {("SRC", "T1"): {"conds": [row], "referencing_tables": [], "skip": False}}
+
+
+def test_history_admin_connection_not_opened_when_tables_are_up_to_date(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when history admin
+    # credentials are present but tables already match the required definition,
+    # the admin connection is not opened and no DDL is executed.
+    # Given: engine where generate_table_structure_script reports no delta
+    admin_opened = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            conn = SimpleNamespace(admin=admin, env=env)
+            if admin and env == "HISTORY":
+                admin_opened.append(conn)
+            return conn
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 13)
+
+        def close_connection(self, conn):
+            pass
+
+        def generate_table_structure_script(self, conn, table, table_cnf):
+            return []  # No delta — tables are up to date
+
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ()
+
+        def get_table_columns(self, conn, owner, table_name):
+            return [], {}
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            raise AssertionError("should not execute DDL when tables are up to date")
+
+    tables_config = _make_tables_config_with_one_table()
+    source_admin_conn = SimpleNamespace(admin=True, env=None)
+
+    # When: _ensure_history_tables runs
+    ldb_runner._ensure_history_tables(
+        _execute_config_with_history_admin(),
+        DummyEngine(),
+        source_admin_conn,
+        tables_config,  # type: ignore[arg-type]
+    )
+
+    # Then: no history admin connection was opened
+    assert admin_opened == []
+    out = capsys.readouterr().out
+    assert out == ""
+
+
+def test_history_admin_connection_opened_when_ddl_changes_are_needed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when admin credentials
+    # are present and a DDL delta is detected, the admin connection is opened and DDL
+    # is executed via ensure_table_structure.
+    # Given: engine where generate_table_structure_script reports a non-empty delta
+    admin_opened = []
+    ddl_executed = []
+
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            conn = SimpleNamespace(admin=admin, env=env)
+            if admin and env == "HISTORY":
+                admin_opened.append(conn)
+            return conn
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 13)
+
+        def close_connection(self, conn):
+            pass
+
+        def generate_table_structure_script(self, conn, table, table_cnf):
+            return ["CREATE TABLE HIST.T1 (ID NUMBER)"]
+
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ()
+
+        def get_table_columns(self, conn, owner, table_name):
+            return [], {}
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            ddl_executed.append(table)
+
+    tables_config = _make_tables_config_with_one_table()
+    source_admin_conn = SimpleNamespace(admin=True, env=None)
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_with_history_admin(),
+        DummyEngine(),
+        source_admin_conn,
+        tables_config,  # type: ignore[arg-type]
+    )
+
+    # Then: history admin connection was opened and DDL was applied
+    assert len(admin_opened) == 1
+    assert len(ddl_executed) == 1
+
+
+def test_history_ddl_script_emitted_when_admin_credentials_absent(
+    capsys: pytest.CaptureFixture,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when admin history
+    # credentials are absent and a DDL delta is detected, ldb-run emits a DDL script
+    # to stdout and proceeds without executing the DDL.
+    # Given: engine reporting a one-statement delta; no admin history credentials
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            if admin and env == "HISTORY":
+                raise AssertionError("history admin connection must not be opened")
+            return SimpleNamespace(admin=admin, env=env)
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 13)
+
+        def close_connection(self, conn):
+            pass
+
+        def generate_table_structure_script(self, conn, table, table_cnf):
+            return ["CREATE TABLE HIST.T1 (ID NUMBER NOT NULL)"]
+
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ()
+
+        def get_table_columns(self, conn, owner, table_name):
+            return [], {}
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            raise AssertionError("DDL must not be executed when admin credentials are absent")
+
+    tables_config = _make_tables_config_with_one_table()
+    source_admin_conn = SimpleNamespace(admin=True, env=None)
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_no_history_admin(),
+        DummyEngine(),
+        source_admin_conn,
+        tables_config,  # type: ignore[arg-type]
+    )
+
+    # Then: DDL is printed to stdout; ensure_table_structure was NOT called
+    out = capsys.readouterr().out
+    assert "CREATE TABLE HIST.T1" in out
+
+
+def test_no_output_and_no_admin_conn_when_tables_up_to_date_without_admin_credentials(
+    capsys: pytest.CaptureFixture,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — when admin history
+    # credentials are absent and tables are already up to date (empty delta), ldb-run
+    # proceeds without opening an admin connection or emitting a script.
+    # Given: engine reporting an empty delta; no admin history credentials
+    class DummyEngine:
+        def get_connection(self, config, *, admin=False, env=None):
+            if admin and env == "HISTORY":
+                raise AssertionError("history admin connection must not be opened")
+            return SimpleNamespace(admin=admin, env=env)
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 13)
+
+        def close_connection(self, conn):
+            pass
+
+        def generate_table_structure_script(self, conn, table, table_cnf):
+            return []  # No delta
+
+        def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
+            return ()
+
+        def get_table_columns(self, conn, owner, table_name):
+            return [], {}
+
+        def ensure_table_structure(self, conn, table, table_cnf):
+            raise AssertionError("DDL must not be executed when admin credentials are absent")
+
+    tables_config = _make_tables_config_with_one_table()
+    source_admin_conn = SimpleNamespace(admin=True, env=None)
+
+    # When
+    ldb_runner._ensure_history_tables(
+        _execute_config_no_history_admin(),
+        DummyEngine(),
+        source_admin_conn,
+        tables_config,  # type: ignore[arg-type]
+    )
+
+    # Then: no DDL script is printed; execution reaches this point without error
+    out = capsys.readouterr().out
+    assert out == ""

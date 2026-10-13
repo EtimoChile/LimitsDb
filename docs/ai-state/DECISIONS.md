@@ -2,7 +2,7 @@
 status: active
 authority: decision-register
 scope: development/maintenance/release
-last-reviewed: 2026-10-09
+last-reviewed: 2026-10-13
 ---
 
 # Compact decision register
@@ -32,6 +32,8 @@ It does not duplicate specifications or record every code change.
 | `DEC-017` | 2026-10-09 | `ACTIVE` | Security/CI | Protect `development` with required status checks (`quality`, strict), required PR review (1 approver, dismiss stale), and `enforce_admins: false`. CODEOWNERS requires review from `@etimochile` on all changes. Workflows declare `permissions: {}` at workflow level and `contents: read` at job level. | CODEOWNERS and per-job permissions reduce the blast radius of compromised tokens; PR review enables participation from authorized contributors; `enforce_admins: false` preserves owner action capability in emergencies. | Resolves `PEND-014`; prerequisite for `PEND-006`. | `.github/CODEOWNERS`; `.github/workflows/quality.yaml`; `.github/workflows/oracle-integration.yaml` |
 | `DEC-019` | 2026-10-10 | `ACTIVE` | Publication/CI | Publish to PyPI via Trusted Publisher (OIDC) from a version tag on `main`, through a three-job pipeline: `build` → `publish-testpypi` → `publish-pypi`. Both publish jobs require manual approval (GitHub Environment with required reviewer). The repo is public (Apache 2.0); a future commercial edition lives in a separate private repo (Open Core model). PyPI account registered under `gustavo.cantizano@etimo.cl` with `gcantiza@gmail.com` as co-maintainer; transfer to org `EtimoChile` on PyPI pending org approval. | Public repo unlocks required-reviewer environments on GitHub Free; Trusted Publisher avoids long-lived credentials; TestPyPI gate validates the release process before the real index. | Resolves `PEND-006`; built on `DEC-017`. | `.github/workflows/release.yaml`; GitHub environments `testpypi`, `pypi`; pypi.org; test.pypi.org |
 | `DEC-018` | 2026-10-09 | `ACTIVE` | Conventions | All project files — source code, tests, documentation, and configuration comments — are written in English. This matches the language of `README.md` and the source code, and ensures a single language across the repository. | Avoid mixed-language navigation and ensure all contributors can read any file without switching languages. | Constitutional rule. | `AGENTS.md` § Language |
+
+| `DEC-020` | 2026-10-13 | `ACTIVE` | Operations/security | When `ldb-run --mode EXECUTE` needs history table DDL: (a) if admin history credentials are present but tables are already up to date, skip the admin connection entirely; (b) if admin history credentials are absent and a DDL delta is detected, emit the delta as a DDL script to stdout and proceed without executing it; (c) if admin credentials are absent and tables are up to date, proceed silently. `DatabaseEngine` exposes `generate_table_structure_script` for read-only delta computation using accessible (`ALL_*`) dictionary views. | Avoids requiring admin credential storage in environments where the DBA pre-creates all history objects; emitting the script provides a review-and-apply path without silent failure. | Resolves `PEND-015` and `PEND-016`. | `README.md` § Admin credentials in ldb-run; `limitsdb/core/ldb_runner.py` (`_ensure_history_tables`, `_emit_history_ddl_script`); `limitsdb/db/ldb_engines.py` (`generate_table_structure_script`); `limitsdb/db/oracle/ldb_engine_impl.py` (`_compute_table_structure_delta`, `generate_table_structure_script`) |
 
 Allowed states: `ACTIVE`, `REPLACED`, and `DISCARDED`. A replaced decision
 keeps its row and references the successor ID.

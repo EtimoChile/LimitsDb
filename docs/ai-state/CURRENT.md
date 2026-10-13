@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-09
-last-updated: 2026-10-09
+last-reviewed: 2026-10-13
+last-updated: 2026-10-13
 ---
 
 # Current state
@@ -31,7 +31,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - ILM operations can archive, purge, create objects, and manage privileges.
   They are not executed against a real database without explicit authorization
   and an identified environment.
-- The test suite lives in `tests/`. Local tests are 146 (non-oracle-integration)
+- The test suite lives in `tests/`. Local tests are 164 (non-oracle-integration)
   and 11 E2E (oracle_integration). Ruff validates format and lint, and strict
   `mypy` completes without findings across the 23 package modules. The test
   layout follows `docs/prompts/test-organization.md`: core contracts in `tests/test_*.py`,
@@ -154,3 +154,6 @@ but does not replace the sources defined in `AGENTS.md`.
   review, and per-job `contents: read` permissions.
 - `DEC-018`: all project files are written in English; this rule is stated in
   `AGENTS.md` § Language.
+- `DEC-020`: history DDL admin connection is conditional; absent admin credentials
+  with a detected delta emit a DDL script to stdout instead of failing. `PEND-015`
+  and `PEND-016` are resolved.
