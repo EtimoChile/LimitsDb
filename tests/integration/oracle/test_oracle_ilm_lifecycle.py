@@ -1703,3 +1703,22 @@ def test_ldb_impl_without_admin_credentials_generates_scripts_a_dba_can_run_and_
             _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
         for role in roles:
             _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+
+def test_probe_accept_hide_stdin():
+    container = os.getenv("LDB_ORACLE_TEST_CONTAINER")
+    if not container:
+        pytest.skip("no container")
+    script = (
+        "accept a char prompt 'a: ' hide\naccept b char prompt 'b: ' hide\naccept c char prompt 'c: ' hide\n"
+        "prompt [&a][&b][&c]\nexit success\n"
+    )
+    subprocess.run(["docker", "exec", "-i", container, "bash", "-c", f"printf '{script}' > /tmp/p.sql"], check=True)
+    outputs = []
+    for hide_variant, text in (("hide", "x1\nx2\nx3\n"), ("hide", "x1\n\nx2\n\nx3\n\n")):
+        result = subprocess.run(
+            ["docker", "exec", "-i", container, "sqlplus", "-L", "-s", "/nolog", "@/tmp/p.sql"],
+            capture_output=True, input=text, text=True, timeout=60, check=False,
+        )
+        outputs.append(repr(result.stdout + result.stderr))
+    pytest.fail("\n".join(outputs))
