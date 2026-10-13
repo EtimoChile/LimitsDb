@@ -1492,8 +1492,9 @@ def test_ldb_run_without_history_admin_applies_ddl_or_writes_pending_file(
         try:
             admin_cursor.execute(f"CREATE TABLE {history_user}.ilm_ddltbl (id NUMBER(10))")
             if history_table_locked:
-                # An uncommitted insert holds a table lock, so any ALTER fails with ORA-00054
+                # A populated table cannot take the NOT NULL CREATED_AT column (ORA-01758)
                 admin_cursor.execute(f"INSERT INTO {history_user}.ilm_ddltbl (id) VALUES (1)")
+                oracle_connection.commit()
         finally:
             admin_cursor.close()
 
@@ -1526,7 +1527,7 @@ def test_ldb_run_without_history_admin_applies_ddl_or_writes_pending_file(
             content = pending_file.read_text(encoding="utf-8")
             assert "whenever sqlerror exit failure" in content
             assert "ILM_DDLTBL" in content.upper()
-            assert "-- Failed with: " in content and "ORA-00054" in content
+            assert "-- Failed with: " in content and "ORA-01758" in content
             assert content.rstrip().endswith("exit success")
             assert pending_file.name in result.stderr
             assert "ALTER TABLE" not in result.stdout.upper()
