@@ -48,7 +48,7 @@ def test_bootstrap_script_never_contains_passwords_and_prompts_for_them_hidden()
 
     assert _SECRET not in script
     prompts = re.findall(r"^accept (\w+) char prompt .* hide$", script, flags=re.MULTILINE)
-    assert len(prompts) == 2  # one for the user, one for the database link
+    assert len(prompts) == 3  # the user, the runtime user reconnection and the database link
 
 
 def test_bootstrap_script_follows_the_sqlplus_contract_of_the_pending_ddl_file():
@@ -85,7 +85,7 @@ def test_bootstrap_script_creates_database_link_after_connecting_as_runtime_user
     # Spec: the database link is created connected as the runtime user, never as the admin
     script = _script()
 
-    connect_at = script.index('connect ldb_user@"host/svc"')
+    connect_at = script.index('connect ldb_user/"&ldb_runtime_pwd"@"host/svc"')
     link_at = script.index("CREATE DATABASE LINK")
     assert connect_at < link_at
     assert script.count("CREATE DATABASE LINK") == 1

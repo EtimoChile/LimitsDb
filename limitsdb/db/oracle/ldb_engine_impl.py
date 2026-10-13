@@ -1385,8 +1385,8 @@ end;"""
         if links:
             lines += [
                 "",
-                f"prompt Connect as the runtime user {runtime_username} (asks for its password).",
-                f'connect {fmt(runtime_username)}@"{runtime_dsn}"',
+                f"accept ldb_runtime_pwd char prompt {literal(f'Password of the runtime user {runtime_username}: ')} hide",
+                f'connect {fmt(runtime_username)}/"&ldb_runtime_pwd"@"{runtime_dsn}"',
             ]
             for position, link in enumerate(links, start=1):
                 variable = f"ldb_link_pwd_{position}"
