@@ -682,14 +682,9 @@ end;"""
             database_default_tablespace = OracleEngine._get_database_default_tablespace(cursor)
             for user in users:
                 fmttd_username = OracleEngine._format_identifier(user.name)
-                fmttd_default_tablespace = OracleEngine._format_identifier(user.default_tablespace)
                 tablespace_for_quota = user.default_tablespace
                 if not OracleEngine._user_exists(cursor, user.name):
-                    sql = f"CREATE USER {fmttd_username} IDENTIFIED BY ##{OracleEngine._quote(user.password)}##"
-                    if user.default_tablespace:
-                        sql += f" DEFAULT TABLESPACE {fmttd_default_tablespace}"
-                    if user.temporary_tablespace:
-                        sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
+                    sql = OracleEngine._create_user_sql(user, f"##{OracleEngine._quote(user.password)}##")
                     logger.debug(f"Creating user with SQL: {sql}")
                     OracleEngine._execute_ddl(conn, cursor, sql)
                     created.append(fmttd_username)
@@ -1198,24 +1193,7 @@ end;"""
                 fmttd_sequence_name = OracleEngine._format_identifier(sequence.name)
                 if OracleEngine._sequence_exists(cursor, sequence.owner, sequence.name):
                     continue
-                sql = (
-                    f"CREATE SEQUENCE {fmttd_owner}.{fmttd_sequence_name} "
-                    f"START WITH {sequence.start_with} INCREMENT BY {sequence.increment_by}"
-                )
-                if sequence.minvalue is not None:
-                    sql += f" MINVALUE {sequence.minvalue}"
-                else:
-                    sql += " NOMINVALUE"
-                if sequence.maxvalue is not None:
-                    sql += f" MAXVALUE {sequence.maxvalue}"
-                else:
-                    sql += " NOMAXVALUE"
-                sql += " CYCLE" if sequence.cycle else " NOCYCLE"
-                if sequence.cache is not None:
-                    sql += f" CACHE {sequence.cache}"
-                else:
-                    sql += " NOCACHE"
-                OracleEngine._execute_ddl(conn, cursor, sql)
+                OracleEngine._execute_ddl(conn, cursor, OracleEngine._create_sequence_sql(sequence))
                 created.append(f"{fmttd_owner}.{fmttd_sequence_name}")
                 changed = True
             if changed:
@@ -1295,6 +1273,139 @@ end;"""
             if cursor:
                 cursor.close()
         return granted
+
+    @staticmethod
+    def _create_sequence_sql(sequence: SequenceDefinition) -> str:
+        fmttd_owner = OracleEngine._format_identifier(sequence.owner)
+        fmttd_sequence_name = OracleEngine._format_identifier(sequence.name)
+        sql = (
+            f"CREATE SEQUENCE {fmttd_owner}.{fmttd_sequence_name} "
+            f"START WITH {sequence.start_with} INCREMENT BY {sequence.increment_by}"
+        )
+        sql += f" MINVALUE {sequence.minvalue}" if sequence.minvalue is not None else " NOMINVALUE"
+        sql += f" MAXVALUE {sequence.maxvalue}" if sequence.maxvalue is not None else " NOMAXVALUE"
+        sql += " CYCLE" if sequence.cycle else " NOCYCLE"
+        sql += f" CACHE {sequence.cache}" if sequence.cache is not None else " NOCACHE"
+        return sql
+
+    @staticmethod
+    def _create_user_sql(user: UserDefinition, password_expression: str) -> str:
+        sql = f"CREATE USER {OracleEngine._format_identifier(user.name)} IDENTIFIED BY {password_expression}"
+        if user.default_tablespace:
+            sql += f" DEFAULT TABLESPACE {OracleEngine._format_identifier(user.default_tablespace)}"
+        if user.temporary_tablespace:
+            sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
+        return sql
+
+    @staticmethod
+    def _tolerant_block(statement: str, tolerated_errors: Sequence[int]) -> str:
+        """PL/SQL block that runs the statement and ignores only the given 'already exists' errors."""
+        escaped = statement.replace("'", "''")
+        codes = ", ".join(str(code) for code in tolerated_errors)
+        return (
+            f"begin\n  execute immediate '{escaped}';\nexception\n  when others then\n"
+            f"    if sqlcode not in ({codes}) then raise; end if;\nend;\n/"
+        )
+
+    @staticmethod
+    def generate_bootstrap_script(
+        *,
+        title: str,
+        roles: Sequence[RoleDefinition],
+        users: Sequence[UserDefinition],
+        tables: Sequence[TableDefinition],
+        sequences: Sequence[SequenceDefinition],
+        supporting_owner: str,
+        links: Sequence[DatabaseLinkDefinition],
+        runtime_username: str,
+        runtime_dsn: str,
+    ) -> str:
+        fmt = OracleEngine._format_identifier
+        literal = OracleEngine._quote_literal
+        block = OracleEngine._tolerant_block
+        lines = [
+            f"-- LimitsDb: bootstrap DDL for {title}.",
+            "-- Run it in SQL*Plus connected as a user with administrative privileges on this database.",
+            "-- It asks for the passwords it needs and can be rerun: objects that already exist are skipped.",
+            "-- The database link section reconnects as the runtime user, who owns the link.",
+            "whenever oserror exit failure",
+            "whenever sqlerror exit failure",
+            "set echo on define on verify off sqlblanklines on",
+            "",
+        ]
+        for role in roles:
+            lines += [block(f"CREATE ROLE {fmt(role.name)}", (-1921,)), ""]
+        for position, user in enumerate(users, start=1):
+            name = fmt(user.name)
+            variable = f"ldb_user_pwd_{position}"
+            prompt = f"Password for user {user.name} (used only if it does not exist yet): "
+            lines += [
+                f"accept {variable} char prompt {literal(prompt)} hide",
+                block(OracleEngine._create_user_sql(user, f'"&{variable}"'), (-1920,)),
+            ]
+            admin_option_roles = {fmt(role_name) for role_name in user.roles_with_admin_option}
+            for role_name in user.roles:
+                option = " WITH ADMIN OPTION" if fmt(role_name) in admin_option_roles else ""
+                lines.append(f"GRANT {fmt(role_name)} TO {name}{option};")
+            lines += [f"GRANT {privilege} TO {name};" for privilege in user.system_privileges]
+            if user.default_tablespace:
+                lines.append(f"ALTER USER {name} QUOTA UNLIMITED ON {fmt(user.default_tablespace)};")
+            else:
+                lines += [
+                    "column ldb_ts new_value ldb_ts noprint",
+                    "select nvl((select default_tablespace from dba_users where username = "
+                    f"{literal(OracleEngine.get_identifier_str(user.name))}), (select property_value from "
+                    "database_properties where property_name = 'DEFAULT_PERMANENT_TABLESPACE')) ldb_ts from dual;",
+                    f"ALTER USER {name} QUOTA UNLIMITED ON &ldb_ts;",
+                ]
+            lines.append("")
+        for table in tables:
+            owner, table_name = fmt(table.owner), fmt(table.name)
+            columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+            lines.append(block(f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )", (-955,)))
+            if table.primary_key:
+                cols = ", ".join(fmt(col) for col in table.primary_key)
+                pk_sql = (
+                    f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {fmt(f'{table.name}_PK')} PRIMARY KEY ({cols})"
+                )
+                lines.append(block(pk_sql, (-2260, -2264)))
+            for index in table.indexes:
+                unique = "UNIQUE " if index.unique else ""
+                cols = ", ".join(fmt(col) for col in index.columns)
+                index_sql = f"CREATE {unique}INDEX {owner}.{fmt(index.name)} ON {owner}.{table_name} ({cols})"
+                lines.append(block(index_sql, (-955,)))
+            lines.append("")
+        for sequence in sequences:
+            lines += [block(OracleEngine._create_sequence_sql(sequence), (-955,)), ""]
+        lines += [f"alter session set current_schema = {fmt(supporting_owner)};", "set define off"]
+        for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
+            body = statement.strip()
+            lines += [body if body.endswith(";") and "PROCEDURE" in body else body.rstrip(";"), "/", ""]
+        lines.append("set define on")
+        if links:
+            lines += [
+                "",
+                f"prompt Connect as the runtime user {runtime_username} (asks for its password).",
+                f'connect {fmt(runtime_username)}@"{runtime_dsn}"',
+            ]
+            for position, link in enumerate(links, start=1):
+                variable = f"ldb_link_pwd_{position}"
+                create_link = (
+                    f"CREATE DATABASE LINK {fmt(link.name)} CONNECT TO {fmt(link.username)} "
+                    f'IDENTIFIED BY "&{variable}" USING {literal(link.dsn)}'
+                ).replace("'", "''")
+                prompt = f"Password of {link.username} for database link {link.name}: "
+                lines += [
+                    f"accept {variable} char prompt {literal(prompt)} hide",
+                    "declare n number;",
+                    "begin",
+                    f"  select count(*) into n from user_db_links where upper(db_link) like upper({literal(link.name)}) || '%';",
+                    f"  if n = 0 then execute immediate '{create_link}'; end if;",
+                    "end;",
+                    "/",
+                ]
+        lines += ["", f"prompt LimitsDb: OK - bootstrap for {title} completed.", "exit success", ""]
+        return "\n".join(lines)
 
     @staticmethod
     def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> list[str]:

@@ -1562,3 +1562,144 @@ def test_ldb_run_without_history_admin_applies_ddl_or_writes_pending_file(
             _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
         for role in roles:
             _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+
+def _write_bootstrap_e2e_configuration(root: Path, **credentials: str) -> None:
+    schema_dir = root / "schemas" / "bootstrap-e2e"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "db_engine: oracle",
+        f"source_dsn: {json.dumps(credentials['dsn'])}",
+        f"source_username: {credentials['source_user']}",
+        f"history_dsn: {json.dumps(credentials['dsn'])}",
+        f"history_username: {credentials['history_user']}",
+        "source_default_tablespace: USERS",
+        "history_default_tablespace: USERS",
+        "source_to_history_dblink_name: LDBT_BS_HIST",
+        "history_to_source_dblink_name: LDBT_BS_SRC",
+        "source_role_name: LDBT_BS_SOURCE_ROLE",
+        "history_role_name: LDBT_BS_HISTORY_ROLE",
+    ]
+    (schema_dir / "config.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (schema_dir / "secrets.json").write_text(
+        json.dumps(
+            {"source_password": credentials["source_password"], "history_password": credentials["history_password"]}
+        ),
+        encoding="utf-8",
+    )
+
+
+def _run_script_in_oracle_container(container: str, script: Path, *, admin_login: str, answers: list[str]) -> str:
+    """Run a generated script with SQL*Plus inside the Oracle container, answering its prompts from stdin."""
+    remote_path = f"/tmp/{script.name}"
+    subprocess.run(["docker", "cp", str(script), f"{container}:{remote_path}"], check=True, timeout=60)
+    result = subprocess.run(
+        ["docker", "exec", "-i", container, "sqlplus", "-L", "-s", admin_login, f"@{remote_path}"],
+        check=False,
+        capture_output=True,
+        input="\n".join(answers) + "\n",
+        text=True,
+        timeout=120,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, f"{script.name} failed with exit code {result.returncode}\n{output}"
+    assert "LimitsDb: OK" in output, output
+    return output
+
+
+def test_ldb_impl_without_admin_credentials_generates_scripts_a_dba_can_run_and_rerun(
+    oracle_connection: oracledb.Connection, tmp_path: Path
+):
+    # Spec: README § Bootstrap Database Objects > Without admin credentials — ldb-impl without admin
+    # credentials writes one SQL*Plus script per database under ddl_pending_dir; run in SQL*Plus by a
+    # DBA it creates the objects (the database link owned by the runtime user), and it can be rerun
+    container = os.getenv("LDB_ORACLE_TEST_CONTAINER")
+    if not container:
+        pytest.skip("LDB_ORACLE_TEST_CONTAINER (Oracle container with SQL*Plus) is not configured")
+    source_user, history_user = "LDBT_BS_SOURCE", "LDBT_BS_HISTORY"
+    roles = ("LDBT_BS_SOURCE_ROLE", "LDBT_BS_HISTORY_ROLE")
+    for user in (source_user, history_user):
+        _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+    for role in roles:
+        _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+    dsn = os.environ["LDB_ORACLE_TEST_DSN"]
+    admin_login = f"{os.environ['LDB_ORACLE_TEST_USER']}/{os.environ['LDB_ORACLE_TEST_PASSWORD']}@{dsn}"
+    source_password = f"LdbBs_{secrets.token_hex(11)}"
+    history_password = f"LdbBs_{secrets.token_hex(11)}"
+    config_root = tmp_path / "bootstrap-config"
+    pending_dir = tmp_path / "pending"
+    cli_environment = _e2e_environment(tmp_path / "bootstrap-home")
+    try:
+        # Given: a configuration without admin credentials
+        _write_bootstrap_e2e_configuration(
+            config_root,
+            dsn=dsn,
+            source_user=source_user,
+            history_user=history_user,
+            source_password=source_password,
+            history_password=history_password,
+        )
+
+        # When: ldb-impl runs
+        result = _run_cli(
+            "ldb-impl",
+            "--schema",
+            "bootstrap-e2e",
+            "--config-dir",
+            str(config_root),
+            "--ddl-pending-dir",
+            str(pending_dir),
+            environment=cli_environment,
+        )
+
+        # Then: nothing was created and one script per database was written
+        cursor = oracle_connection.cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) FROM dba_users WHERE username IN (:1, :2)", [source_user, history_user])
+            assert cursor.fetchone()[0] == 0
+        finally:
+            cursor.close()
+        (source_script,) = pending_dir.glob("bootstrap_bootstrap-e2e_source_*.sql")
+        (history_script,) = pending_dir.glob("bootstrap_bootstrap-e2e_history_*.sql")
+        assert source_script.name in result.stderr + result.stdout
+
+        # When: the DBA runs both scripts, twice (answers: user password, runtime password, link password)
+        for _ in range(2):
+            _run_script_in_oracle_container(
+                container,
+                history_script,
+                admin_login=admin_login,
+                answers=[history_password, history_password, source_password],
+            )
+            _run_script_in_oracle_container(
+                container,
+                source_script,
+                admin_login=admin_login,
+                answers=[source_password, source_password, history_password],
+            )
+
+        # Then: control objects exist and each database link is owned by its runtime user
+        cursor = oracle_connection.cursor()
+        try:
+            for user in (source_user, history_user):
+                cursor.execute(
+                    "SELECT table_name FROM dba_tables WHERE owner = :1 AND table_name IN ('LDB_CTL', 'LDB_LOG')",
+                    [user],
+                )
+                assert {row[0] for row in cursor} == {"LDB_CTL", "LDB_LOG"}
+                cursor.execute(
+                    "SELECT COUNT(*) FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = 'LDB_LOG_ID'",
+                    [user],
+                )
+                assert cursor.fetchone()[0] == 1
+            cursor.execute("SELECT owner, db_link FROM dba_db_links WHERE db_link LIKE 'LDBT_BS_%' ORDER BY db_link")
+            links = {(owner, name.split(".")[0]) for owner, name in cursor}
+            assert links == {(source_user, "LDBT_BS_HIST"), (history_user, "LDBT_BS_SRC")}
+        finally:
+            cursor.close()
+    finally:
+        for user in (source_user, history_user):
+            _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+        for role in roles:
+            _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)

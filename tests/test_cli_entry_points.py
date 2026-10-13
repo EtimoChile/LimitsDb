@@ -159,8 +159,6 @@ def test_ldb_impl_run_cli_creates_database_objects(monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     "empty_key",
     [
-        "admin_source_username",
-        "admin_history_username",
         "source_username",
         "history_username",
         "history_dsn",
@@ -168,7 +166,7 @@ def test_ldb_impl_run_cli_creates_database_objects(monkeypatch: pytest.MonkeyPat
     ],
 )
 def test_ldb_impl_run_cli_exits_with_error_when_credential_is_missing(monkeypatch: pytest.MonkeyPatch, empty_key: str):
-    # Spec: README > ldb-impl — all admin and runtime credentials are required;
+    # Spec: README > ldb-impl — runtime credentials and DSNs are required;
     # missing any of them exits with code 1 before touching the database
     # Given: a config dict with one required credential empty
     cfg = {**_FULL_IMPL_DICT, empty_key: ""}
@@ -184,6 +182,100 @@ def test_ldb_impl_run_cli_exits_with_error_when_credential_is_missing(monkeypatc
     # When / Then: SystemExit with code 1
     with pytest.raises(SystemExit) as caught:
         ldb_impl.run_cli()
+    assert caught.value.code == 1
+
+
+def _run_impl_with_admin_absent(monkeypatch: pytest.MonkeyPatch, tmp_path, absent_envs: set[str], **extra):
+    """Run ldb-impl with a recording engine double; admin credentials are removed for absent_envs."""
+    cfg = {**_FULL_IMPL_DICT, "ddl_pending_dir": str(tmp_path / "pending"), **extra}
+    if "SOURCE" in absent_envs:
+        cfg.update(admin_source_username="", admin_source_password="")
+    if "HISTORY" in absent_envs:
+        cfg.update(admin_history_username="", admin_history_password="")
+    calls: list[tuple[str, object]] = []
+    scripts: list[dict] = []
+
+    def record(name, result=None):
+        def method(conn, *args, **kwargs):
+            calls.append((name, conn.env))
+            return result or []
+
+        return method
+
+    def generate(**definitions):
+        scripts.append(definitions)
+        return "-- generated script\nexit success\n"
+
+    engine = SimpleNamespace(
+        REQUIRED_SYSTEM_PRIVILEGES=("CREATE SESSION",),
+        ensure_roles=record("roles", ["role"]),
+        ensure_users=record("users", ["user"]),
+        ensure_tables=record("tables", ["table"]),
+        ensure_sequences=record("sequences", ["seq"]),
+        ensure_supporting_objects=record("supporting", ["obj"]),
+        ensure_database_links=record("links", ["dblink"]),
+        generate_bootstrap_script=generate,
+        get_connection=lambda config, *, admin=False, env=None: SimpleNamespace(env=env, admin=admin),
+        close_connection=lambda conn: None,
+    )
+    monkeypatch.setattr(
+        ldb_impl,
+        "_parse_args",
+        lambda: SimpleNamespace(schema="s", profile=None, config_dir=None, config_file=None, set=[], log_level="INFO"),
+    )
+    monkeypatch.setattr(ldb_impl, "load_or_create_key", lambda: None)
+    monkeypatch.setattr(ldb_impl, "encrypt_secrets_in_place", lambda **k: None)
+    monkeypatch.setattr(ldb_impl, "build_config", lambda defaults, args: dict(cfg))
+    monkeypatch.setattr(ldb_impl, "get_db_engine", lambda name: engine)
+    ldb_impl.run_cli()
+    return calls, scripts
+
+
+def test_ldb_impl_without_admin_credentials_writes_one_script_per_database_and_creates_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > ldb-impl — when admin credentials for a database are absent, ldb-impl creates
+    # nothing in it and writes a bootstrap script for that database (one file per database)
+    # under ddl_pending_dir for a DBA to run; the run does not fail
+    # When: both admin credentials are absent
+    calls, scripts = _run_impl_with_admin_absent(monkeypatch, tmp_path, {"SOURCE", "HISTORY"})
+
+    # Then: nothing was created and two scripts were written, one per database
+    assert calls == []
+    files = sorted(path.name for path in (tmp_path / "pending").glob("*.sql"))
+    assert len(files) == 2
+    assert files[0].startswith("bootstrap_s_history_") and files[1].startswith("bootstrap_s_source_")
+    assert {definition["runtime_username"] for definition in scripts} == {
+        _FULL_IMPL_DICT["source_username"],
+        _FULL_IMPL_DICT["history_username"],
+    }
+
+
+def test_ldb_impl_only_writes_a_script_for_the_database_whose_admin_credentials_are_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > ldb-impl — the script is written per database: a database with admin
+    # credentials is provisioned directly, the other one gets a script
+    # When: only the history admin credentials are absent
+    calls, scripts = _run_impl_with_admin_absent(monkeypatch, tmp_path, {"HISTORY"})
+
+    # Then: SOURCE was provisioned directly (including its database link) and HISTORY got a script
+    assert {env for _, env in calls} == {"SOURCE"}
+    assert {"roles", "users", "tables", "sequences", "supporting", "links"} == {name for name, _ in calls}
+    (written,) = (tmp_path / "pending").glob("*.sql")
+    assert written.name.startswith("bootstrap_s_history_")
+    assert len(scripts) == 1
+
+
+def test_ldb_impl_exits_1_when_the_script_cannot_be_written(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ldb-impl — if the script cannot be written, ldb-impl logs the error and exits with code 1
+    # Given: ddl_pending_dir points below a regular file
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+
+    # When / Then
+    with pytest.raises(SystemExit) as caught:
+        _run_impl_with_admin_absent(monkeypatch, tmp_path, {"SOURCE", "HISTORY"}, ddl_pending_dir=str(blocker / "sub"))
     assert caught.value.code == 1
 
 
@@ -490,3 +582,11 @@ def test_ldb_init_run_cli_tolerates_missing_example_file(monkeypatch: pytest.Mon
 
     # When / Then: run_cli completes without raising
     ldb_init.run_cli()
+
+
+def test_ldb_impl_accepts_ddl_pending_dir_flag(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README § Bootstrap Database Objects > Without admin credentials — the script directory is
+    # ddl_pending_dir, set with the same --ddl-pending-dir flag as ldb-run
+    monkeypatch.setattr("sys.argv", ["ldb-impl", "--schema", "s", "--ddl-pending-dir", "out"])
+
+    assert ldb_impl._parse_args().ddl_pending_dir == "out"
