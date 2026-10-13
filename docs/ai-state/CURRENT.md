@@ -31,7 +31,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - ILM operations can archive, purge, create objects, and manage privileges.
   They are not executed against a real database without explicit authorization
   and an identified environment.
-- The test suite lives in `tests/`. Local tests are 164 (non-oracle-integration)
+- The test suite lives in `tests/`. Local tests are 166 (non-oracle-integration)
   and 11 E2E (oracle_integration). Ruff validates format and lint, and strict
   `mypy` completes without findings across the 23 package modules. The test
   layout follows `docs/prompts/test-organization.md`: core contracts in `tests/test_*.py`,
@@ -105,6 +105,11 @@ but does not replace the sources defined in `AGENTS.md`.
   tests must be derived from the specification (README, ilm.example.yml, docs/),
   not from the implementation. `AGENTS.md` references it as required reading
   before generating or modifying tests.
+- Without history admin credentials, `ldb-run` applies the history DDL delta over
+  its runtime connection; failed statements go to `ddl_pending_dir` (default
+  `ldb_ddl_pending`) as a SQL*Plus script that stops on error and ends with an OK
+  banner, and the run exits 1 (`DEC-021`). `PEND-017` now covers only `ldb-impl`
+  script generation for the base objects.
 - All project files — source code, tests, documentation, and configuration
   comments — are written in English. `AGENTS.md` § Language is the governing
   rule.
