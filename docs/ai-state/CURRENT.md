@@ -154,6 +154,8 @@ but does not replace the sources defined in `AGENTS.md`.
   review, and per-job `contents: read` permissions.
 - `DEC-018`: all project files are written in English; this rule is stated in
   `AGENTS.md` § Language.
-- `DEC-020`: history DDL admin connection is conditional; absent admin credentials
-  with a detected delta cause `ldb-run` to exit with code 1, directing the operator
-  to run `ldb-impl` first. `PEND-015` and `PEND-016` are resolved.
+- `DEC-020`: history DDL admin connection is conditional (admin present and tables
+  up to date: no admin connection). Item (b) was replaced by `DEC-021`.
+- `DEC-021`: without admin history credentials, `ldb-run` applies the history DDL
+  delta with its runtime connection; failed statements go to a file under
+  `ddl_pending_dir` and the run exits 1. `PEND-015` and `PEND-016` are resolved.

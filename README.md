@@ -275,6 +275,7 @@ Common overrides:
 --mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW simulate, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
+--ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
 --log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Adjust logger verbosity
 --ilm-config-file <path>                      # Point to a specific ILM YAML file
 --config-dir <root>                           # Override config root discovery
@@ -312,10 +313,20 @@ History table management follows the same principle:
 - **Admin credentials absent, tables already up to date**: `ldb-run` proceeds
   without an admin connection. This is the normal case for environments where a
   DBA pre-creates all history objects and admin credentials are not stored.
-- **Admin credentials absent, DDL changes are required**: `ldb-run` exits with
-  code 1 and logs an error. Use `ldb-impl` to create or update the history
-  objects, then rerun. Running with an incomplete history schema would produce
-  silent data gaps or runtime failures.
+- **Admin credentials absent, DDL changes are required**: `ldb-run` applies the
+  DDL directly over the runtime history connection, with no prior privilege
+  check. It succeeds when the runtime user owns the objects or holds the needed
+  privileges (for example `ALTER`). Each statement that Oracle rejects is
+  recorded and the remaining statements are still attempted. If at least one
+  statement failed, `ldb-run` writes the failed statements, each preceded by its
+  error, to `history_ddl_<schema>_<YYYYMMDD_HHMMSS>.sql` under `ddl_pending_dir`
+  (default `ldb_ddl_pending`), logs an error naming the file, and exits with
+  code 1. The file is plain SQL for SQL*Plus (no PL/SQL): it stops at the first
+  failing statement with a non-zero exit code, and only a run that reaches the
+  final `LimitsDb: OK` banner applied everything. The recorded errors are
+  comments. A DBA reviews and runs the file, then `ldb-run` is rerun. Nothing is
+  written to stdout, and the directory is created only when a file is written.
+  This is unrelated to `--mode SCRIPT`, which emits the ILM SQL blocks.
 
 ### Configuration parameters reference
 
@@ -327,6 +338,7 @@ History table management follows the same principle:
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
+| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials.                                                                      | Default `ldb_ddl_pending`.                                                           |
 | `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
 | `schema`                 | Configuration set name: identifies a system or application (e.g., `billing`). Not a database schema — it is the folder that groups all configuration files for one target. | Required on CLI; no persisted default. |
@@ -353,6 +365,7 @@ History table management follows the same principle:
 | `use_added_columns`      | —                          | —                            | `config[.<PROFILE>].yml: use_added_columns`        |
 | `add_ldb_columns`        | —                          | —                            | `config[.<PROFILE>].yml: add_ldb_columns`          |
 | `parallel_max`           | `--parallel-max`           | `LDB_PARALLEL_MAX`           | `config[.<PROFILE>].yml: parallel_max`             |
+| `ddl_pending_dir`        | `--ddl-pending-dir`        | `LDB_DDL_PENDING_DIR`        | `config[.<PROFILE>].yml: ddl_pending_dir`          |
 | `db_engine`              | `--db-engine`              | `LDB_DB_ENGINE`              | `config[.<PROFILE>].yml: db_engine`                |
 | `log_level`              | `--log-level`              | `LDB_LOG_LEVEL`              | `config[.<PROFILE>].yml: log_level`                |
 | `schema`                 | `--schema`                 | `LDB_SCHEMA`                 | CLI only (not stored).                             |
@@ -410,6 +423,7 @@ Every key is commented; the default value and short help appear inline. Example:
 # use_added_columns: True  # Populate derived columns in history tables
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables
 # parallel_max: 10      # Maximum number of parallel processes
+# ddl_pending_dir: "ldb_ddl_pending"  # Where failed history DDL is written for a DBA
 # db_engine: "oracle"   # Database engine
 # log_level: "INFO"     # Logging level
 ```

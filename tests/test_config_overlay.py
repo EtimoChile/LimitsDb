@@ -674,6 +674,7 @@ def test_execution_view_is_frozen_and_reflects_config():
         generate_script=True,
         parallel_max=10,
         log_level="INFO",
+        ddl_pending_dir="ldb_ddl_pending",
     )
     assert cfg.to_dict()["chunk_size"] == 250
     with pytest.raises(FrozenInstanceError):

@@ -1083,6 +1083,22 @@ end;"""
                 cursor.close()
 
     @staticmethod
+    def execute_ddl_statements(conn: oracledb.Connection, statements: Sequence[str]) -> list[tuple[str, str]]:
+        failures: list[tuple[str, str]] = []
+        cursor = conn.cursor()
+        try:
+            for statement in statements:
+                try:
+                    OracleEngine._execute_ddl(conn, cursor, statement)
+                except oracledb.Error as exc:
+                    message = " ".join(str(exc).split())
+                    logger.warning("DDL statement failed and was left pending: %s", message)
+                    failures.append((statement, message))
+        finally:
+            cursor.close()
+        return failures
+
+    @staticmethod
     def get_primary_key_columns(
         conn: oracledb.Connection, owner: str, table_name: str, table_cnf: Mapping[str, Any]
     ) -> tuple[str, ...]:

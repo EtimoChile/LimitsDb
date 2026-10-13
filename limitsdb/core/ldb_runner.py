@@ -1,5 +1,7 @@
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from datetime import datetime
 from operator import attrgetter
+from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 from limitsdb.core.ldb_errors import ConfigurationError
@@ -301,6 +303,35 @@ def _build_history_table_definition(
     )
 
 
+def _write_pending_ddl(config: Config, failures: list[tuple[str, str]]) -> Path:
+    """Write the DDL statements that could not be applied to a file for a DBA to run."""
+    pending_dir = Path(config.execution.ddl_pending_dir)
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = pending_dir / f"history_ddl_{config.context.schema}_{stamp}.sql"
+    lines = [
+        "-- LimitsDb: history DDL that ldb-run could not apply with its runtime credentials.",
+        f"-- Schema: {config.context.schema}; history user: {config.history_username}",
+        "-- Run it from SQL*Plus as a user with the required privileges, then rerun ldb-run.",
+        "-- Plain SQL, no PL/SQL. Execution stops at the first failing statement and SQL*Plus",
+        "-- exits with a non-zero code; reaching the final OK banner means every statement worked.",
+        "-- The '-- Failed with' comments record why ldb-run could not apply each statement.",
+        "whenever oserror exit failure",
+        "whenever sqlerror exit failure",
+        "set echo on define off sqlblanklines on",
+        "",
+    ]
+    for statement, error in failures:
+        lines.append(f"-- Failed with: {error}")
+        lines.append(f"{statement};")
+        lines.append("")
+    lines.append(f"prompt LimitsDb: OK - {len(failures)} pending history DDL statement(s) applied.")
+    lines.append("exit success")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def _ensure_history_tables(
     config: Config,
     engine: DatabaseEngine,
@@ -313,8 +344,10 @@ def _ensure_history_tables(
     - Admin HISTORY credentials present, tables up to date: skip admin connection (DEC-020).
     - Admin HISTORY credentials present, delta detected: open admin connection and execute DDL.
     - Admin HISTORY credentials absent, tables up to date: proceed without connecting.
-    - Admin HISTORY credentials absent, delta detected: exit 1 with a diagnostic message.
-      Use ldb-impl to create or update history objects, then rerun (DEC-020).
+    - Admin HISTORY credentials absent, delta detected: execute the DDL with the runtime
+      HISTORY connection (it succeeds when that user owns the objects or holds the privileges).
+      Every statement that fails is written to a file under ``ddl_pending_dir`` and the run
+      exits 1 after attempting all statements, so a DBA can apply the file (DEC-021).
     """
     table_defs_and_cnf: list[tuple[Any, ProcessedTableConfig]] = []
     for table_cnf in tables_config.values():
@@ -354,17 +387,13 @@ def _ensure_history_tables(
         if inspection_failed:
             logger.warning(
                 "History admin credentials are absent and the schema state could not be inspected. "
-                "Ensure history objects are created with ldb-impl before running ldb-run --mode EXECUTE."
+                "Ensure the history objects exist and are up to date before running ldb-run --mode EXECUTE."
             )
             return
-        if delta_statements:
-            logger.error(
-                "History admin credentials are absent but %d DDL change(s) are required. "
-                "Run ldb-impl to create or update the history objects, then rerun.",
-                len(delta_statements),
-            )
-            raise SystemExit(1)
-        logger.info("History tables are up to date; no admin credentials needed.")
+        if not delta_statements:
+            logger.info("History tables are up to date; no admin credentials needed.")
+            return
+        _apply_history_delta_without_admin(config, engine, delta_statements)
         return
 
     # Admin credentials present.
@@ -380,6 +409,30 @@ def _ensure_history_tables(
     finally:
         if history_admin_connection:
             engine.close_connection(history_admin_connection)
+
+
+def _apply_history_delta_without_admin(config: Config, engine: DatabaseEngine, delta_statements: list[str]) -> None:
+    """Run the history DDL delta with runtime credentials; leave failures in a pending file and exit 1."""
+    logger.info(
+        "History admin credentials are absent; applying %d DDL change(s) with runtime credentials.",
+        len(delta_statements),
+    )
+    runtime_conn = engine.get_connection(config, admin=False, env="HISTORY")
+    try:
+        failures = engine.execute_ddl_statements(runtime_conn, delta_statements)
+    finally:
+        engine.close_connection(runtime_conn)
+    if not failures:
+        return
+    pending_file = _write_pending_ddl(config, failures)
+    logger.error(
+        "%d of %d history DDL change(s) could not be applied with runtime credentials. "
+        "They were written to %s; ask a DBA to review and run that file, then rerun.",
+        len(failures),
+        len(delta_statements),
+        pending_file,
+    )
+    raise SystemExit(1)
 
 
 def _initialize_worker_logger(log_level: str) -> None:
