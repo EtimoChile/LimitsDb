@@ -155,5 +155,5 @@ but does not replace the sources defined in `AGENTS.md`.
 - `DEC-018`: all project files are written in English; this rule is stated in
   `AGENTS.md` § Language.
 - `DEC-020`: history DDL admin connection is conditional; absent admin credentials
-  with a detected delta emit a DDL script to stdout instead of failing. `PEND-015`
-  and `PEND-016` are resolved.
+  with a detected delta cause `ldb-run` to exit with code 1, directing the operator
+  to run `ldb-impl` first. `PEND-015` and `PEND-016` are resolved.

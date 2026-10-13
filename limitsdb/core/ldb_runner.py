@@ -301,13 +301,6 @@ def _build_history_table_definition(
     )
 
 
-def _emit_history_ddl_script(statements: list[str], schema: str) -> None:
-    print("-- LimitsDb history table DDL: apply before the next ldb-run --mode EXECUTE")
-    print(f"-- Schema: {schema}")
-    for stmt in statements:
-        print(stmt + ";")
-
-
 def _ensure_history_tables(
     config: Config,
     engine: DatabaseEngine,
@@ -317,11 +310,11 @@ def _ensure_history_tables(
     """Ensure history tables match their required definitions.
 
     Behaviour by credential state:
-    - Admin HISTORY credentials present, tables up to date: skip admin connection (PEND-015).
+    - Admin HISTORY credentials present, tables up to date: skip admin connection (DEC-020).
     - Admin HISTORY credentials present, delta detected: open admin connection and execute DDL.
     - Admin HISTORY credentials absent, tables up to date: proceed without connecting.
-    - Admin HISTORY credentials absent, delta detected: emit a DDL script to stdout and proceed
-      (the DBA must apply the script; PEND-016).
+    - Admin HISTORY credentials absent, delta detected: exit 1 with a diagnostic message.
+      Use ldb-impl to create or update history objects, then rerun (DEC-020).
     """
     table_defs_and_cnf: list[tuple[Any, ProcessedTableConfig]] = []
     for table_cnf in tables_config.values():
@@ -361,18 +354,17 @@ def _ensure_history_tables(
         if inspection_failed:
             logger.warning(
                 "History admin credentials are absent and the schema state could not be inspected. "
-                "Ensure history objects are created before running ldb-run --mode EXECUTE."
+                "Ensure history objects are created with ldb-impl before running ldb-run --mode EXECUTE."
             )
             return
         if delta_statements:
-            logger.warning(
-                "History admin credentials are absent; %d DDL statement(s) are required but cannot be applied. "
-                "Review and apply the emitted script, then rerun.",
+            logger.error(
+                "History admin credentials are absent but %d DDL change(s) are required. "
+                "Run ldb-impl to create or update the history objects, then rerun.",
                 len(delta_statements),
             )
-            _emit_history_ddl_script(delta_statements, config.context.schema)
-        else:
-            logger.info("History tables are up to date; no admin credentials needed.")
+            raise SystemExit(1)
+        logger.info("History tables are up to date; no admin credentials needed.")
         return
 
     # Admin credentials present.

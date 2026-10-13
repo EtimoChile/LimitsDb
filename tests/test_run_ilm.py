@@ -1333,12 +1333,10 @@ def test_history_admin_connection_opened_when_ddl_changes_are_needed(
     assert len(ddl_executed) == 1
 
 
-def test_history_ddl_script_emitted_when_admin_credentials_absent(
-    capsys: pytest.CaptureFixture,
-):
+def test_history_run_exits_with_error_when_admin_absent_and_ddl_needed():
     # Spec: README > Run ILM > Admin credentials in ldb-run — when admin history
-    # credentials are absent and a DDL delta is detected, ldb-run emits a DDL script
-    # to stdout and proceeds without executing the DDL.
+    # credentials are absent and a DDL delta is detected, ldb-run exits with code 1.
+    # The DBA must run ldb-impl to create or update history objects before rerunning.
     # Given: engine reporting a one-statement delta; no admin history credentials
     class DummyEngine:
         def get_connection(self, config, *, admin=False, env=None):
@@ -1367,17 +1365,15 @@ def test_history_ddl_script_emitted_when_admin_credentials_absent(
     tables_config = _make_tables_config_with_one_table()
     source_admin_conn = SimpleNamespace(admin=True, env=None)
 
-    # When
-    ldb_runner._ensure_history_tables(
-        _execute_config_no_history_admin(),
-        DummyEngine(),
-        source_admin_conn,
-        tables_config,  # type: ignore[arg-type]
-    )
-
-    # Then: DDL is printed to stdout; ensure_table_structure was NOT called
-    out = capsys.readouterr().out
-    assert "CREATE TABLE HIST.T1" in out
+    # When / Then: SystemExit(1) is raised; ensure_table_structure was NOT called
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner._ensure_history_tables(
+            _execute_config_no_history_admin(),
+            DummyEngine(),  # type: ignore[arg-type]
+            source_admin_conn,
+            tables_config,  # type: ignore[arg-type]
+        )
+    assert exc_info.value.code == 1
 
 
 def test_no_output_and_no_admin_conn_when_tables_up_to_date_without_admin_credentials(
