@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from limitsdb.core.ldb_crypto import load_or_create_key
 from limitsdb.core.ldb_errors import LimitsDbError
@@ -32,6 +35,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config-file", help="Additional configuration overlay")
     parser.add_argument(
         "--set", action="append", default=[], help="Overrides like key=value; supports dotted keys for nesting"
+    )
+    parser.add_argument(
+        "--ddl-pending-dir", help="Directory for the bootstrap scripts written when admin credentials are absent"
     )
     parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level"
@@ -101,10 +107,6 @@ def run_cli() -> None:
         connections = config.connections
         administration = config.administration
 
-        if not administration.source.username or not administration.source.password:
-            raise ValueError("admin_source_username and admin_source_password are required")
-        if not administration.history.username or not administration.history.password:
-            raise ValueError("admin_history_username and admin_history_password are required")
         if not connections.source.username or not connections.source.password:
             raise ValueError("source_username and source_password are required")
         if not connections.history.username or not connections.history.password:
@@ -158,48 +160,100 @@ def run_cli() -> None:
     )
 
     summary: dict[str, list[str]] = {}
+    script_files: list[Path] = []
+    source_has_admin = bool(administration.source.username and administration.source.password)
+    history_has_admin = bool(administration.history.username and administration.history.password)
 
-    source_admin_conn = engine.get_connection(config, admin=True, env="SOURCE")
-    try:
-        summary["source_roles"] = engine.ensure_roles(source_admin_conn, source_roles)
-        summary["source_users"] = engine.ensure_users(source_admin_conn, [source_user])
-        summary["source_tables"] = engine.ensure_tables(source_admin_conn, source_tables)
-        summary["source_sequences"] = engine.ensure_sequences(source_admin_conn, source_sequences)
-        summary["source_supporting_objects"] = engine.ensure_supporting_objects(
-            source_admin_conn, connections.source.username
+    def write_script(env: str, **definitions: Any) -> None:
+        content = engine.generate_bootstrap_script(title=f"{env} database of schema {config.schema}", **definitions)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = Path(config.execution.ddl_pending_dir) / f"bootstrap_{config.schema}_{env.lower()}_{stamp}.sql"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            logger.error(
+                "Admin credentials for %s are absent and the script could not be written to %s: %s", env, path, exc
+            )
+            raise SystemExit(1) from exc
+        script_files.append(path)
+
+    if not source_has_admin:
+        write_script(
+            "SOURCE",
+            roles=source_roles,
+            users=[source_user],
+            tables=source_tables,
+            sequences=source_sequences,
+            supporting_owner=connections.source.username,
+            links=[source_db_link],
+            runtime_username=connections.source.username,
+            runtime_dsn=connections.source.dsn,
         )
-    finally:
-        engine.close_connection(source_admin_conn)
-
-    history_admin_conn = engine.get_connection(config, admin=True, env="HISTORY")
-    try:
-        summary["history_roles"] = engine.ensure_roles(history_admin_conn, history_roles)
-        summary["history_users"] = engine.ensure_users(history_admin_conn, [history_user])
-        summary["history_tables"] = engine.ensure_tables(history_admin_conn, history_tables)
-        summary["history_sequences"] = engine.ensure_sequences(history_admin_conn, history_sequences)
-        summary["history_supporting_objects"] = engine.ensure_supporting_objects(
-            history_admin_conn, connections.history.username
+    if not history_has_admin:
+        write_script(
+            "HISTORY",
+            roles=history_roles,
+            users=[history_user],
+            tables=history_tables,
+            sequences=history_sequences,
+            supporting_owner=connections.history.username,
+            links=[history_db_link],
+            runtime_username=connections.history.username,
+            runtime_dsn=connections.history.dsn,
         )
-    finally:
-        engine.close_connection(history_admin_conn)
 
-    source_user_conn = engine.get_connection(config, admin=False, env="SOURCE")
-    try:
-        summary["source_database_links"] = engine.ensure_database_links(source_user_conn, [source_db_link])
-    finally:
-        engine.close_connection(source_user_conn)
+    if source_has_admin:
+        source_admin_conn = engine.get_connection(config, admin=True, env="SOURCE")
+        try:
+            summary["source_roles"] = engine.ensure_roles(source_admin_conn, source_roles)
+            summary["source_users"] = engine.ensure_users(source_admin_conn, [source_user])
+            summary["source_tables"] = engine.ensure_tables(source_admin_conn, source_tables)
+            summary["source_sequences"] = engine.ensure_sequences(source_admin_conn, source_sequences)
+            summary["source_supporting_objects"] = engine.ensure_supporting_objects(
+                source_admin_conn, connections.source.username
+            )
+        finally:
+            engine.close_connection(source_admin_conn)
 
-    history_user_conn = engine.get_connection(config, admin=False, env="HISTORY")
-    try:
-        summary["history_database_links"] = engine.ensure_database_links(history_user_conn, [history_db_link])
-    finally:
-        engine.close_connection(history_user_conn)
+    if history_has_admin:
+        history_admin_conn = engine.get_connection(config, admin=True, env="HISTORY")
+        try:
+            summary["history_roles"] = engine.ensure_roles(history_admin_conn, history_roles)
+            summary["history_users"] = engine.ensure_users(history_admin_conn, [history_user])
+            summary["history_tables"] = engine.ensure_tables(history_admin_conn, history_tables)
+            summary["history_sequences"] = engine.ensure_sequences(history_admin_conn, history_sequences)
+            summary["history_supporting_objects"] = engine.ensure_supporting_objects(
+                history_admin_conn, connections.history.username
+            )
+        finally:
+            engine.close_connection(history_admin_conn)
+
+    if source_has_admin:
+        source_user_conn = engine.get_connection(config, admin=False, env="SOURCE")
+        try:
+            summary["source_database_links"] = engine.ensure_database_links(source_user_conn, [source_db_link])
+        finally:
+            engine.close_connection(source_user_conn)
+
+    if history_has_admin:
+        history_user_conn = engine.get_connection(config, admin=False, env="HISTORY")
+        try:
+            summary["history_database_links"] = engine.ensure_database_links(history_user_conn, [history_db_link])
+        finally:
+            engine.close_connection(history_user_conn)
 
     anything_created = any(summary.values())
     for key, values in summary.items():
         if values:
             logger.info("Created %s: %s", key.replace("_", " "), ", ".join(values))
-    if not anything_created:
+    for script_file in script_files:
+        logger.warning(
+            "Admin credentials are absent for this database, so nothing was created there. "
+            "Ask a DBA to run %s in SQL*Plus.",
+            script_file,
+        )
+    if not anything_created and not script_files:
         logger.info("All LimitsDb database objects are already present.")
 
 

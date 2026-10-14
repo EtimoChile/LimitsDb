@@ -2,7 +2,7 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-13
+last-reviewed: 2026-10-14
 last-updated: 2026-10-13
 ---
 
@@ -15,7 +15,7 @@ but does not replace the sources defined in `AGENTS.md`.
 
 - The integration branch is `development`; `main` represents stable versions
   per `README.md`.
-- The version declared in `pyproject.toml` is `0.5.0` and requires Python
+- The version declared in `pyproject.toml` is `0.6.0` and requires Python
   `>=3.12,<4.0`.
 - The current name is `LimitsDb`, the Python package is `limitsdb`, and the
   public technical prefix is `ldb` / `LDB`; the change from the previous name
@@ -31,7 +31,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - ILM operations can archive, purge, create objects, and manage privileges.
   They are not executed against a real database without explicit authorization
   and an identified environment.
-- The test suite lives in `tests/`. Local tests are 172 (non-oracle-integration)
+- The test suite lives in `tests/`. Local tests are 180 (non-oracle-integration)
   and 16 E2E (oracle_integration, 3 new ones for DEC-021 not yet run in CI). Ruff validates format and lint, and strict
   `mypy` completes without findings across the 23 package modules. The test
   layout follows `docs/prompts/test-organization.md`: core contracts in `tests/test_*.py`,
@@ -108,8 +108,10 @@ but does not replace the sources defined in `AGENTS.md`.
 - Without history admin credentials, `ldb-run` applies the history DDL delta over
   its runtime connection; failed statements go to `ddl_pending_dir` (default
   `ldb_ddl_pending`) as a SQL*Plus script that stops on error and ends with an OK
-  banner, and the run exits 1 (`DEC-021`). `PEND-017` now covers only `ldb-impl`
-  script generation for the base objects.
+  banner, and the run exits 1 (`DEC-021`).
+- Without admin credentials for a database, `ldb-impl` writes a rerunnable
+  SQL*Plus bootstrap script for it under `ddl_pending_dir`, prompting for
+  passwords and creating the database link as the runtime user (`DEC-022`).
 - All project files — source code, tests, documentation, and configuration
   comments — are written in English. `AGENTS.md` § Language is the governing
   rule.
@@ -164,3 +166,13 @@ but does not replace the sources defined in `AGENTS.md`.
 - `DEC-021`: without admin history credentials, `ldb-run` applies the history DDL
   delta with its runtime connection; failed statements go to a file under
   `ddl_pending_dir` and the run exits 1. `PEND-015` and `PEND-016` are resolved.
+- `DEC-023`: `PREVIEW` applies the same DDL and grants as `EXECUTE` and skips only the
+  data movement; `VALIDATE` and `PLAN` stay read-only.
+- `DEC-024`: `SCRIPT` applies nothing; one-time DDL and grants go to files under
+  `ddl_pending_dir`, the ILM blocks stay on stdout; `history_baseline` (`EMPTY`|`SOURCE`)
+  is assumed when history cannot be read.
+- `DEC-025`: history DDL always travels with the matching grants (executed or written to a file).
+- `DEC-026`: one function (`deliver_ddl`, `limitsdb/core/ldb_ddl.py`) decides execute-or-file for every
+  DDL helper; the engine only generates statements and executes them.
+- `DEC-022`: without admin credentials, `ldb-impl` writes one bootstrap script
+  per database (PL/SQL blocks tolerating only "already exists"); `PEND-017` is resolved.

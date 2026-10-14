@@ -44,7 +44,7 @@ removing that fallback is outside this migration.
 typed views while the flat public fields and serialization remain unchanged:
 
 - `ExecutionConfig`: action, mode, chunk size, parallelism, logging, script
-  generation, history-column behavior, and the pending-DDL directory;
+  generation, history-column behavior, the pending-DDL directory, and the assumed history baseline for `SCRIPT`;
 - `DatabaseEndpoint`: DSN and application credentials for one environment;
 - `ConnectionConfig`: source and history `DatabaseEndpoint` values plus the
   selected engine;

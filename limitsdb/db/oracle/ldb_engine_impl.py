@@ -192,6 +192,7 @@ class OracleEngine(DatabaseEngine):
 
     # states and class constants
     _connection_envs: ClassVar[dict[int, str]] = {}
+    _admin_connections: ClassVar[set[int]] = set()
     REQUIRED_SYSTEM_PRIVILEGES: tuple[str, ...] = (
         "CREATE SESSION",
         "ALTER SESSION",
@@ -228,6 +229,8 @@ class OracleEngine(DatabaseEngine):
         try:
             connection = oracledb.connect(user=user, password=password, dsn=dsn)
             OracleEngine._register_connection_env(connection, env)
+            if admin:
+                OracleEngine._admin_connections.add(id(connection))
             return cast(oracledb.Connection, connection)
         except Exception as exc:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
@@ -241,6 +244,7 @@ class OracleEngine(DatabaseEngine):
         try:
             if conn:
                 OracleEngine._register_connection_env(conn, None)
+                OracleEngine._admin_connections.discard(id(conn))
                 conn.close()
         except Exception:
             logger.critical("Failed to close Oracle DB connection.", exc_info=True)
@@ -682,14 +686,9 @@ end;"""
             database_default_tablespace = OracleEngine._get_database_default_tablespace(cursor)
             for user in users:
                 fmttd_username = OracleEngine._format_identifier(user.name)
-                fmttd_default_tablespace = OracleEngine._format_identifier(user.default_tablespace)
                 tablespace_for_quota = user.default_tablespace
                 if not OracleEngine._user_exists(cursor, user.name):
-                    sql = f"CREATE USER {fmttd_username} IDENTIFIED BY ##{OracleEngine._quote(user.password)}##"
-                    if user.default_tablespace:
-                        sql += f" DEFAULT TABLESPACE {fmttd_default_tablespace}"
-                    if user.temporary_tablespace:
-                        sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
+                    sql = OracleEngine._create_user_sql(user, f"##{OracleEngine._quote(user.password)}##")
                     logger.debug(f"Creating user with SQL: {sql}")
                     OracleEngine._execute_ddl(conn, cursor, sql)
                     created.append(fmttd_username)
@@ -890,8 +889,36 @@ end;"""
                 cursor.close()
 
     @staticmethod
+    def _create_table_statements(table: TableDefinition) -> list[str]:
+        """DDL that creates the table with its primary key and desired indexes."""
+        fmttd_owner = OracleEngine._format_identifier(table.owner)
+        fmttd_table_name = OracleEngine._format_identifier(table.name)
+        fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+        statements = [f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )"]
+        desired_pk = tuple(table.primary_key or ())
+        if desired_pk:
+            fmttd_pk = tuple(OracleEngine._format_identifier(c) for c in desired_pk)
+            fmttd_cn = OracleEngine._format_identifier(f"{table.name}_PK")
+            statements.append(
+                f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_cn}"
+                f" PRIMARY KEY ({', '.join(fmttd_pk)})"
+            )
+        for index_name, (columns, is_unique) in OracleEngine._prepare_desired_indexes(table).items():
+            fmttd_iname = OracleEngine._format_identifier(index_name)
+            fmttd_cols = ", ".join(OracleEngine._format_identifier(c) for c in columns)
+            unique_clause = "UNIQUE " if is_unique else ""
+            statements.append(
+                f"CREATE {unique_clause}INDEX {fmttd_owner}.{fmttd_iname}"
+                f" ON {fmttd_owner}.{fmttd_table_name} ({fmttd_cols})"
+            )
+        return statements
+
+    @staticmethod
     def _compute_table_structure_delta(
-        conn: oracledb.Connection, cursor: oracledb.Cursor, table: TableDefinition
+        conn: oracledb.Connection,
+        cursor: oracledb.Cursor,
+        table: TableDefinition,
+        reference: tuple[str, str] | None = None,
     ) -> list[str]:
         """Compute DDL statements to bring the table to the required structure using accessible views.
 
@@ -903,36 +930,18 @@ end;"""
         statements: list[str] = []
         fmttd_owner = OracleEngine._format_identifier(table.owner)
         fmttd_table_name = OracleEngine._format_identifier(table.name)
+        # The current structure is read from the reference when one is given, else from the table.
+        current_owner, current_name = reference or (table.owner, table.name)
 
         cursor.execute(
             "SELECT 1 FROM all_tables WHERE owner = :1 AND table_name = :2",
-            [table.owner, table.name],
+            [current_owner, current_name],
         )
         if cursor.fetchone() is None:
-            fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-            statements.append(f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )")
-            desired_pk = tuple(table.primary_key or ())
-            if desired_pk:
-                fmttd_pk = tuple(OracleEngine._format_identifier(c) for c in desired_pk)
-                desired_constraint_name = f"{table.name}_PK"
-                fmttd_cn = OracleEngine._format_identifier(desired_constraint_name)
-                statements.append(
-                    f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_cn}"
-                    f" PRIMARY KEY ({', '.join(fmttd_pk)})"
-                )
-            desired_indexes = OracleEngine._prepare_desired_indexes(table)
-            for index_name, (columns, is_unique) in desired_indexes.items():
-                fmttd_iname = OracleEngine._format_identifier(index_name)
-                fmttd_cols = ", ".join(OracleEngine._format_identifier(c) for c in columns)
-                unique_clause = "UNIQUE " if is_unique else ""
-                statements.append(
-                    f"CREATE {unique_clause}INDEX {fmttd_owner}.{fmttd_iname}"
-                    f" ON {fmttd_owner}.{fmttd_table_name} ({fmttd_cols})"
-                )
-            return statements
+            return OracleEngine._create_table_statements(table)
 
         # Table exists: check columns
-        _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
+        _, existing_columns = OracleEngine.get_table_columns(conn, current_owner, current_name)
         for column in table.columns:
             column_definition = OracleEngine._column_sql(column)
             if column.name not in existing_columns:
@@ -947,7 +956,7 @@ end;"""
               FROM all_constraints
              WHERE owner = :1 AND table_name = :2 AND constraint_type = 'P'
             """,
-            [table.owner, table.name],
+            [current_owner, current_name],
         )
         row = cursor.fetchone()
         existing_pk_name: str | None = None
@@ -957,7 +966,7 @@ end;"""
             existing_pk_name, existing_pk_index = row[0], row[1]
             cursor.execute(
                 "SELECT column_name FROM all_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
-                [table.owner, existing_pk_name],
+                [current_owner, existing_pk_name],
             )
             existing_pk_cols = tuple(r[0] for r in cast(Iterable[tuple[str]], cursor))
 
@@ -970,8 +979,8 @@ end;"""
              WHERE i.owner = :owner AND i.table_name = :table_name
              ORDER BY i.index_name, c.column_position
             """,
-            owner=table.owner,
-            table_name=table.name,
+            owner=current_owner,
+            table_name=current_name,
         )
         idx_map: dict[str, dict[str, Any]] = {}
         for index_name, uniqueness, column_name in cast(Iterable[tuple[str, str, str]], cursor):
@@ -1003,15 +1012,11 @@ end;"""
                 effective_pk_index = desired_constraint_name
             elif existing_pk_cols != desired_pk:
                 if existing_pk_name:
-                    statements.append(
-                        f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT"
-                        f" {OracleEngine._format_identifier(existing_pk_name)}"
-                    )
-                    # Use the raw (uppercase) name for dict lookup; format only for the SQL statement.
-                    index_to_drop = existing_pk_index or existing_pk_name
-                    if index_to_drop and index_to_drop in effective_indexes:
-                        statements.append(f"DROP INDEX {fmttd_owner}.{OracleEngine._format_identifier(index_to_drop)}")
-                        effective_indexes.pop(index_to_drop, None)
+                    # One statement drops the constraint and its index, whether Oracle created the index
+                    # implicitly or not; a separate DROP INDEX would fail with ORA-01418 in the implicit case.
+                    statements.append(f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP PRIMARY KEY DROP INDEX")
+                    # Use the raw (uppercase) name for dict lookup.
+                    effective_indexes.pop(existing_pk_index or existing_pk_name, None)
                     effective_pk_name = None
                     effective_pk_index = None
                 existing_index_info = effective_indexes.get(desired_constraint_name)
@@ -1025,14 +1030,8 @@ end;"""
                 effective_pk_name = desired_constraint_name
                 effective_pk_index = desired_constraint_name
         elif existing_pk_cols and existing_pk_name:
-            statements.append(
-                f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT"
-                f" {OracleEngine._format_identifier(existing_pk_name)}"
-            )
-            index_to_drop = existing_pk_index or existing_pk_name
-            if index_to_drop and index_to_drop in effective_indexes:
-                statements.append(f"DROP INDEX {fmttd_owner}.{OracleEngine._format_identifier(index_to_drop)}")
-                effective_indexes.pop(index_to_drop, None)
+            statements.append(f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP PRIMARY KEY DROP INDEX")
+            effective_indexes.pop(existing_pk_index or existing_pk_name, None)
             effective_pk_name = None
             effective_pk_index = None
 
@@ -1070,12 +1069,17 @@ end;"""
 
     @staticmethod
     def generate_table_structure_script(
-        conn: oracledb.Connection, table: TableDefinition, table_cnf: Mapping[str, Any]
+        conn: oracledb.Connection | None,
+        table: TableDefinition,
+        table_cnf: Mapping[str, Any],
+        reference: tuple[str, str] | None = None,
     ) -> list[str]:
+        if conn is None:
+            return OracleEngine._create_table_statements(table)
         cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            return OracleEngine._compute_table_structure_delta(conn, cursor, table)
+            return OracleEngine._compute_table_structure_delta(conn, cursor, table, reference)
         except Exception as exc:
             raise ExecutionError("Failed to generate table structure script") from exc
         finally:
@@ -1108,11 +1112,12 @@ end;"""
             _, columns, _ = OracleEngine._get_primary_key_info(cursor, owner, table_name)
             if columns:
                 return tuple(col for col in columns)
+            scope = OracleEngine._dictionary_scope(cursor)
             cursor.execute(
-                """
+                f"""
                 SELECT i.index_name, i.uniqueness, c.column_name, s.distinct_keys
-                FROM dba_indexes i JOIN dba_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name
-                LEFT JOIN dba_ind_statistics s ON s.owner = i.owner AND s.index_name = i.index_name AND s.partition_name IS NULL
+                FROM {scope}_indexes i JOIN {scope}_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name
+                LEFT JOIN {scope}_ind_statistics s ON s.owner = i.owner AND s.index_name = i.index_name AND s.partition_name IS NULL
                 WHERE i.owner = :owner
                 AND i.table_name = :table_name
                 ORDER BY i.index_name, c.column_position
@@ -1198,24 +1203,7 @@ end;"""
                 fmttd_sequence_name = OracleEngine._format_identifier(sequence.name)
                 if OracleEngine._sequence_exists(cursor, sequence.owner, sequence.name):
                     continue
-                sql = (
-                    f"CREATE SEQUENCE {fmttd_owner}.{fmttd_sequence_name} "
-                    f"START WITH {sequence.start_with} INCREMENT BY {sequence.increment_by}"
-                )
-                if sequence.minvalue is not None:
-                    sql += f" MINVALUE {sequence.minvalue}"
-                else:
-                    sql += " NOMINVALUE"
-                if sequence.maxvalue is not None:
-                    sql += f" MAXVALUE {sequence.maxvalue}"
-                else:
-                    sql += " NOMAXVALUE"
-                sql += " CYCLE" if sequence.cycle else " NOCYCLE"
-                if sequence.cache is not None:
-                    sql += f" CACHE {sequence.cache}"
-                else:
-                    sql += " NOCACHE"
-                OracleEngine._execute_ddl(conn, cursor, sql)
+                OracleEngine._execute_ddl(conn, cursor, OracleEngine._create_sequence_sql(sequence))
                 created.append(f"{fmttd_owner}.{fmttd_sequence_name}")
                 changed = True
             if changed:
@@ -1261,6 +1249,22 @@ end;"""
         return created
 
     @staticmethod
+    def generate_table_privilege_script(
+        role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[str]:
+        return [
+            OracleEngine._grant_sql(role, owner, table_name, privilege.upper())
+            for owner, table_name in tables
+            for privilege in privileges
+        ]
+
+    @staticmethod
+    def _grant_sql(role: str, owner: str, table_name: str, privilege: str) -> str:
+        fmttd_owner = OracleEngine._format_identifier(owner)
+        fmttd_table_name = OracleEngine._format_identifier(table_name)
+        return f"GRANT {privilege} ON {fmttd_owner}.{fmttd_table_name} TO {OracleEngine._format_identifier(role)}"
+
+    @staticmethod
     def ensure_table_privileges(
         conn: oracledb.Connection, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
     ) -> list[str]:
@@ -1269,7 +1273,6 @@ end;"""
         changed = False
         if not tables:
             return granted
-        fmt_role = OracleEngine._format_identifier(role)
         try:
             cursor = conn.cursor()
             for owner, table_name in tables:
@@ -1281,7 +1284,7 @@ end;"""
                         cursor, role.upper(), owner.upper(), table_name.upper(), privilege_upper
                     ):
                         continue
-                    sql = f"GRANT {privilege_upper} ON {fmttd_owner}.{fmttd_table_name} TO {fmt_role}"
+                    sql = OracleEngine._grant_sql(role, owner, table_name, privilege_upper)
                     OracleEngine._execute_ddl(conn, cursor, sql)
                     granted.append(f"{fmttd_owner}.{fmttd_table_name}:{privilege_upper}")
                     changed = True
@@ -1295,6 +1298,152 @@ end;"""
             if cursor:
                 cursor.close()
         return granted
+
+    @staticmethod
+    def _create_sequence_sql(sequence: SequenceDefinition) -> str:
+        fmttd_owner = OracleEngine._format_identifier(sequence.owner)
+        fmttd_sequence_name = OracleEngine._format_identifier(sequence.name)
+        sql = (
+            f"CREATE SEQUENCE {fmttd_owner}.{fmttd_sequence_name} "
+            f"START WITH {sequence.start_with} INCREMENT BY {sequence.increment_by}"
+        )
+        sql += f" MINVALUE {sequence.minvalue}" if sequence.minvalue is not None else " NOMINVALUE"
+        sql += f" MAXVALUE {sequence.maxvalue}" if sequence.maxvalue is not None else " NOMAXVALUE"
+        sql += " CYCLE" if sequence.cycle else " NOCYCLE"
+        sql += f" CACHE {sequence.cache}" if sequence.cache is not None else " NOCACHE"
+        return sql
+
+    @staticmethod
+    def _create_user_sql(user: UserDefinition, password_expression: str) -> str:
+        sql = f"CREATE USER {OracleEngine._format_identifier(user.name)} IDENTIFIED BY {password_expression}"
+        if user.default_tablespace:
+            sql += f" DEFAULT TABLESPACE {OracleEngine._format_identifier(user.default_tablespace)}"
+        if user.temporary_tablespace:
+            sql += f" TEMPORARY TABLESPACE {OracleEngine._format_identifier(user.temporary_tablespace)}"
+        return sql
+
+    @staticmethod
+    def _tolerant_block(statement: str, tolerated_errors: Sequence[int]) -> str:
+        """PL/SQL block that runs the statement and ignores only the given 'already exists' errors."""
+        escaped = statement.replace("'", "''")
+        codes = ", ".join(str(code) for code in tolerated_errors)
+        return (
+            f"begin\n  execute immediate '{escaped}';\nexception\n  when others then\n"
+            f"    if sqlcode not in ({codes}) then raise; end if;\nend;\n/"
+        )
+
+    @staticmethod
+    def _existing_user_notice(username: str) -> str:
+        """PL/SQL block that warns when the user already exists, so its password stays unchanged."""
+        name = OracleEngine.get_identifier_str(username)
+        message = f"User {name} already exists: its password was not changed. The runtime password must match it."
+        return (
+            "declare n number;\nbegin\n"
+            f"  select count(*) into n from dba_users where username = {OracleEngine._quote_literal(name)};\n"
+            f"  if n > 0 then dbms_output.put_line({OracleEngine._quote_literal(message)}); end if;\n"
+            "end;\n/"
+        )
+
+    @staticmethod
+    def generate_bootstrap_script(
+        *,
+        title: str,
+        roles: Sequence[RoleDefinition],
+        users: Sequence[UserDefinition],
+        tables: Sequence[TableDefinition],
+        sequences: Sequence[SequenceDefinition],
+        supporting_owner: str,
+        links: Sequence[DatabaseLinkDefinition],
+        runtime_username: str,
+        runtime_dsn: str,
+    ) -> str:
+        fmt = OracleEngine._format_identifier
+        literal = OracleEngine._quote_literal
+        block = OracleEngine._tolerant_block
+        lines = [
+            f"-- LimitsDb: bootstrap DDL for {title}.",
+            "-- Run it in SQL*Plus connected as a user with administrative privileges on this database.",
+            "-- It asks for the passwords it needs and can be rerun: objects that already exist are skipped.",
+            "-- The database link section reconnects as the runtime user, who owns the link.",
+            "whenever oserror exit failure",
+            "whenever sqlerror exit failure",
+            "set echo on define on verify off sqlblanklines on serveroutput on",
+            "",
+        ]
+        for role in roles:
+            lines += [block(f"CREATE ROLE {fmt(role.name)}", (-1921,)), ""]
+        for position, user in enumerate(users, start=1):
+            name = fmt(user.name)
+            variable = f"ldb_user_pwd_{position}"
+            prompt = f"Password for user {user.name} (used only if it does not exist yet): "
+            lines += [
+                f"accept {variable} char prompt {literal(prompt)} hide",
+                OracleEngine._existing_user_notice(user.name),
+                block(OracleEngine._create_user_sql(user, f'"&{variable}"'), (-1920,)),
+            ]
+            admin_option_roles = {fmt(role_name) for role_name in user.roles_with_admin_option}
+            for role_name in user.roles:
+                option = " WITH ADMIN OPTION" if fmt(role_name) in admin_option_roles else ""
+                lines.append(f"GRANT {fmt(role_name)} TO {name}{option};")
+            lines += [f"GRANT {privilege} TO {name};" for privilege in user.system_privileges]
+            if user.default_tablespace:
+                lines.append(f"ALTER USER {name} QUOTA UNLIMITED ON {fmt(user.default_tablespace)};")
+            else:
+                lines += [
+                    "column ldb_ts new_value ldb_ts noprint",
+                    "select nvl((select default_tablespace from dba_users where username = "
+                    f"{literal(OracleEngine.get_identifier_str(user.name))}), (select property_value from "
+                    "database_properties where property_name = 'DEFAULT_PERMANENT_TABLESPACE')) ldb_ts from dual;",
+                    f"ALTER USER {name} QUOTA UNLIMITED ON &ldb_ts;",
+                ]
+            lines.append("")
+        for table in tables:
+            owner, table_name = fmt(table.owner), fmt(table.name)
+            columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+            lines.append(block(f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )", (-955,)))
+            if table.primary_key:
+                cols = ", ".join(fmt(col) for col in table.primary_key)
+                pk_sql = (
+                    f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {fmt(f'{table.name}_PK')} PRIMARY KEY ({cols})"
+                )
+                lines.append(block(pk_sql, (-2260, -2264)))
+            for index in table.indexes:
+                unique = "UNIQUE " if index.unique else ""
+                cols = ", ".join(fmt(col) for col in index.columns)
+                index_sql = f"CREATE {unique}INDEX {owner}.{fmt(index.name)} ON {owner}.{table_name} ({cols})"
+                lines.append(block(index_sql, (-955,)))
+            lines.append("")
+        for sequence in sequences:
+            lines += [block(OracleEngine._create_sequence_sql(sequence), (-955,)), ""]
+        lines += [f"alter session set current_schema = {fmt(supporting_owner)};", "set define off"]
+        for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
+            body = statement.strip()
+            lines += [body if body.endswith(";") and "PROCEDURE" in body else body.rstrip(";"), "/", ""]
+        lines.append("set define on")
+        if links:
+            lines += [
+                "",
+                f"accept ldb_runtime_pwd char prompt {literal(f'Password of the runtime user {runtime_username}: ')} hide",
+                f'connect {fmt(runtime_username)}/"&ldb_runtime_pwd"@"{runtime_dsn}"',
+            ]
+            for position, link in enumerate(links, start=1):
+                variable = f"ldb_link_pwd_{position}"
+                create_link = (
+                    f"CREATE DATABASE LINK {fmt(link.name)} CONNECT TO {fmt(link.username)} "
+                    f'IDENTIFIED BY "&{variable}" USING {literal(link.dsn)}'
+                ).replace("'", "''")
+                prompt = f"Password of {link.username} for database link {link.name}: "
+                lines += [
+                    f"accept {variable} char prompt {literal(prompt)} hide",
+                    "declare n number;",
+                    "begin",
+                    f"  select count(*) into n from user_db_links where upper(db_link) like upper({literal(link.name)}) || '%';",
+                    f"  if n = 0 then execute immediate '{create_link}'; end if;",
+                    "end;",
+                    "/",
+                ]
+        lines += ["", f"prompt LimitsDb: OK - bootstrap for {title} completed.", "exit success", ""]
+        return "\n".join(lines)
 
     @staticmethod
     def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> list[str]:
@@ -1494,6 +1643,14 @@ end;"""
             OracleEngine._connection_envs.pop(id(conn), None)
 
     @staticmethod
+    def _dictionary_scope(cursor: oracledb.Cursor) -> str:
+        """Return the data dictionary view prefix for a cursor: ``dba`` on admin connections, else ``all``.
+
+        ALL_* views are readable by any user, so they are the default when the connection is unknown."""
+        connection = getattr(cursor, "connection", None)
+        return "dba" if id(connection) in OracleEngine._admin_connections else "all"
+
+    @staticmethod
     def _get_connection_env(conn: oracledb.Connection) -> str | None:
         return OracleEngine._connection_envs.get(id(conn))
 
@@ -1514,20 +1671,11 @@ end;"""
     def _get_primary_key_info(
         cursor: oracledb.Cursor, owner: str, table_name: str
     ) -> tuple[str | None, tuple[str, ...], str | None]:
+        scope = OracleEngine._dictionary_scope(cursor)
         cursor.execute(
-            """
+            f"""
             SELECT constraint_name, index_name
-              FROM dba_constraints
-             WHERE owner = :1
-               AND table_name = :2
-               AND constraint_type = 'P'
-            """,
-            [owner, table_name],
-        )
-        cursor.execute(
-            """
-            SELECT constraint_name, index_name
-              FROM dba_constraints
+              FROM {scope}_constraints
              WHERE owner = :1
                AND table_name = :2
                AND constraint_type = 'P'
@@ -1539,7 +1687,7 @@ end;"""
             return None, (), None
         constraint_name, index_name = row
         cursor.execute(
-            "SELECT column_name FROM dba_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+            f"SELECT column_name FROM {scope}_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
             [owner, constraint_name],
         )
         columns = tuple(r[0] for r in cast(Iterable[tuple[str]], cursor))
@@ -1580,10 +1728,11 @@ end;"""
     def _get_table_indexes(
         cursor: oracledb.Cursor, owner: str, table_name: str
     ) -> dict[str, tuple[tuple[str, ...], bool]]:
+        scope = OracleEngine._dictionary_scope(cursor)
         cursor.execute(
-            """
+            f"""
             SELECT i.index_name, i.uniqueness, c.column_name
-              FROM dba_indexes i JOIN dba_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name WHERE i.owner = :owner
+              FROM {scope}_indexes i JOIN {scope}_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name WHERE i.owner = :owner
                AND i.table_name = :table_name
              ORDER BY i.index_name, c.column_position
             """,

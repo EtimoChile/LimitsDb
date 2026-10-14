@@ -51,9 +51,11 @@ artificial edits.
 ## Language
 
 All project files — source code, tests, documentation, configuration comments,
-and commit messages — are written in **English**. This rule applies to every
-file in the repository, including files under `docs/`, `docs/ai-state/`, and
-`docs/prompts/`. Do not create or modify files in any other language.
+commit messages, pull request titles and descriptions, and log messages — are
+written in **English**. This rule applies to every file in the repository,
+including files under `docs/`, `docs/ai-state/`, and `docs/prompts/`. Do not
+create or modify files, commit messages, pull request text, or log messages in
+any other language.
 
 ## Architecture and change boundaries
 

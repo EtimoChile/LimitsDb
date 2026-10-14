@@ -127,7 +127,7 @@ Spin up a minimal end-to-end run with the built-in scaffolding tools:
    ldb-crypt --schema billing --profile dev
    ```
 
-4. **Dry-run the ILM plan** (no data changes):
+4. **Preview the ILM run** (applies the required DDL and grants, moves no data):
 
    ```bash
    ldb-run --schema billing --profile dev --action SOURCE_ILM --mode PREVIEW
@@ -256,9 +256,32 @@ What it creates in both source and history environments:
 - **Database link** — bidirectional links between source and history so the ILM
   engine can reach both environments from either side.
 
-`ldb-impl` requires all four credential pairs to be present and encrypted in
-`secrets[.<PROFILE>].json`: `source_password`, `history_password`,
-`admin_source_password`, and `admin_history_password`. Run `ldb-crypt` first.
+`ldb-impl` needs the runtime credentials (`source_password`, `history_password`)
+encrypted in `secrets[.<PROFILE>].json`. Run `ldb-crypt` first.
+
+### Without admin credentials
+
+Admin credentials (`admin_source_*`, `admin_history_*`) are optional per
+database. When they are absent for a database, `ldb-impl` creates nothing in it
+and writes a SQL*Plus script for a DBA instead, one file per database:
+`bootstrap_<schema>_<source|history>_<YYYYMMDD_HHMMSS>.sql` under
+`ddl_pending_dir` (the same parameter as `ldb-run`: `--ddl-pending-dir`,
+`LDB_DDL_PENDING_DIR`, default `ldb_ddl_pending`). A database whose admin credentials are present is still
+provisioned directly. Generating scripts is not an error (exit code 0, with a
+warning naming each file); if a script cannot be written, `ldb-impl` exits 1.
+
+The script:
+
+- stops at the first error (`whenever sqlerror exit failure`) and ends with a
+  `LimitsDb: OK` banner on success;
+- contains no passwords: it prompts for them (hidden input);
+- can be rerun: each object is created in a PL/SQL block that ignores only its
+  own "already exists" error, and an existing database link is skipped;
+- creates the database link after reconnecting as the runtime user, who owns it
+  (it asks for that user's password).
+
+Run it in SQL*Plus connected as a user with administrative privileges:
+`sqlplus admin@<dsn> @bootstrap_<schema>_<env>_<timestamp>.sql`.
 
 ## Run ILM
 
@@ -272,10 +295,11 @@ ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM 
 Common overrides:
 
 ```
---mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW simulate, SCRIPT emit SQL, EXECUTE run
+--mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
+--history-baseline EMPTY|SOURCE               # SCRIPT without a readable history: assume no history objects (default) or the same objects as source
 --log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Adjust logger verbosity
 --ilm-config-file <path>                      # Point to a specific ILM YAML file
 --config-dir <root>                           # Override config root discovery
@@ -297,8 +321,9 @@ ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set
 
 `ldb-run` uses admin credentials (`admin_source_password`,
 `admin_history_password`) for two operations: granting table privileges to the
-application role, and creating or altering history tables before an `EXECUTE`
-run. Both operations are idempotent.
+application role, and creating or altering history tables before a `PREVIEW` or
+`EXECUTE` run (`PREVIEW` needs the objects in place to validate and time the
+queries; it skips only the data movement). Both operations are idempotent.
 
 If admin credentials are absent from `secrets[.<PROFILE>].json`, the privilege
 grants are skipped silently — the assumption is that grants are already in
@@ -332,19 +357,48 @@ History table management follows the same principle:
   written to stdout, and the directory is created only when a file is written.
   If the file cannot be written (for example the directory is not writable),
   `ldb-run` logs the error with the failed statements and exits with code 1.
-  This is unrelated to `--mode SCRIPT`, which emits the ILM SQL blocks.
+
+### History DDL in `--mode SCRIPT`
+
+`--mode SCRIPT` applies nothing to the databases. The ILM SQL blocks, which
+run many times, go to stdout. The one-time statements go to files under
+`ddl_pending_dir`, so they stay out of the script that is rerun:
+
+- `history_ddl_<schema>_<YYYYMMDD_HHMMSS>.sql`: the history table DDL followed by
+  the grants on the history tables for the history role. Run it against the
+  history database.
+- `source_grants_<schema>_<YYYYMMDD_HHMMSS>.sql` (`SOURCE_ILM` only): the grants
+  on the source tables for the source role. Run it against the source database.
+
+Both are plain SQL for SQL*Plus that stop at the first failing statement; the
+grants are unconditional and safe to run again. The history DDL is always
+emitted, computed like this:
+
+- **A history connection works**: the admin connection is used when admin
+  credentials exist, the runtime one otherwise. The current history structure is
+  read, and the file holds only the missing changes.
+- **Neither works or there are no credentials**: `history_baseline` states what to
+  assume. `EMPTY` (default) assumes history has no objects, so every table, key
+  and index is created. `SOURCE` assumes history holds the same objects as
+  source, so only the history-specific differences are emitted (for example the
+  `LDB_PROCESS_DATE` column and the matching primary key).
+
+Without admin credentials, `ldb-run` applies the history grants right after the
+DDL over the runtime connection. Any grant the runtime user cannot apply goes to
+the same pending file as the failed DDL, so a DBA can run it.
 
 ### Configuration parameters reference
 
 | Parameter                | Purpose                                                                                                                                                         | Default / values                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history).                                                                         | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
-| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` simulate (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit SQL, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
+| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
 | `chunk_size`             | Rows per chunk when processing large tables.                                                                                                                    | Default `100000`.                                                                    |
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
-| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials.                                                                      | Default `ldb_ddl_pending`.                                                           |
+| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials, and the DDL and grants files of `--mode SCRIPT`.                                                                      | Default `ldb_ddl_pending`.                                                           |
+| `history_baseline`       | State assumed for the history tables by `--mode SCRIPT` when it cannot read them over the runtime history connection: `EMPTY` (no objects) or `SOURCE` (same objects as source). | Default `EMPTY`; choices `EMPTY`, `SOURCE`. |
 | `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
 | `schema`                 | Configuration set name: identifies a system or application (e.g., `billing`). Not a database schema — it is the folder that groups all configuration files for one target. | Required on CLI; no persisted default. |
@@ -372,6 +426,7 @@ History table management follows the same principle:
 | `add_ldb_columns`        | —                          | —                            | `config[.<PROFILE>].yml: add_ldb_columns`          |
 | `parallel_max`           | `--parallel-max`           | `LDB_PARALLEL_MAX`           | `config[.<PROFILE>].yml: parallel_max`             |
 | `ddl_pending_dir`        | `--ddl-pending-dir`        | `LDB_DDL_PENDING_DIR`        | `config[.<PROFILE>].yml: ddl_pending_dir`          |
+| `history_baseline`       | `--history-baseline`       | `LDB_HISTORY_BASELINE`       | `config[.<PROFILE>].yml: history_baseline`         |
 | `db_engine`              | `--db-engine`              | `LDB_DB_ENGINE`              | `config[.<PROFILE>].yml: db_engine`                |
 | `log_level`              | `--log-level`              | `LDB_LOG_LEVEL`              | `config[.<PROFILE>].yml: log_level`                |
 | `schema`                 | `--schema`                 | `LDB_SCHEMA`                 | CLI only (not stored).                             |
@@ -430,6 +485,7 @@ Every key is commented; the default value and short help appear inline. Example:
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables
 # parallel_max: 10      # Maximum number of parallel processes
 # ddl_pending_dir: "ldb_ddl_pending"  # Where failed history DDL is written for a DBA
+# history_baseline: "EMPTY"  # SCRIPT without readable history: EMPTY | SOURCE
 # db_engine: "oracle"   # Database engine
 # log_level: "INFO"     # Logging level
 ```
