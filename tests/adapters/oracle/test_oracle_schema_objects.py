@@ -503,3 +503,47 @@ def test_unchanged_primary_key_index_is_kept_while_unrelated_indexes_are_dropped
 
     # Then: only the stray index is dropped; the PK and its index are untouched
     assert statements == ["DROP INDEX owner.stray_idx"]
+
+
+@pytest.mark.parametrize(("admin_connection", "prefix"), [(False, "all"), (True, "dba")], ids=["runtime", "admin"])
+def test_primary_key_metadata_is_read_from_the_view_set_the_connection_can_access(
+    monkeypatch: pytest.MonkeyPatch, admin_connection: bool, prefix: str
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin credentials the
+    # history schema is inspected over the runtime connection, which can only read all_* views;
+    # admin connections keep using dba_* views, with the same query text.
+    # Given: a runtime or an admin connection whose table has no primary key constraint
+    executed: list[str] = []
+
+    class RecordingCursor:
+        def __init__(self, connection) -> None:
+            self.connection = connection
+
+        def execute(self, sql: str, *args, **kwargs) -> None:
+            executed.append(sql)
+
+        def fetchone(self):
+            return None
+
+        def __iter__(self):
+            return iter(())
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> RecordingCursor:
+            return RecordingCursor(self)
+
+    connection = DummyConnection()
+    if admin_connection:
+        monkeypatch.setattr(OracleEngine, "_admin_connections", {id(connection)})
+
+    # When: the primary key columns are requested
+    OracleEngine.get_primary_key_columns(connection, "OWNER", "ITEMS", {})  # type: ignore[arg-type]
+
+    # Then: constraint and index metadata came only from the matching view set
+    other = "dba" if prefix == "all" else "all"
+    assert any(f"{prefix}_constraints" in sql for sql in executed)
+    assert any(f"{prefix}_indexes" in sql for sql in executed)
+    assert not any(f"{other}_constraints" in sql or f"{other}_indexes" in sql for sql in executed)

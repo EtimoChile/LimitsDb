@@ -192,6 +192,7 @@ class OracleEngine(DatabaseEngine):
 
     # states and class constants
     _connection_envs: ClassVar[dict[int, str]] = {}
+    _admin_connections: ClassVar[set[int]] = set()
     REQUIRED_SYSTEM_PRIVILEGES: tuple[str, ...] = (
         "CREATE SESSION",
         "ALTER SESSION",
@@ -228,6 +229,8 @@ class OracleEngine(DatabaseEngine):
         try:
             connection = oracledb.connect(user=user, password=password, dsn=dsn)
             OracleEngine._register_connection_env(connection, env)
+            if admin:
+                OracleEngine._admin_connections.add(id(connection))
             return cast(oracledb.Connection, connection)
         except Exception as exc:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
@@ -241,6 +244,7 @@ class OracleEngine(DatabaseEngine):
         try:
             if conn:
                 OracleEngine._register_connection_env(conn, None)
+                OracleEngine._admin_connections.discard(id(conn))
                 conn.close()
         except Exception:
             logger.critical("Failed to close Oracle DB connection.", exc_info=True)
@@ -1093,11 +1097,12 @@ end;"""
             _, columns, _ = OracleEngine._get_primary_key_info(cursor, owner, table_name)
             if columns:
                 return tuple(col for col in columns)
+            scope = OracleEngine._dictionary_scope(cursor)
             cursor.execute(
-                """
+                f"""
                 SELECT i.index_name, i.uniqueness, c.column_name, s.distinct_keys
-                FROM dba_indexes i JOIN dba_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name
-                LEFT JOIN dba_ind_statistics s ON s.owner = i.owner AND s.index_name = i.index_name AND s.partition_name IS NULL
+                FROM {scope}_indexes i JOIN {scope}_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name
+                LEFT JOIN {scope}_ind_statistics s ON s.owner = i.owner AND s.index_name = i.index_name AND s.partition_name IS NULL
                 WHERE i.owner = :owner
                 AND i.table_name = :table_name
                 ORDER BY i.index_name, c.column_position
@@ -1298,6 +1303,18 @@ end;"""
         )
 
     @staticmethod
+    def _existing_user_notice(username: str) -> str:
+        """PL/SQL block that warns when the user already exists, so its password stays unchanged."""
+        name = OracleEngine.get_identifier_str(username)
+        message = f"User {name} already exists: its password was not changed. The runtime password must match it."
+        return (
+            "declare n number;\nbegin\n"
+            f"  select count(*) into n from dba_users where username = {OracleEngine._quote_literal(name)};\n"
+            f"  if n > 0 then dbms_output.put_line({OracleEngine._quote_literal(message)}); end if;\n"
+            "end;\n/"
+        )
+
+    @staticmethod
     def generate_bootstrap_script(
         *,
         title: str,
@@ -1320,7 +1337,7 @@ end;"""
             "-- The database link section reconnects as the runtime user, who owns the link.",
             "whenever oserror exit failure",
             "whenever sqlerror exit failure",
-            "set echo on define on verify off sqlblanklines on",
+            "set echo on define on verify off sqlblanklines on serveroutput on",
             "",
         ]
         for role in roles:
@@ -1331,6 +1348,7 @@ end;"""
             prompt = f"Password for user {user.name} (used only if it does not exist yet): "
             lines += [
                 f"accept {variable} char prompt {literal(prompt)} hide",
+                OracleEngine._existing_user_notice(user.name),
                 block(OracleEngine._create_user_sql(user, f'"&{variable}"'), (-1920,)),
             ]
             admin_option_roles = {fmt(role_name) for role_name in user.roles_with_admin_option}
@@ -1494,11 +1512,12 @@ end;"""
 
     @staticmethod
     def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:
+        scope = OracleEngine._dictionary_scope(cursor)
         return OracleEngine._object_exists(
             cursor,
-            """
+            f"""
             SELECT 1
-              FROM dba_tab_privs
+              FROM {scope}_tab_privs
              WHERE grantee = :grantee
                AND owner = :owner
                AND table_name = :table_name
@@ -1559,7 +1578,7 @@ end;"""
     def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            "SELECT 1 FROM dba_tables WHERE owner = :1 AND table_name = :2",
+            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_tables WHERE owner = :1 AND table_name = :2",
             [owner, table_name],
         )
 
@@ -1567,7 +1586,7 @@ end;"""
     def _index_exists(cursor: oracledb.Cursor, owner: str, index_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            "SELECT 1 FROM dba_indexes WHERE owner = :1 AND index_name = :2",
+            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_indexes WHERE owner = :1 AND index_name = :2",
             [owner, index_name],
         )
 
@@ -1575,7 +1594,7 @@ end;"""
     def _constraint_exists(cursor: oracledb.Cursor, owner: str, constraint_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            "SELECT 1 FROM dba_constraints WHERE owner = :1 AND constraint_name = :2",
+            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_constraints WHERE owner = :1 AND constraint_name = :2",
             [owner, constraint_name],
         )
 
@@ -1583,7 +1602,7 @@ end;"""
     def _sequence_exists(cursor: oracledb.Cursor, owner: str, sequence_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            "SELECT 1 FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = :2",
+            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_sequences WHERE sequence_owner = :1 AND sequence_name = :2",
             [owner, sequence_name],
         )
 
@@ -1593,6 +1612,14 @@ end;"""
             OracleEngine._connection_envs[id(conn)] = env
         else:
             OracleEngine._connection_envs.pop(id(conn), None)
+
+    @staticmethod
+    def _dictionary_scope(cursor: oracledb.Cursor) -> str:
+        """Return the data dictionary view prefix for a cursor: ``dba`` on admin connections, else ``all``.
+
+        ALL_* views are readable by any user, so they are the default when the connection is unknown."""
+        connection = getattr(cursor, "connection", None)
+        return "dba" if id(connection) in OracleEngine._admin_connections else "all"
 
     @staticmethod
     def _get_connection_env(conn: oracledb.Connection) -> str | None:
@@ -1615,20 +1642,11 @@ end;"""
     def _get_primary_key_info(
         cursor: oracledb.Cursor, owner: str, table_name: str
     ) -> tuple[str | None, tuple[str, ...], str | None]:
+        scope = OracleEngine._dictionary_scope(cursor)
         cursor.execute(
-            """
+            f"""
             SELECT constraint_name, index_name
-              FROM dba_constraints
-             WHERE owner = :1
-               AND table_name = :2
-               AND constraint_type = 'P'
-            """,
-            [owner, table_name],
-        )
-        cursor.execute(
-            """
-            SELECT constraint_name, index_name
-              FROM dba_constraints
+              FROM {scope}_constraints
              WHERE owner = :1
                AND table_name = :2
                AND constraint_type = 'P'
@@ -1640,7 +1658,7 @@ end;"""
             return None, (), None
         constraint_name, index_name = row
         cursor.execute(
-            "SELECT column_name FROM dba_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+            f"SELECT column_name FROM {scope}_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
             [owner, constraint_name],
         )
         columns = tuple(r[0] for r in cast(Iterable[tuple[str]], cursor))
@@ -1681,10 +1699,11 @@ end;"""
     def _get_table_indexes(
         cursor: oracledb.Cursor, owner: str, table_name: str
     ) -> dict[str, tuple[tuple[str, ...], bool]]:
+        scope = OracleEngine._dictionary_scope(cursor)
         cursor.execute(
-            """
+            f"""
             SELECT i.index_name, i.uniqueness, c.column_name
-              FROM dba_indexes i JOIN dba_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name WHERE i.owner = :owner
+              FROM {scope}_indexes i JOIN {scope}_ind_columns c ON i.owner = c.index_owner AND i.index_name = c.index_name WHERE i.owner = :owner
                AND i.table_name = :table_name
              ORDER BY i.index_name, c.column_position
             """,
@@ -1794,10 +1813,11 @@ end;"""
         if not constraint_types:
             return dropped
         type_list = ", ".join(f"'{constraint_type}'" for constraint_type in constraint_types)
+        scope = OracleEngine._dictionary_scope(cursor)
         cursor.execute(
             f"""
             SELECT constraint_name
-              FROM dba_constraints
+              FROM {scope}_constraints
              WHERE owner = :owner
                AND table_name = :table_name
                AND constraint_type IN ({type_list})
