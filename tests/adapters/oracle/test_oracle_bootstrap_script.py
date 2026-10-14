@@ -123,3 +123,15 @@ def test_bootstrap_script_escapes_quotes_in_statements(quote: str):
     )
 
     assert "DEFAULT ''x''" in script
+
+
+def test_bootstrap_script_warns_before_creating_a_user_that_already_exists_and_keeps_its_password():
+    # Spec: README > ldb-impl without admin credentials — a rerun keeps the password of an existing user,
+    # so the script tells the DBA instead of finishing silently with a password that may not match
+    script = _script()
+
+    notice = script.index("already exists: its password was not changed")
+    assert script.index("accept ldb_user_pwd_1") < notice < script.index("CREATE USER")
+    assert "from dba_users where username = 'LDB_USER'" in script
+    assert "serveroutput on" in script
+    assert _SECRET not in script
