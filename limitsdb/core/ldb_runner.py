@@ -341,7 +341,7 @@ def _ensure_history_tables(
     """Ensure history tables match their required definitions.
 
     Behaviour by credential state:
-    - Mode other than EXECUTE: no DDL is applied; the pending changes are only reported.
+    - Reached only in PREVIEW and EXECUTE: both apply DDL, since a run needs the objects in place (DEC-023).
     - Admin HISTORY credentials present, tables up to date: skip admin connection (DEC-020).
     - Admin HISTORY credentials present, delta detected: open admin connection and execute DDL.
     - Admin HISTORY credentials absent, tables up to date: proceed without connecting.
@@ -386,15 +386,6 @@ def _ensure_history_tables(
     else:
         inspection_failed = True
         logger.debug("No runtime HISTORY credentials available for pre-inspection.")
-
-    if config.execution.mode != "EXECUTE" and not (inspection_failed and not admin_present):
-        if delta_statements:
-            logger.info(
-                "%s mode: %d history DDL change(s) are required and were not applied; run with --mode EXECUTE.",
-                config.execution.mode,
-                len(delta_statements),
-            )
-        return
 
     if not admin_present:
         if inspection_failed:

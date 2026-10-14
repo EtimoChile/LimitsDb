@@ -1538,29 +1538,23 @@ def test_run_exits_1_and_logs_failed_statements_when_pending_file_cannot_be_writ
 
 
 @pytest.mark.parametrize("history_admin", [False, True], ids=["without_admin", "with_admin"])
-def test_preview_run_reports_history_ddl_changes_without_applying_them(
-    monkeypatch: pytest.MonkeyPatch, tmp_path, history_admin: bool
-):
-    # Spec: README > Run ILM — history tables are created or altered only before an EXECUTE
-    # run; PREVIEW simulates without changes and reports that changes are required.
+def test_preview_run_applies_history_ddl_like_execute(monkeypatch: pytest.MonkeyPatch, tmp_path, history_admin: bool):
+    # Spec: README > Run ILM > --mode — PREVIEW applies DDL and grants and only skips the
+    # data movement, because a run is meaningless without the objects in place (DEC-023).
     # Given: PREVIEW mode and a pending DDL delta
-    engine = _HistoryDdlEngine({"T1": ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]})
-    pending_dir = tmp_path / "pending"
-    recorder = _RecordingLogger()
-    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    engine = _HistoryDdlEngine({"T1": [statement]})
 
     # When: ldb-run executes
     rc = _run_ldb(
         monkeypatch,
-        _history_ddl_config(mode="PREVIEW", history_admin=history_admin, ddl_pending_dir=str(pending_dir)),
+        _history_ddl_config(mode="PREVIEW", history_admin=history_admin, ddl_pending_dir=str(tmp_path / "pending")),
         engine,
     )
 
-    # Then: the run completes, no DDL was applied by any path, and the need for changes is reported
+    # Then: the delta was applied over the connection EXECUTE would use
     assert rc == 0
-    assert engine.attempted == [] and engine.admin_applied == []
-    assert not pending_dir.exists()
-    assert any("PREVIEW" in message and "1 history DDL" in message for message in recorder.messages["info"])
+    assert (engine.admin_applied, engine.attempted) == ((["T1"], []) if history_admin else ([], [statement]))
 
 
 def test_execute_run_applies_history_ddl_over_runtime_connection_when_history_ilm_has_no_admin(

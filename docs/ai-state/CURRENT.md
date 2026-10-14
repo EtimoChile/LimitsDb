@@ -166,5 +166,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - `DEC-021`: without admin history credentials, `ldb-run` applies the history DDL
   delta with its runtime connection; failed statements go to a file under
   `ddl_pending_dir` and the run exits 1. `PEND-015` and `PEND-016` are resolved.
+- `DEC-023`: `PREVIEW` applies the same DDL and grants as `EXECUTE` and skips only the
+  data movement; `VALIDATE` and `PLAN` stay read-only.
 - `DEC-022`: without admin credentials, `ldb-impl` writes one bootstrap script
   per database (PL/SQL blocks tolerating only "already exists"); `PEND-017` is resolved.

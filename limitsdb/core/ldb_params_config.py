@@ -118,7 +118,7 @@ class Config:
     mode: Annotated[
         Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"],
         Help(
-            "Runtime mode: VALIDATE config/credentials, PLAN dependency order, PREVIEW simulate without changes, SCRIPT generate SQL scripts, EXECUTE apply changes"
+            "Runtime mode: VALIDATE config/credentials, PLAN dependency order, PREVIEW run without moving data (DDL and grants are still applied), SCRIPT generate SQL scripts, EXECUTE apply changes"
         ),
         Cli("--mode"),
         Env("LDB_MODE"),

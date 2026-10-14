@@ -6,9 +6,12 @@
 
 - `ldb-run` without history admin credentials now applies pending history DDL with its runtime connection; statements that fail are written to `ddl_pending_dir` (`--ddl-pending-dir`) for a DBA and the run exits 1.
 - `ldb-impl` no longer requires admin credentials: when they are absent it writes a rerunnable SQL*Plus bootstrap script per database under `ddl_pending_dir` for a DBA, creating the database link as the runtime user. The script prompts for passwords with hidden input and warns when a user already exists, because its password is left unchanged.
-- History table DDL is applied only in `EXECUTE` mode; `PREVIEW` and the other modes apply nothing and log how many changes are required. `HISTORY_ILM` without admin credentials now reaches the runtime-connection path.
+- `HISTORY_ILM` without admin credentials now reaches the runtime-connection path.
+- Document that `PREVIEW` applies the same DDL and grants as `EXECUTE` and skips only the data movement, because a run needs the objects in place.
 - Replace a primary key with a single `DROP PRIMARY KEY DROP INDEX` statement so the generated DDL no longer fails with ORA-01418.
 - Read primary-key and index metadata from `all_*` dictionary views on non-admin connections, keeping `dba_*` on admin connections.
+- Add the `ddl_pending_dir` option (`--ddl-pending-dir`, `LDB_DDL_PENDING_DIR`, default `ldb_ddl_pending`) for the files that `ldb-run` and `ldb-impl` write for a DBA.
+- **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `generate_table_structure_script`, `execute_ddl_statements` and `generate_bootstrap_script`.
 
 ## [0.5.0] - 2026-10-10
 

@@ -127,7 +127,7 @@ Spin up a minimal end-to-end run with the built-in scaffolding tools:
    ldb-crypt --schema billing --profile dev
    ```
 
-4. **Dry-run the ILM plan** (no data changes):
+4. **Preview the ILM run** (applies the required DDL and grants, moves no data):
 
    ```bash
    ldb-run --schema billing --profile dev --action SOURCE_ILM --mode PREVIEW
@@ -295,7 +295,7 @@ ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM 
 Common overrides:
 
 ```
---mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW simulate, SCRIPT emit SQL, EXECUTE run
+--mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
@@ -320,8 +320,9 @@ ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set
 
 `ldb-run` uses admin credentials (`admin_source_password`,
 `admin_history_password`) for two operations: granting table privileges to the
-application role, and creating or altering history tables before an `EXECUTE`
-run. Both operations are idempotent.
+application role, and creating or altering history tables before a `PREVIEW` or
+`EXECUTE` run (`PREVIEW` needs the objects in place to validate and time the
+queries; it skips only the data movement). Both operations are idempotent.
 
 If admin credentials are absent from `secrets[.<PROFILE>].json`, the privilege
 grants are skipped silently — the assumption is that grants are already in
@@ -362,7 +363,7 @@ History table management follows the same principle:
 | Parameter                | Purpose                                                                                                                                                         | Default / values                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history).                                                                         | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
-| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` simulate (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit SQL, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
+| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit SQL, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
 | `chunk_size`             | Rows per chunk when processing large tables.                                                                                                                    | Default `100000`.                                                                    |
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
