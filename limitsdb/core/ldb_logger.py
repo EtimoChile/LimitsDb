@@ -6,7 +6,7 @@ _base_name = "ldb"
 _configured = False
 _lock = threading.RLock()
 
-# Un único formato legible (sin JSON, sin ambientes)
+# A single readable format (no JSON, no environments)
 _FORMAT = logging.Formatter(
     fmt="%(asctime)s [%(levelname)s] %(processName)s-%(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
@@ -14,7 +14,7 @@ _FORMAT = logging.Formatter(
 
 
 def configure_logger(level: str = "INFO", base_name: str = _base_name) -> logging.Logger:
-    """Configura el logger base una sola vez (handlers/format)."""
+    """Configure the base logger once (handlers/format)."""
     global _configured, _base_name
     with _lock:
         _base_name = base_name
@@ -23,7 +23,7 @@ def configure_logger(level: str = "INFO", base_name: str = _base_name) -> loggin
 
         if not _configured:
             base.setLevel(lvl)
-            base.propagate = False  # evita duplicar en root
+            base.propagate = False  # avoids duplicating records in root
             ch = logging.StreamHandler()
             ch.setLevel(lvl)
             ch.setFormatter(_FORMAT)
@@ -38,7 +38,7 @@ def configure_logger(level: str = "INFO", base_name: str = _base_name) -> loggin
 
 
 def get_logger(name: str = _base_name) -> logging.Logger:
-    """Devuelve el logger base o un hijo ('limitsdb.<name>')."""
+    """Return the base logger or a child ('limitsdb.<name>')."""
     if not _configured:
         configure_logger()
     if name == _base_name or name == "":
@@ -47,7 +47,7 @@ def get_logger(name: str = _base_name) -> logging.Logger:
 
 
 def reconfigure_logger(level: str = "INFO") -> None:
-    """Ajusta el nivel del logger base y sus handlers."""
+    """Set the level of the base logger and its handlers."""
     if not _configured:
         return
     lvl = getattr(logging, level.upper(), logging.INFO)
