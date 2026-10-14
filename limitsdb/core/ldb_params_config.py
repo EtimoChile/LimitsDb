@@ -30,6 +30,7 @@ FILE_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"use_added_columns", "add_ldb
 IlmAction = Literal["SOURCE_ILM", "HISTORY_ILM"]
 RuntimeMode = Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+HistoryBaseline = Literal["EMPTY", "SOURCE"]
 DatabaseEngineName = Literal["oracle"]
 SUPPORTED_DATABASE_ENGINES: tuple[DatabaseEngineName, ...] = ("oracle",)
 
@@ -52,6 +53,7 @@ class ExecutionConfig:
     parallel_max: int
     log_level: LogLevel
     ddl_pending_dir: str
+    history_baseline: HistoryBaseline
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,7 @@ class Config:
     mode: Annotated[
         Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"],
         Help(
-            "Runtime mode: VALIDATE config/credentials, PLAN dependency order, PREVIEW simulate without changes, SCRIPT generate SQL scripts, EXECUTE apply changes"
+            "Runtime mode: VALIDATE config/credentials, PLAN dependency order, PREVIEW run without moving data (DDL and grants are still applied), SCRIPT generate SQL scripts, EXECUTE apply changes"
         ),
         Cli("--mode"),
         Env("LDB_MODE"),
@@ -136,10 +138,21 @@ class Config:
     ] = 10
     ddl_pending_dir: Annotated[
         str,
-        Help("Directory where ldb-run writes history DDL that could not be applied, for a DBA to run"),
+        Help(
+            "Directory where ldb-run writes the DDL and grants for a DBA to run: history DDL it could not apply, and the files of --mode SCRIPT"
+        ),
         Cli("--ddl-pending-dir"),
         Env("LDB_DDL_PENDING_DIR"),
     ] = "ldb_ddl_pending"
+    history_baseline: Annotated[
+        HistoryBaseline,
+        Help(
+            "State assumed for the history tables when --mode SCRIPT cannot read them over the runtime history "
+            "connection: EMPTY (no history objects) or SOURCE (history holds the same objects as source)"
+        ),
+        Cli("--history-baseline"),
+        Env("LDB_HISTORY_BASELINE"),
+    ] = "EMPTY"
     db_engine: Annotated[
         DatabaseEngineName,
         Help("Database engine (Oracle only)"),
@@ -252,6 +265,7 @@ class Config:
             parallel_max=self.parallel_max,
             log_level=self.log_level,
             ddl_pending_dir=self.ddl_pending_dir,
+            history_baseline=self.history_baseline,
         )
 
     @property

@@ -547,3 +547,83 @@ def test_primary_key_metadata_is_read_from_the_view_set_the_connection_can_acces
     assert any(f"{prefix}_constraints" in sql for sql in executed)
     assert any(f"{prefix}_indexes" in sql for sql in executed)
     assert not any(f"{other}_constraints" in sql or f"{other}_indexes" in sql for sql in executed)
+
+
+def test_structure_script_without_a_connection_creates_every_object(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode SCRIPT — with history_baseline EMPTY nothing is read from
+    # the database: the script creates the table, its primary key and its indexes.
+    # Given: a table definition with a primary key and no connection
+    column = ColumnDefinition(name="ID", data_type="integer")
+    table = TableDefinition(owner="OWNER", name="ITEMS", columns=(column,), primary_key=("ID",))
+
+    # When: the structure script is generated without a connection
+    statements = OracleEngine.generate_table_structure_script(None, table, {})
+
+    # Then: the table and its primary key are created
+    assert statements[0].startswith("CREATE TABLE owner.items")
+    assert statements[1] == "ALTER TABLE owner.items ADD CONSTRAINT items_pk PRIMARY KEY (id)"
+
+
+def test_structure_script_with_a_reference_reads_the_reference_and_emits_ddl_for_the_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > --mode SCRIPT — with history_baseline SOURCE the current structure is
+    # that of the source table, and the DDL targets the history table.
+    # Given: a reference table (SRC.ITEMS) with column ID only, and a history table that adds LDB_PROCESS_DATE
+    lookups: list[tuple] = []
+
+    class ReferenceCursor:
+        def __init__(self) -> None:
+            self._rows: list[tuple] = []
+
+        def execute(self, sql: str, params=None, **kwargs) -> None:
+            lookups.append(tuple(params) if params else (kwargs.get("owner"), kwargs.get("table_name")))
+            self._rows = [(1,)] if "FROM all_tables" in sql else []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def __iter__(self):
+            return iter(self._rows)
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> ReferenceCursor:
+            return ReferenceCursor()
+
+    id_column = ColumnDefinition(name="ID", data_type="integer")
+    date_column = ColumnDefinition(name="LDB_PROCESS_DATE", data_type="date")
+    monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, name: ([], {"ID": id_column}))
+    monkeypatch.setattr(OracleEngine, "_column_needs_update", lambda existing, desired: False)
+    table = TableDefinition(owner="HIST", name="ITEMS", columns=(id_column, date_column), primary_key=None)
+
+    # When: the structure script is generated against the reference
+    statements = OracleEngine.generate_table_structure_script(
+        DummyConnection(),  # type: ignore[arg-type]
+        table,
+        {},
+        reference=("SRC", "ITEMS"),
+    )
+
+    # Then: every dictionary lookup targeted the reference, and the DDL targets the history table
+    assert lookups and all(lookup == ("SRC", "ITEMS") for lookup in lookups)
+    assert len(statements) == 1 and statements[0].startswith("ALTER TABLE hist.items ADD (")
+
+
+def test_table_privilege_script_grants_every_privilege_on_every_table_without_a_connection():
+    # Spec: README > Run ILM > --mode SCRIPT — the grants a DBA runs are unconditional GRANT
+    # statements, one per table and privilege, safe to run again.
+    # When: the privilege script is generated for two tables and two privileges
+    statements = OracleEngine.generate_table_privilege_script(
+        "LDB_ROLE", [("OWNER", "A"), ("OWNER", "B")], ("select", "DELETE")
+    )
+
+    # Then: each table gets each privilege for the role
+    assert statements == [
+        "GRANT SELECT ON owner.a TO ldb_role",
+        "GRANT DELETE ON owner.a TO ldb_role",
+        "GRANT SELECT ON owner.b TO ldb_role",
+        "GRANT DELETE ON owner.b TO ldb_role",
+    ]

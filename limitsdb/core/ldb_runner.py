@@ -1,9 +1,9 @@
+from collections.abc import Sequence
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
-from datetime import datetime
 from operator import attrgetter
-from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+from limitsdb.core.ldb_ddl import deliver_ddl
 from limitsdb.core.ldb_errors import ConfigurationError
 from limitsdb.core.ldb_ilm_config import IlmRule, load_rows_from_yaml
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
@@ -303,33 +303,15 @@ def _build_history_table_definition(
     )
 
 
-def _write_pending_ddl(config: Config, failures: list[tuple[str, str]]) -> Path:
-    """Write the DDL statements that could not be applied to a file for a DBA to run."""
-    pending_dir = Path(config.execution.ddl_pending_dir)
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = pending_dir / f"history_ddl_{config.context.schema}_{stamp}.sql"
-    lines = [
-        "-- LimitsDb: history DDL that ldb-run could not apply with its runtime credentials.",
-        f"-- Schema: {config.context.schema}; history user: {config.history_username}",
-        "-- Run it from SQL*Plus as a user with the required privileges, then rerun ldb-run.",
-        "-- Plain SQL, no PL/SQL. Execution stops at the first failing statement and SQL*Plus",
-        "-- exits with a non-zero code; reaching the final OK banner means every statement worked.",
-        "-- The '-- Failed with' comments record why ldb-run could not apply each statement.",
-        "whenever oserror exit failure",
-        "whenever sqlerror exit failure",
-        "set echo on define off sqlblanklines on",
-        "",
-    ]
-    for statement, error in failures:
-        lines.append(f"-- Failed with: {error}")
-        lines.append(f"{statement};")
-        lines.append("")
-    lines.append(f"prompt LimitsDb: OK - {len(failures)} pending history DDL statement(s) applied.")
-    lines.append("exit success")
-    lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
+
+
+def _grant_statements(
+    config: Config, engine: DatabaseEngine, env: Literal["SOURCE", "HISTORY"], tables: Sequence[tuple[str, str]]
+) -> list[str]:
+    """GRANT statements giving the environment's application role access to the tables."""
+    role = config.administration.source_role_name if env == "SOURCE" else config.administration.history_role_name
+    return engine.generate_table_privilege_script(role, tables, _TABLE_PRIVILEGES)
 
 
 def _ensure_history_tables(
@@ -341,7 +323,7 @@ def _ensure_history_tables(
     """Ensure history tables match their required definitions.
 
     Behaviour by credential state:
-    - Mode other than EXECUTE: no DDL is applied; the pending changes are only reported.
+    - Reached only in PREVIEW and EXECUTE: both apply DDL, since a run needs the objects in place (DEC-023).
     - Admin HISTORY credentials present, tables up to date: skip admin connection (DEC-020).
     - Admin HISTORY credentials present, delta detected: open admin connection and execute DDL.
     - Admin HISTORY credentials absent, tables up to date: proceed without connecting.
@@ -387,15 +369,6 @@ def _ensure_history_tables(
         inspection_failed = True
         logger.debug("No runtime HISTORY credentials available for pre-inspection.")
 
-    if config.execution.mode != "EXECUTE" and not (inspection_failed and not admin_present):
-        if delta_statements:
-            logger.info(
-                "%s mode: %d history DDL change(s) are required and were not applied; run with --mode EXECUTE.",
-                config.execution.mode,
-                len(delta_statements),
-            )
-        return
-
     if not admin_present:
         if inspection_failed:
             logger.error(
@@ -407,7 +380,12 @@ def _ensure_history_tables(
         if not delta_statements:
             logger.info("History tables are up to date; no admin credentials needed.")
             return
-        _apply_history_delta_without_admin(config, engine, delta_statements)
+        history_tables = [
+            (engine.get_identifier_str(td.owner), engine.get_identifier_str(td.name)) for td, _ in table_defs_and_cnf
+        ]
+        _apply_history_delta_without_admin(
+            config, engine, delta_statements, _grant_statements(config, engine, "HISTORY", history_tables)
+        )
         return
 
     # Admin credentials present.
@@ -418,46 +396,50 @@ def _ensure_history_tables(
     history_admin_connection: Any | None = None
     try:
         history_admin_connection = engine.get_connection(config, admin=True, env="HISTORY")
-        for table_def, table_cnf in table_defs_and_cnf:
-            engine.ensure_table_structure(history_admin_connection, table_def, table_cnf)
+        statements = [
+            statement
+            for table_def, table_cnf in table_defs_and_cnf
+            for statement in engine.generate_table_structure_script(history_admin_connection, table_def, table_cnf)
+        ]
+        # Grants for the admin path are applied afterwards by ``ensure_table_privileges``, which skips existing ones.
+        deliver_ddl(
+            config,
+            engine,
+            statements,
+            destination="execute",
+            env="HISTORY",
+            file_stem="history_ddl",
+            description="history table DDL.",
+            connection=history_admin_connection,
+        )
     finally:
         if history_admin_connection:
             engine.close_connection(history_admin_connection)
 
 
-def _apply_history_delta_without_admin(config: Config, engine: DatabaseEngine, delta_statements: list[str]) -> None:
-    """Run the history DDL delta with runtime credentials; leave failures in a pending file and exit 1."""
+def _apply_history_delta_without_admin(
+    config: Config, engine: DatabaseEngine, delta_statements: list[str], grants: list[str]
+) -> None:
+    """Run the history DDL delta and its grants with runtime credentials; failures go to a pending file, exit 1."""
     logger.info(
         "History admin credentials are absent; applying %d DDL change(s) with runtime credentials.",
         len(delta_statements),
     )
     runtime_conn = engine.get_connection(config, admin=False, env="HISTORY")
     try:
-        failures = engine.execute_ddl_statements(runtime_conn, delta_statements)
+        deliver_ddl(
+            config,
+            engine,
+            delta_statements,
+            destination="execute",
+            env="HISTORY",
+            file_stem="history_ddl",
+            description="history DDL that ldb-run could not apply with its runtime credentials.",
+            connection=runtime_conn,
+            grants=grants,
+        )
     finally:
         engine.close_connection(runtime_conn)
-    if not failures:
-        return
-    try:
-        pending_file = _write_pending_ddl(config, failures)
-    except OSError as exc:
-        logger.error(
-            "%d history DDL change(s) could not be applied and the pending file could not be written under %s: %s. "
-            "Failed statements: %s",
-            len(failures),
-            config.execution.ddl_pending_dir,
-            exc,
-            "; ".join(" ".join(statement.split()) for statement, _ in failures),
-        )
-        raise SystemExit(1) from exc
-    logger.error(
-        "%d of %d history DDL change(s) could not be applied with runtime credentials. "
-        "They were written to %s; ask a DBA to review and run that file, then rerun.",
-        len(failures),
-        len(delta_statements),
-        pending_file,
-    )
-    raise SystemExit(1)
 
 
 def _initialize_worker_logger(log_level: str) -> None:
@@ -521,6 +503,93 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
     finally:
         if engine is not None and conn is not None:
             engine.close_connection(conn)
+
+
+def _script_history_ddl(
+    config: Config, engine: DatabaseEngine, source_connection: Any, tables_config: TablesConfig
+) -> list[str]:
+    """DDL for the history tables to write in the SCRIPT files; nothing is applied (DEC-024).
+
+    The current history structure is read over the admin HISTORY connection, else the runtime one, when it works, so
+    the script holds only the missing changes. Otherwise ``history_baseline`` states what to
+    assume: EMPTY (no history objects, everything is created) or SOURCE (history holds the same
+    objects as source, so only the history-specific differences are emitted).
+    """
+    table_defs_and_cnf = [
+        (_build_history_table_definition(config, engine, source_connection, table_cnf), table_cnf)
+        for table_cnf in tables_config.values()
+        if not table_cnf.get("skip")
+    ]
+    # Prefer the admin HISTORY connection, which sees every object, and fall back to the runtime one.
+    for admin in (True, False):
+        if not _credentials_present(config, admin=admin, env="HISTORY"):
+            continue
+        history_connection: Any | None = None
+        try:
+            history_connection = engine.get_connection(config, admin=admin, env="HISTORY")
+            return [
+                statement
+                for table_def, table_cnf in table_defs_and_cnf
+                for statement in engine.generate_table_structure_script(history_connection, table_def, table_cnf)
+            ]
+        except Exception as exc:
+            logger.warning(
+                "History schema could not be read with the %s connection: %s",
+                "admin" if admin else "runtime",
+                " ".join(str(exc.__cause__ or exc).split()),
+            )
+        finally:
+            if history_connection:
+                engine.close_connection(history_connection)
+    logger.info("History schema not read; assuming baseline %s.", config.execution.history_baseline)
+    statements: list[str] = []
+    for table_def, table_cnf in table_defs_and_cnf:
+        if config.execution.history_baseline == "SOURCE":
+            reference = (table_cnf["conds"][0]["source_owner"], table_def.name)
+            statements.extend(
+                engine.generate_table_structure_script(source_connection, table_def, table_cnf, reference)
+            )
+        else:
+            statements.extend(engine.generate_table_structure_script(None, table_def, table_cnf))
+    return statements
+
+
+def _write_script_ddl_files(
+    config: Config,
+    engine: DatabaseEngine,
+    source_connection: Any,
+    tables_config: TablesConfig,
+    tables_conf_rows: list[IlmRule],
+) -> None:
+    """Write the one-time DDL and grants of a SCRIPT run to files under ``ddl_pending_dir`` (DEC-025).
+
+    The history file holds the history DDL followed by the history grants; for SOURCE_ILM a second
+    file holds the source grants, since the two databases are run by different users. The ILM
+    script, which runs many times, goes to stdout and stays free of them.
+    """
+    history_tables = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
+    deliver_ddl(
+        config,
+        engine,
+        _script_history_ddl(config, engine, source_connection, tables_config),
+        destination="file",
+        env="HISTORY",
+        file_stem="history_ddl",
+        description="history table DDL and grants generated by ldb-run --mode SCRIPT.",
+        grants=_grant_statements(config, engine, "HISTORY", history_tables),
+    )
+    if config.execution.action == "SOURCE_ILM":
+        source_tables = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
+        deliver_ddl(
+            config,
+            engine,
+            [],
+            destination="file",
+            env="SOURCE",
+            file_stem="source_grants",
+            description="source table grants generated by ldb-run --mode SCRIPT.",
+            grants=_grant_statements(config, engine, "SOURCE", source_tables),
+        )
 
 
 def generate_script_output(config: Config, tables_config: TablesConfig) -> int:
@@ -904,11 +973,11 @@ def ldb_run(config: Config) -> None:
             rc = _validate_environment(config, engine)
             raise SystemExit(rc)
         connection = engine.get_connection(config)
-        table_privileges = ("SELECT", "INSERT", "UPDATE", "DELETE")
         tables_conf_rows = _load_offline_rows(config)
         source_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
         if (
-            config.execution.action == "SOURCE_ILM"
+            not config.execution.generate_script
+            and config.execution.action == "SOURCE_ILM"
             and source_tables_for_privileges
             and _credentials_present(config, admin=True, env="SOURCE")
         ):
@@ -918,13 +987,14 @@ def ldb_run(config: Config) -> None:
                     source_admin_priv_conn,
                     config.administration.source_role_name,
                     source_tables_for_privileges,
-                    table_privileges,
+                    _TABLE_PRIVILEGES,
                 )
             finally:
                 engine.close_connection(source_admin_priv_conn)
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)
         if config.execution.generate_script:
+            _write_script_ddl_files(config, engine, connection, tables_config, tables_conf_rows)
             rc = generate_script_output(config, tables_config)
         else:
             if _credentials_present(config, admin=True, env=None):
@@ -939,7 +1009,7 @@ def ldb_run(config: Config) -> None:
                         history_admin_priv_conn,
                         config.administration.history_role_name,
                         history_tables_for_privileges,
-                        table_privileges,
+                        _TABLE_PRIVILEGES,
                     )
                 finally:
                     engine.close_connection(history_admin_priv_conn)

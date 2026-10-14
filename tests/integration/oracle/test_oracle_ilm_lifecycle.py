@@ -1810,3 +1810,140 @@ def test_ldb_impl_without_admin_credentials_generates_scripts_a_dba_can_run_and_
             _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
         for role in roles:
             _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+
+def _run_sql_file_in_oracle_container(container: str, script: Path, *, admin_login: str) -> str:
+    """Run a generated plain-SQL file with SQL*Plus inside the Oracle container, as a DBA would."""
+    remote_path = f"/tmp/{script.name}"
+    subprocess.run(["docker", "cp", str(script), f"{container}:{remote_path}"], check=True, timeout=60)
+    result = subprocess.run(
+        ["docker", "exec", container, "sqlplus", "-L", "-s", admin_login, f"@{remote_path}"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, f"{script.name} failed with exit code {result.returncode}: {result.stdout}"
+    assert "LimitsDb: OK" in result.stdout, result.stdout
+    return result.stdout
+
+
+def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
+    oracle_connection: oracledb.Connection, tmp_path: Path
+):
+    # Spec: README § History DDL in --mode SCRIPT — SCRIPT applies nothing to the databases; the history
+    # DDL and the table grants go to files under ddl_pending_dir that run in SQL*Plus, and once the
+    # DBA has run them a new SCRIPT run finds history up to date
+    container = os.getenv("LDB_ORACLE_TEST_CONTAINER")
+    if not container:
+        pytest.skip("LDB_ORACLE_TEST_CONTAINER (Oracle container with SQL*Plus) is not configured")
+    source_user, history_user = "LDBT_DDL_SOURCE", "LDBT_DDL_HISTORY"
+    roles = ("LDBT_DDL_SOURCE_ROLE", "LDBT_DDL_HISTORY_ROLE")
+    for user in (source_user, history_user):
+        _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+    for role in roles:
+        _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)
+
+    dsn = os.environ["LDB_ORACLE_TEST_DSN"]
+    admin_user = os.environ["LDB_ORACLE_TEST_USER"]
+    admin_password = os.environ["LDB_ORACLE_TEST_PASSWORD"]
+    admin_login = f"{admin_user}/{admin_password}@{dsn}"
+    credentials = {
+        "dsn": dsn,
+        "admin_user": admin_user,
+        "admin_password": admin_password,
+        "source_user": source_user,
+        "source_password": f"LdbDdl_{secrets.token_hex(11)}",
+        "history_user": history_user,
+        "history_password": f"LdbDdl_{secrets.token_hex(11)}",
+    }
+    config_root = tmp_path / "script-config"
+    cli_environment = _e2e_environment(tmp_path / "script-home")
+    common_arguments = ("--schema", "ddl-e2e", "--config-dir", str(config_root))
+    source_connection: oracledb.Connection | None = None
+    try:
+        # Given: bootstrapped schemas and a source table; the history table does not exist
+        _write_ddl_pending_e2e_configuration(config_root, with_history_admin=True, **credentials)
+        _run_cli("ldb-impl", *common_arguments, environment=cli_environment)
+        source_connection = oracledb.connect(user=source_user, password=credentials["source_password"], dsn=dsn)
+        source_cursor = source_connection.cursor()
+        try:
+            source_cursor.execute(
+                "CREATE TABLE ilm_ddltbl (id NUMBER(10) PRIMARY KEY, created_at DATE NOT NULL, payload VARCHAR2(40))"
+            )
+        finally:
+            source_cursor.close()
+
+        # When: ldb-run generates the script
+        first_dir = tmp_path / "pending-1"
+        result = _run_cli(
+            "ldb-run",
+            *common_arguments,
+            "--action",
+            "SOURCE_ILM",
+            "--mode",
+            "SCRIPT",
+            "--ddl-pending-dir",
+            str(first_dir),
+            environment=cli_environment,
+        )
+
+        # Then: stdout holds only the ILM script, the files hold the DDL and grants, nothing was applied
+        assert "CREATE TABLE" not in result.stdout.upper() and "GRANT " not in result.stdout.upper()
+        (history_file,) = first_dir.glob("history_ddl_*.sql")
+        (source_file,) = first_dir.glob("source_grants_*.sql")
+        assert "CREATE TABLE" in history_file.read_text(encoding="utf-8").upper()
+        cursor = oracle_connection.cursor()
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) FROM dba_tables WHERE owner = :1 AND table_name = 'ILM_DDLTBL'", [history_user]
+            )
+            assert cursor.fetchone()[0] == 0
+
+            # When: the DBA runs the files with SQL*Plus
+            _run_sql_file_in_oracle_container(container, history_file, admin_login=admin_login)
+            _run_sql_file_in_oracle_container(container, source_file, admin_login=admin_login)
+
+            # Then: the history table and the grants exist
+            cursor.execute(
+                "SELECT COUNT(*) FROM dba_tables WHERE owner = :1 AND table_name = 'ILM_DDLTBL'", [history_user]
+            )
+            assert cursor.fetchone()[0] == 1
+            cursor.execute(
+                "SELECT privilege FROM dba_tab_privs WHERE owner = :1 AND table_name = 'ILM_DDLTBL' AND grantee = :2",
+                [history_user, "LDBT_DDL_HISTORY_ROLE"],
+            )
+            assert {row[0] for row in cursor} == {"SELECT", "INSERT", "UPDATE", "DELETE"}
+            cursor.execute(
+                "SELECT privilege FROM dba_tab_privs WHERE owner = :1 AND table_name = 'ILM_DDLTBL' AND grantee = :2",
+                [source_user, "LDBT_DDL_SOURCE_ROLE"],
+            )
+            assert {row[0] for row in cursor} == {"SELECT", "INSERT", "UPDATE", "DELETE"}
+        finally:
+            cursor.close()
+
+        # When: SCRIPT runs again over the repaired history
+        second_dir = tmp_path / "pending-2"
+        _run_cli(
+            "ldb-run",
+            *common_arguments,
+            "--action",
+            "SOURCE_ILM",
+            "--mode",
+            "SCRIPT",
+            "--ddl-pending-dir",
+            str(second_dir),
+            environment=cli_environment,
+        )
+
+        # Then: no history structure change is left, and its grants file reruns without error
+        (second_history_file,) = second_dir.glob("history_ddl_*.sql")
+        assert "CREATE TABLE" not in second_history_file.read_text(encoding="utf-8").upper()
+        _run_sql_file_in_oracle_container(container, second_history_file, admin_login=admin_login)
+    finally:
+        if source_connection is not None:
+            source_connection.close()
+        for user in (source_user, history_user):
+            _execute_cleanup_ddl(oracle_connection, f"DROP USER {user} CASCADE", missing_error_code=1918)
+        for role in roles:
+            _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role}", missing_error_code=1919)

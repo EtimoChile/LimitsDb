@@ -302,10 +302,19 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def generate_table_structure_script(conn: Any, table: TableDefinition, table_cnf: Mapping[str, Any]) -> list[str]:
+    def generate_table_structure_script(
+        conn: Any,
+        table: TableDefinition,
+        table_cnf: Mapping[str, Any],
+        reference: tuple[str, str] | None = None,
+    ) -> list[str]:
         """Return DDL statements to synchronize the table to the definition without executing them.
         Uses accessible dictionary views and can be called with a non-administrative connection.
-        Returns an empty list when the table already matches the required definition."""
+        Returns an empty list when the table already matches the required definition.
+
+        By default the current structure is read from the table itself. ``reference`` gives an
+        (owner, table name) whose structure is taken as the current one instead, and a ``conn`` of
+        None means the table does not exist yet, so every object is created."""
         pass
 
     @staticmethod
@@ -353,6 +362,15 @@ class DatabaseEngine(ABC):
         conn: Any, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
     ) -> list[str]:
         """Ensure the role has the specified privileges on each table, returning new grants."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def generate_table_privilege_script(
+        role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[str]:
+        """Return the statements that grant the privileges on each table to the role, without executing them.
+        The statements are unconditional and safe to run again."""
         pass
 
     @staticmethod
