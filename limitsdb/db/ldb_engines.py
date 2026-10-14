@@ -366,6 +366,15 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def generate_table_privilege_script(
+        role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[str]:
+        """Return the statements that grant the privileges on each table to the role, without executing them.
+        The statements are unconditional and safe to run again."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def ensure_supporting_objects(conn: Any, owner: str) -> list[str]:
         """Ensure auxiliary PL/SQL objects required by LimitsDb exist in the schema."""
         pass

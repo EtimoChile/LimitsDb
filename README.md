@@ -360,20 +360,32 @@ History table management follows the same principle:
 
 ### History DDL in `--mode SCRIPT`
 
-`--mode SCRIPT` applies nothing to the databases. It prints, to stdout, the
-history table DDL followed by the ILM SQL blocks, so a DBA can review and run
-the whole script. The history DDL is always emitted, computed like this:
+`--mode SCRIPT` applies nothing to the databases. The ILM SQL blocks, which
+run many times, go to stdout. The one-time statements go to files under
+`ddl_pending_dir`, so they stay out of the script that is rerun:
 
-- **The runtime history connection works**: the current history structure is
-  read, and the script holds only the missing changes.
-- **It does not work or has no credentials**: `history_baseline` states what to
+- `history_ddl_<schema>_<YYYYMMDD_HHMMSS>.sql`: the history table DDL followed by
+  the grants on the history tables for the history role. Run it against the
+  history database.
+- `source_grants_<schema>_<YYYYMMDD_HHMMSS>.sql` (`SOURCE_ILM` only): the grants
+  on the source tables for the source role. Run it against the source database.
+
+Both are plain SQL for SQL*Plus that stop at the first failing statement; the
+grants are unconditional and safe to run again. The history DDL is always
+emitted, computed like this:
+
+- **A history connection works**: the admin connection is used when admin
+  credentials exist, the runtime one otherwise. The current history structure is
+  read, and the file holds only the missing changes.
+- **Neither works or there are no credentials**: `history_baseline` states what to
   assume. `EMPTY` (default) assumes history has no objects, so every table, key
   and index is created. `SOURCE` assumes history holds the same objects as
   source, so only the history-specific differences are emitted (for example the
   `LDB_PROCESS_DATE` column and the matching primary key).
 
-Table privilege grants are not applied in `SCRIPT` mode, and are not part of the
-script.
+When `ldb-run` cannot apply history DDL without admin credentials, the pending
+file it writes (see above) also carries the grants on the history tables, which
+need admin rights and were not applied.
 
 ### Configuration parameters reference
 
@@ -385,7 +397,7 @@ script.
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
-| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials.                                                                      | Default `ldb_ddl_pending`.                                                           |
+| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials, and the DDL and grants files of `--mode SCRIPT`.                                                                      | Default `ldb_ddl_pending`.                                                           |
 | `history_baseline`       | State assumed for the history tables by `--mode SCRIPT` when it cannot read them over the runtime history connection: `EMPTY` (no objects) or `SOURCE` (same objects as source). | Default `EMPTY`; choices `EMPTY`, `SOURCE`. |
 | `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |

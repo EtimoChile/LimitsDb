@@ -10,9 +10,9 @@
 - Document that `PREVIEW` applies the same DDL and grants as `EXECUTE` and skips only the data movement, because a run needs the objects in place.
 - Replace a primary key with a single `DROP PRIMARY KEY DROP INDEX` statement so the generated DDL no longer fails with ORA-01418.
 - Read primary-key and index metadata from `all_*` dictionary views on non-admin connections, keeping `dba_*` on admin connections.
-- `--mode SCRIPT` now emits the history table DDL at the top of the script and applies nothing, including table grants. The new `history_baseline` option (`--history-baseline`, `LDB_HISTORY_BASELINE`, default `EMPTY`) chooses whether to assume an empty history or one with the same objects as source when history cannot be read.
+- `--mode SCRIPT` now writes the history table DDL and the table grants to files under `ddl_pending_dir` and applies nothing; the ILM script stays on stdout. The pending file that `ldb-run` writes for failed history DDL also lists the grants. The new `history_baseline` option (`--history-baseline`, `LDB_HISTORY_BASELINE`, default `EMPTY`) chooses whether to assume an empty history or one with the same objects as source when history cannot be read.
 - Add the `ddl_pending_dir` option (`--ddl-pending-dir`, `LDB_DDL_PENDING_DIR`, default `ldb_ddl_pending`) for the files that `ldb-run` and `ldb-impl` write for a DBA.
-- **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `generate_table_structure_script`, `execute_ddl_statements` and `generate_bootstrap_script`.
+- **Breaking for custom engines:** `DatabaseEngine` has four new abstract methods, `generate_table_structure_script`, `execute_ddl_statements`, `generate_table_privilege_script` and `generate_bootstrap_script`.
 
 ## [0.5.0] - 2026-10-10
 

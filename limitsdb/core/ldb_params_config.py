@@ -138,7 +138,9 @@ class Config:
     ] = 10
     ddl_pending_dir: Annotated[
         str,
-        Help("Directory where ldb-run writes history DDL that could not be applied, for a DBA to run"),
+        Help(
+            "Directory where ldb-run writes the DDL and grants for a DBA to run: history DDL it could not apply, and the files of --mode SCRIPT"
+        ),
         Cli("--ddl-pending-dir"),
         Env("LDB_DDL_PENDING_DIR"),
     ] = "ldb_ddl_pending"

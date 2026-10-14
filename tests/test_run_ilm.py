@@ -1277,6 +1277,13 @@ class _HistoryDdlEngine:
     def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
         return ()
 
+    @staticmethod
+    def get_identifier_str(value):
+        return value.upper()
+
+    def generate_table_privilege_script(self, role, tables, privileges):
+        return [f"GRANT {p} ON {o}.{t} TO {role}" for o, t in tables for p in privileges]
+
     def get_table_columns(self, conn, owner, table_name):
         return [], {}
 
@@ -1589,75 +1596,150 @@ def test_execute_run_applies_history_ddl_over_runtime_connection_when_history_il
     assert engine.attempted == [statement]
 
 
-def _script_output(capsys: pytest.CaptureFixture) -> str:
-    return capsys.readouterr().out
+def _script_files(pending_dir) -> dict[str, str]:
+    """Return the text of each file under the pending directory, keyed by its stem prefix."""
+    return {
+        "_".join(path.stem.split("_")[:2]): path.read_text(encoding="utf-8")
+        for path in sorted(pending_dir.glob("*.sql"))
+    }
 
 
-def test_script_run_emits_the_history_delta_read_over_the_runtime_history_connection(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+def test_script_run_writes_the_history_delta_read_over_the_runtime_history_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture
 ):
-    # Spec: README > Run ILM > --mode SCRIPT — the script holds the history DDL; with a working
-    # runtime history connection it holds only the missing changes, and nothing is applied.
-    # Given: SCRIPT mode, a readable history schema and a pending delta
+    # Spec: README > Run ILM > --mode SCRIPT — the history DDL goes to a file under ddl_pending_dir,
+    # apart from the ILM script on stdout; with a readable history it holds only the missing changes.
+    # Given: SCRIPT mode, no history admin credentials, a readable history schema and a pending delta
     statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
     engine = _HistoryDdlEngine({"T1": [statement]})
+    pending_dir = tmp_path / "pending"
+    monkeypatch.setattr(ldb_runner, "_collect_privilege_targets", lambda rows, key, engine: [("HIST", "T1")])
 
     # When: ldb-run generates the script
-    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE"), engine)
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE", ddl_pending_dir=str(pending_dir)),
+        engine,
+    )
 
-    # Then: the delta is in the script, the baseline was not needed and no DDL was applied
+    # Then: the delta is in the history file followed by its grants, stdout keeps only the ILM script,
+    # the baseline was not needed and nothing was applied
     assert rc == 0
-    assert f"{statement};" in _script_output(capsys)
+    history_file = _script_files(pending_dir)["history_ddl"]
+    assert history_file.index(f"{statement};") < history_file.index("GRANT SELECT ON HIST.T1 TO LDB_HISTORY_ROLE;")
+    assert "ALTER TABLE" not in capsys.readouterr().out
     assert engine.structure_reads == [("HISTORY", None)]
+    assert engine.connections.count((True, "HISTORY")) == 0
+    assert engine.attempted == [] and engine.admin_applied == []
+
+
+def test_script_run_reads_history_with_the_admin_connection_when_it_is_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode SCRIPT — history is read over the admin connection when admin
+    # credentials exist, and over the runtime connection otherwise.
+    # Given: SCRIPT mode with history admin credentials
+    engine = _HistoryDdlEngine({"T1": ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]})
+
+    # When: ldb-run generates the script
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(tmp_path / "pending")),
+        engine,
+    )
+
+    # Then: the structure was read over the admin connection and nothing was applied
+    assert rc == 0
+    assert engine.structure_reads == [("HISTORY", None)]
+    assert engine.history_admin_opened
     assert engine.attempted == [] and engine.admin_applied == []
 
 
 def test_script_run_creates_every_history_object_when_history_is_unreadable_and_baseline_is_empty(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     # Spec: README > Run ILM > --mode SCRIPT — history_baseline EMPTY assumes history has no objects.
     # Given: SCRIPT mode, no usable history connection and the default baseline
     engine = _HistoryDdlEngine(history_unreachable=True)
+    pending_dir = tmp_path / "pending"
 
     # When: ldb-run generates the script
-    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT"), engine)
+    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT", ddl_pending_dir=str(pending_dir)), engine)
 
     # Then: the table is created from scratch, without inspecting any database
     assert rc == 0
-    assert "CREATE TABLE HIST.T1 (ID NUMBER);" in _script_output(capsys)
+    assert "CREATE TABLE HIST.T1 (ID NUMBER);" in _script_files(pending_dir)["history_ddl"]
     assert engine.structure_reads == [(None, None)]
     assert engine.attempted == [] and engine.admin_applied == []
 
 
 def test_script_run_aligns_history_with_source_when_history_is_unreadable_and_baseline_is_source(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     # Spec: README > Run ILM > --mode SCRIPT — history_baseline SOURCE assumes history holds the
     # same objects as source, so the delta is computed against the source table.
     # Given: SCRIPT mode, no usable history connection and baseline SOURCE
     engine = _HistoryDdlEngine(history_unreachable=True)
+    pending_dir = tmp_path / "pending"
 
     # When: ldb-run generates the script
-    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE"), engine)
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE", ddl_pending_dir=str(pending_dir)),
+        engine,
+    )
 
     # Then: the source table is the reference and only the history-specific change is emitted
     assert rc == 0
-    assert "ALTER TABLE HIST.T1 ADD (LDB_PROCESS_DATE DATE);" in _script_output(capsys)
+    assert "ALTER TABLE HIST.T1 ADD (LDB_PROCESS_DATE DATE);" in _script_files(pending_dir)["history_ddl"]
     assert engine.structure_reads == [(None, "SRC")]  # runtime source connection, SRC as reference
     assert engine.attempted == [] and engine.admin_applied == []
 
 
-def test_script_run_does_not_apply_table_grants(monkeypatch: pytest.MonkeyPatch):
-    # Spec: README > Run ILM > --mode SCRIPT — SCRIPT applies nothing to the target databases.
-    # Given: SCRIPT mode with admin credentials and tables that need grants
+def test_script_run_emits_grants_in_files_instead_of_applying_them(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode SCRIPT — SCRIPT applies nothing to the target databases, so the
+    # table grants go to files: history grants with the history DDL, source grants in their own file.
+    # Given: SCRIPT mode with admin credentials, where a normal run would apply the grants
     granted: list[str] = []
     engine = _HistoryDdlEngine()
     engine.ensure_table_privileges = lambda *args: granted.append("granted")  # type: ignore[attr-defined]
-    monkeypatch.setattr(ldb_runner, "_collect_privilege_targets", lambda *args: [("SRC", "T1")])
+    monkeypatch.setattr(
+        ldb_runner,
+        "_collect_privilege_targets",
+        lambda rows, key, engine: [("SRC" if key == "source_owner" else "HIST", "T1")],
+    )
+    pending_dir = tmp_path / "pending"
 
     # When: ldb-run generates the script
-    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT", history_admin=True), engine)
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(pending_dir)),
+        engine,
+    )
 
-    # Then: no grant was applied
+    # Then: nothing was granted, and each database has its own file with its grants
     assert rc == 0
     assert granted == []
+    files = _script_files(pending_dir)
+    assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE;" in files["history_ddl"]
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in files["source_grants"]
+    assert "LDB_SOURCE_ROLE" not in files["history_ddl"]
+
+
+def test_failed_history_ddl_file_carries_the_table_grants_that_could_not_be_applied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin credentials the grants are
+    # not applied, so the file a DBA runs for the failed DDL also holds the grants for the history tables.
+    # Given: no history admin credentials and a statement the runtime user cannot apply
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    engine = _HistoryDdlEngine({"T1": [statement]}, failing={statement: "ORA-01031: insufficient privileges"})
+    pending_dir = tmp_path / "pending"
+
+    # When: ldb-run executes
+    rc = _run_ldb(monkeypatch, _history_ddl_config(ddl_pending_dir=str(pending_dir)), engine)
+
+    # Then: the file lists the failed statement and then the grants
+    assert rc == 1
+    content = _script_files(pending_dir)["history_ddl"]
+    assert content.index(f"{statement};") < content.index("GRANT UPDATE ON HIST.T1 TO LDB_HISTORY_ROLE;")

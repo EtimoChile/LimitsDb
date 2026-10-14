@@ -1249,6 +1249,22 @@ end;"""
         return created
 
     @staticmethod
+    def generate_table_privilege_script(
+        role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[str]:
+        return [
+            OracleEngine._grant_sql(role, owner, table_name, privilege.upper())
+            for owner, table_name in tables
+            for privilege in privileges
+        ]
+
+    @staticmethod
+    def _grant_sql(role: str, owner: str, table_name: str, privilege: str) -> str:
+        fmttd_owner = OracleEngine._format_identifier(owner)
+        fmttd_table_name = OracleEngine._format_identifier(table_name)
+        return f"GRANT {privilege} ON {fmttd_owner}.{fmttd_table_name} TO {OracleEngine._format_identifier(role)}"
+
+    @staticmethod
     def ensure_table_privileges(
         conn: oracledb.Connection, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
     ) -> list[str]:
@@ -1257,7 +1273,6 @@ end;"""
         changed = False
         if not tables:
             return granted
-        fmt_role = OracleEngine._format_identifier(role)
         try:
             cursor = conn.cursor()
             for owner, table_name in tables:
@@ -1269,7 +1284,7 @@ end;"""
                         cursor, role.upper(), owner.upper(), table_name.upper(), privilege_upper
                     ):
                         continue
-                    sql = f"GRANT {privilege_upper} ON {fmttd_owner}.{fmttd_table_name} TO {fmt_role}"
+                    sql = OracleEngine._grant_sql(role, owner, table_name, privilege_upper)
                     OracleEngine._execute_ddl(conn, cursor, sql)
                     granted.append(f"{fmttd_owner}.{fmttd_table_name}:{privilege_upper}")
                     changed = True

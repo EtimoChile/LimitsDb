@@ -610,3 +610,20 @@ def test_structure_script_with_a_reference_reads_the_reference_and_emits_ddl_for
     # Then: every dictionary lookup targeted the reference, and the DDL targets the history table
     assert lookups and all(lookup == ("SRC", "ITEMS") for lookup in lookups)
     assert len(statements) == 1 and statements[0].startswith("ALTER TABLE hist.items ADD (")
+
+
+def test_table_privilege_script_grants_every_privilege_on_every_table_without_a_connection():
+    # Spec: README > Run ILM > --mode SCRIPT — the grants a DBA runs are unconditional GRANT
+    # statements, one per table and privilege, safe to run again.
+    # When: the privilege script is generated for two tables and two privileges
+    statements = OracleEngine.generate_table_privilege_script(
+        "LDB_ROLE", [("OWNER", "A"), ("OWNER", "B")], ("select", "DELETE")
+    )
+
+    # Then: each table gets each privilege for the role
+    assert statements == [
+        "GRANT SELECT ON owner.a TO ldb_role",
+        "GRANT DELETE ON owner.a TO ldb_role",
+        "GRANT SELECT ON owner.b TO ldb_role",
+        "GRANT DELETE ON owner.b TO ldb_role",
+    ]
