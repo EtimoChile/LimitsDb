@@ -2,7 +2,7 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-13
+last-reviewed: 2026-10-14
 last-updated: 2026-10-13
 ---
 
@@ -15,7 +15,7 @@ but does not replace the sources defined in `AGENTS.md`.
 
 - The integration branch is `development`; `main` represents stable versions
   per `README.md`.
-- The version declared in `pyproject.toml` is `0.5.0` and requires Python
+- The version declared in `pyproject.toml` is `0.6.0` and requires Python
   `>=3.12,<4.0`.
 - The current name is `LimitsDb`, the Python package is `limitsdb`, and the
   public technical prefix is `ldb` / `LDB`; the change from the previous name

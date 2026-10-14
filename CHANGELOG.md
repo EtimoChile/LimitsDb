@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-14
+
+- `ldb-run` without history admin credentials now applies pending history DDL with its runtime connection; statements that fail are written to `ddl_pending_dir` (`--ddl-pending-dir`) for a DBA and the run exits 1.
+- `ldb-impl` no longer requires admin credentials: when they are absent it writes a rerunnable SQL*Plus bootstrap script per database under `ddl_pending_dir` for a DBA, creating the database link as the runtime user. The script prompts for passwords with hidden input and warns when a user already exists, because its password is left unchanged.
+- History table DDL is applied only in `EXECUTE` mode; `PREVIEW` and the other modes apply nothing and log how many changes are required. `HISTORY_ILM` without admin credentials now reaches the runtime-connection path.
+- Replace a primary key with a single `DROP PRIMARY KEY DROP INDEX` statement so the generated DDL no longer fails with ORA-01418.
+- Read primary-key and index metadata from `all_*` dictionary views on non-admin connections, keeping `dba_*` on admin connections.
+
 ## [0.5.0] - 2026-10-10
 
 - Archive source orphans selected by `left outer` joins and `orphan_check_column IS NULL`, snapshotting `LDB_IS_ORPHAN` and the process date whenever a related retention-date expression is null so historical retention remains evaluable.
