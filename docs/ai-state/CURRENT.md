@@ -172,5 +172,7 @@ but does not replace the sources defined in `AGENTS.md`.
   `ddl_pending_dir`, the ILM blocks stay on stdout; `history_baseline` (`EMPTY`|`SOURCE`)
   is assumed when history cannot be read.
 - `DEC-025`: history DDL always travels with the matching grants (executed or written to a file).
+- `DEC-026`: one function (`deliver_ddl`, `limitsdb/core/ldb_ddl.py`) decides execute-or-file for every
+  DDL helper; the engine only generates statements and executes them.
 - `DEC-022`: without admin credentials, `ldb-impl` writes one bootstrap script
   per database (PL/SQL blocks tolerating only "already exists"); `PEND-017` is resolved.

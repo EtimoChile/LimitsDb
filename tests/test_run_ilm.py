@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from limitsdb.core import ldb_params_config, ldb_runner, ldb_utils
+from limitsdb.core import ldb_ddl, ldb_params_config, ldb_runner, ldb_utils
 from limitsdb.core.ldb_errors import ConfigurationError
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
@@ -1251,6 +1251,7 @@ class _HistoryDdlEngine:
         self.connections: list[tuple[bool, str | None]] = []
         self.attempted: list[str] = []
         self.admin_applied: list[str] = []
+        self.grants_attempted: list[str] = []
         self.structure_reads: list[tuple[str | None, str | None]] = []
 
     def get_connection(self, config, *, admin=False, env=None):
@@ -1287,15 +1288,17 @@ class _HistoryDdlEngine:
     def get_table_columns(self, conn, owner, table_name):
         return [], {}
 
-    def ensure_table_structure(self, conn, table, table_cnf):
-        assert conn.admin and conn.env == "HISTORY", "table structure is applied with the history admin connection"
-        self.admin_applied.append(table.name)
-
     def execute_ddl_statements(self, conn, statements):
-        assert not conn.admin and conn.env == "HISTORY", "pending-file path uses the runtime history connection"
         failures = []
         for statement in statements:
-            self.attempted.append(statement)
+            if conn.admin:
+                assert conn.env == "HISTORY", "history DDL is applied over a history connection"
+                self.admin_applied.append(statement)
+                continue
+            if statement.startswith("GRANT "):
+                self.grants_attempted.append(statement)
+            else:
+                self.attempted.append(statement)
             if statement in self.failing:
                 failures.append((statement, self.failing[statement]))
         return failures
@@ -1362,7 +1365,7 @@ def test_history_admin_connection_opened_when_ddl_changes_are_needed(monkeypatch
     # Then: the history admin connection applied the change
     assert rc == 0
     assert engine.history_admin_opened
-    assert engine.admin_applied == ["T1"]
+    assert engine.admin_applied == ["CREATE TABLE HIST.T1 (ID NUMBER)"]
 
 
 def test_history_ddl_is_applied_with_runtime_connection_when_admin_absent(
@@ -1402,7 +1405,7 @@ def test_failed_history_ddl_goes_to_pending_file_and_run_exits_1_after_trying_al
     engine = _HistoryDdlEngine({"T1": [ok_1, bad, ok_2]}, failing={bad: "ORA-01031: insufficient privileges"})
     pending_dir = tmp_path / "pending"
     recorder = _RecordingLogger()
-    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    monkeypatch.setattr(ldb_ddl, "logger", recorder)
 
     # When
     rc = _run_ldb(monkeypatch, _history_ddl_config(ddl_pending_dir=str(pending_dir)), engine)
@@ -1491,7 +1494,7 @@ def test_history_ddl_with_admin_credentials_is_applied_by_admin_and_leaves_no_pe
 
     # Then: applied by the admin connection, never through the pending-file path
     assert rc == 0
-    assert engine.admin_applied == ["T1"]
+    assert engine.admin_applied == ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]
     assert engine.attempted == []
     assert not pending_dir.exists()
 
@@ -1545,7 +1548,7 @@ def test_run_exits_1_and_logs_failed_statements_when_pending_file_cannot_be_writ
     statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
     engine = _HistoryDdlEngine({"T1": [statement]}, failing={statement: "ORA-01031: insufficient privileges"})
     recorder = _RecordingLogger()
-    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    monkeypatch.setattr(ldb_ddl, "logger", recorder)
 
     # When
     rc = _run_ldb(monkeypatch, _history_ddl_config(ddl_pending_dir=str(blocker / "sub")), engine)
@@ -1572,7 +1575,7 @@ def test_preview_run_applies_history_ddl_like_execute(monkeypatch: pytest.Monkey
 
     # Then: the delta was applied over the connection EXECUTE would use
     assert rc == 0
-    assert (engine.admin_applied, engine.attempted) == ((["T1"], []) if history_admin else ([], [statement]))
+    assert (engine.admin_applied, engine.attempted) == (([statement], []) if history_admin else ([], [statement]))
 
 
 def test_execute_run_applies_history_ddl_over_runtime_connection_when_history_ilm_has_no_admin(
@@ -1726,20 +1729,42 @@ def test_script_run_emits_grants_in_files_instead_of_applying_them(monkeypatch: 
     assert "LDB_SOURCE_ROLE" not in files["history_ddl"]
 
 
-def test_failed_history_ddl_file_carries_the_table_grants_that_could_not_be_applied(
+def test_grants_that_go_with_history_ddl_are_applied_over_the_runtime_connection_without_admin(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin credentials the grants are
-    # not applied, so the file a DBA runs for the failed DDL also holds the grants for the history tables.
-    # Given: no history admin credentials and a statement the runtime user cannot apply
+    # Spec: README > Run ILM > Admin credentials in ldb-run — every DDL change comes with the grants of
+    # its tables; they run with the DDL over the same connection (DEC-026).
+    # Given: no history admin credentials and a delta the runtime user can apply
     statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
-    engine = _HistoryDdlEngine({"T1": [statement]}, failing={statement: "ORA-01031: insufficient privileges"})
+    engine = _HistoryDdlEngine({"T1": [statement]})
     pending_dir = tmp_path / "pending"
 
     # When: ldb-run executes
     rc = _run_ldb(monkeypatch, _history_ddl_config(ddl_pending_dir=str(pending_dir)), engine)
 
-    # Then: the file lists the failed statement and then the grants
+    # Then: the DDL and its grants were applied and nothing is pending
+    assert rc == 0
+    assert engine.attempted == [statement]
+    assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE" in engine.grants_attempted
+    assert not pending_dir.exists()
+
+
+def test_failed_history_ddl_file_carries_the_table_grants_that_could_not_be_applied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — a grant the runtime user cannot apply
+    # is written, like any failed DDL, to the pending file for a DBA.
+    # Given: no history admin credentials; the DDL works but the grant on UPDATE is rejected
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    grant = "GRANT UPDATE ON HIST.T1 TO LDB_HISTORY_ROLE"
+    engine = _HistoryDdlEngine({"T1": [statement]}, failing={grant: "ORA-01031: insufficient privileges"})
+    pending_dir = tmp_path / "pending"
+
+    # When: ldb-run executes
+    rc = _run_ldb(monkeypatch, _history_ddl_config(ddl_pending_dir=str(pending_dir)), engine)
+
+    # Then: only the failed grant is in the file
     assert rc == 1
     content = _script_files(pending_dir)["history_ddl"]
-    assert content.index(f"{statement};") < content.index("GRANT UPDATE ON HIST.T1 TO LDB_HISTORY_ROLE;")
+    assert f"{grant};" in content and "-- Failed with: ORA-01031" in content
+    assert statement not in content

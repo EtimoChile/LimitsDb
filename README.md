@@ -383,9 +383,9 @@ emitted, computed like this:
   source, so only the history-specific differences are emitted (for example the
   `LDB_PROCESS_DATE` column and the matching primary key).
 
-When `ldb-run` cannot apply history DDL without admin credentials, the pending
-file it writes (see above) also carries the grants on the history tables, which
-need admin rights and were not applied.
+Without admin credentials, `ldb-run` applies the history grants right after the
+DDL over the runtime connection. Any grant the runtime user cannot apply goes to
+the same pending file as the failed DDL, so a DBA can run it.
 
 ### Configuration parameters reference
 

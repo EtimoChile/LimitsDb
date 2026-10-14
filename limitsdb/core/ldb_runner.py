@@ -1,10 +1,9 @@
 from collections.abc import Sequence
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
-from datetime import datetime
 from operator import attrgetter
-from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
+from limitsdb.core.ldb_ddl import deliver_ddl
 from limitsdb.core.ldb_errors import ConfigurationError
 from limitsdb.core.ldb_ilm_config import IlmRule, load_rows_from_yaml
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
@@ -307,46 +306,6 @@ def _build_history_table_definition(
 _TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
 
 
-def _write_ddl_file(
-    config: Config,
-    file_stem: str,
-    description: str,
-    entries: Sequence[tuple[str | None, str]],
-    *,
-    env: Literal["SOURCE", "HISTORY"] = "HISTORY",
-) -> Path:
-    """Write statements to a SQL*Plus file under ``ddl_pending_dir`` for a DBA to run once.
-
-    Each entry is (comment, statement); the comment, when present, precedes the statement.
-    """
-    pending_dir = Path(config.execution.ddl_pending_dir)
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = pending_dir / f"{file_stem}_{config.context.schema}_{stamp}.sql"
-    user = config.history_username if env == "HISTORY" else config.source_username
-    lines = [
-        f"-- LimitsDb: {description}",
-        f"-- Schema: {config.context.schema}; {env.lower()} user: {user}",
-        "-- Run it from SQL*Plus as a user with the required privileges.",
-        "-- Plain SQL, no PL/SQL. Execution stops at the first failing statement and SQL*Plus",
-        "-- exits with a non-zero code; reaching the final OK banner means every statement worked.",
-        "whenever oserror exit failure",
-        "whenever sqlerror exit failure",
-        "set echo on define off sqlblanklines on",
-        "",
-    ]
-    for comment, statement in entries:
-        if comment:
-            lines.append(f"-- {comment}")
-        lines.append(f"{statement};")
-        lines.append("")
-    lines.append(f"prompt LimitsDb: OK - {len(entries)} statement(s) applied.")
-    lines.append("exit success")
-    lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
-
-
 def _grant_statements(
     config: Config, engine: DatabaseEngine, env: Literal["SOURCE", "HISTORY"], tables: Sequence[tuple[str, str]]
 ) -> list[str]:
@@ -437,8 +396,22 @@ def _ensure_history_tables(
     history_admin_connection: Any | None = None
     try:
         history_admin_connection = engine.get_connection(config, admin=True, env="HISTORY")
-        for table_def, table_cnf in table_defs_and_cnf:
-            engine.ensure_table_structure(history_admin_connection, table_def, table_cnf)
+        statements = [
+            statement
+            for table_def, table_cnf in table_defs_and_cnf
+            for statement in engine.generate_table_structure_script(history_admin_connection, table_def, table_cnf)
+        ]
+        # Grants for the admin path are applied afterwards by ``ensure_table_privileges``, which skips existing ones.
+        deliver_ddl(
+            config,
+            engine,
+            statements,
+            destination="execute",
+            env="HISTORY",
+            file_stem="history_ddl",
+            description="history table DDL.",
+            connection=history_admin_connection,
+        )
     finally:
         if history_admin_connection:
             engine.close_connection(history_admin_connection)
@@ -447,46 +420,26 @@ def _ensure_history_tables(
 def _apply_history_delta_without_admin(
     config: Config, engine: DatabaseEngine, delta_statements: list[str], grants: list[str]
 ) -> None:
-    """Run the history DDL delta with runtime credentials; leave failures in a pending file and exit 1.
-
-    The file also carries the table grants, which need admin rights and so were not applied (DEC-025).
-    """
+    """Run the history DDL delta and its grants with runtime credentials; failures go to a pending file, exit 1."""
     logger.info(
         "History admin credentials are absent; applying %d DDL change(s) with runtime credentials.",
         len(delta_statements),
     )
     runtime_conn = engine.get_connection(config, admin=False, env="HISTORY")
     try:
-        failures = engine.execute_ddl_statements(runtime_conn, delta_statements)
+        deliver_ddl(
+            config,
+            engine,
+            delta_statements,
+            destination="execute",
+            env="HISTORY",
+            file_stem="history_ddl",
+            description="history DDL that ldb-run could not apply with its runtime credentials.",
+            connection=runtime_conn,
+            grants=grants,
+        )
     finally:
         engine.close_connection(runtime_conn)
-    if not failures:
-        return
-    try:
-        pending_file = _write_ddl_file(
-            config,
-            "history_ddl",
-            "history DDL that ldb-run could not apply with its runtime credentials; rerun ldb-run afterwards.",
-            [(f"Failed with: {error}", statement) for statement, error in failures] + [(None, g) for g in grants],
-        )
-    except OSError as exc:
-        logger.error(
-            "%d history DDL change(s) could not be applied and the pending file could not be written under %s: %s. "
-            "Failed statements: %s",
-            len(failures),
-            config.execution.ddl_pending_dir,
-            exc,
-            "; ".join(" ".join(statement.split()) for statement, _ in failures),
-        )
-        raise SystemExit(1) from exc
-    logger.error(
-        "%d of %d history DDL change(s) could not be applied with runtime credentials. "
-        "They were written to %s; ask a DBA to review and run that file, then rerun.",
-        len(failures),
-        len(delta_statements),
-        pending_file,
-    )
-    raise SystemExit(1)
 
 
 def _initialize_worker_logger(log_level: str) -> None:
@@ -614,36 +567,29 @@ def _write_script_ddl_files(
     file holds the source grants, since the two databases are run by different users. The ILM
     script, which runs many times, goes to stdout and stays free of them.
     """
-    history_entries: list[tuple[str | None, str]] = [
-        (None, statement) for statement in _script_history_ddl(config, engine, source_connection, tables_config)
-    ]
     history_tables = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
-    history_entries.extend((None, grant) for grant in _grant_statements(config, engine, "HISTORY", history_tables))
-    source_entries: list[tuple[str | None, str]] = []
+    deliver_ddl(
+        config,
+        engine,
+        _script_history_ddl(config, engine, source_connection, tables_config),
+        destination="file",
+        env="HISTORY",
+        file_stem="history_ddl",
+        description="history table DDL and grants generated by ldb-run --mode SCRIPT.",
+        grants=_grant_statements(config, engine, "HISTORY", history_tables),
+    )
     if config.execution.action == "SOURCE_ILM":
         source_tables = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
-        source_entries = [(None, grant) for grant in _grant_statements(config, engine, "SOURCE", source_tables)]
-    try:
-        if history_entries:
-            path = _write_ddl_file(
-                config,
-                "history_ddl",
-                "history table DDL and grants generated by ldb-run --mode SCRIPT.",
-                history_entries,
-            )
-            logger.info("History DDL and grants (%d statement(s)) written to %s", len(history_entries), path)
-        if source_entries:
-            path = _write_ddl_file(
-                config,
-                "source_grants",
-                "source table grants generated by ldb-run --mode SCRIPT.",
-                source_entries,
-                env="SOURCE",
-            )
-            logger.info("Source grants (%d statement(s)) written to %s", len(source_entries), path)
-    except OSError as exc:
-        logger.error("The DDL files could not be written under %s: %s.", config.execution.ddl_pending_dir, exc)
-        raise SystemExit(1) from exc
+        deliver_ddl(
+            config,
+            engine,
+            [],
+            destination="file",
+            env="SOURCE",
+            file_stem="source_grants",
+            description="source table grants generated by ldb-run --mode SCRIPT.",
+            grants=_grant_statements(config, engine, "SOURCE", source_tables),
+        )
 
 
 def generate_script_output(config: Config, tables_config: TablesConfig) -> int:
