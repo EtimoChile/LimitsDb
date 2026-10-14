@@ -330,6 +330,25 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def generate_bootstrap_script(
+        *,
+        title: str,
+        roles: Sequence[RoleDefinition],
+        users: Sequence[UserDefinition],
+        tables: Sequence[TableDefinition],
+        sequences: Sequence[SequenceDefinition],
+        supporting_owner: str,
+        links: Sequence[DatabaseLinkDefinition],
+        runtime_username: str,
+        runtime_dsn: str,
+    ) -> str:
+        """Return a script a DBA can run to create the bootstrap objects without admin credentials in LimitsDb.
+        It must be safe to rerun, must not contain passwords (it prompts for them) and must create the
+        database links connected as the runtime user."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def ensure_table_privileges(
         conn: Any, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
     ) -> list[str]:

@@ -341,6 +341,7 @@ def _ensure_history_tables(
     """Ensure history tables match their required definitions.
 
     Behaviour by credential state:
+    - Mode other than EXECUTE: no DDL is applied; the pending changes are only reported.
     - Admin HISTORY credentials present, tables up to date: skip admin connection (DEC-020).
     - Admin HISTORY credentials present, delta detected: open admin connection and execute DDL.
     - Admin HISTORY credentials absent, tables up to date: proceed without connecting.
@@ -385,6 +386,15 @@ def _ensure_history_tables(
     else:
         inspection_failed = True
         logger.debug("No runtime HISTORY credentials available for pre-inspection.")
+
+    if config.execution.mode != "EXECUTE" and not (inspection_failed and not admin_present):
+        if delta_statements:
+            logger.info(
+                "%s mode: %d history DDL change(s) are required and were not applied; run with --mode EXECUTE.",
+                config.execution.mode,
+                len(delta_statements),
+            )
+        return
 
     if not admin_present:
         if inspection_failed:
@@ -917,8 +927,10 @@ def ldb_run(config: Config) -> None:
         if config.execution.generate_script:
             rc = generate_script_output(config, tables_config)
         else:
-            admin_connection = engine.get_connection(config, admin=True)
-            _ensure_history_tables(config, engine, admin_connection, tables_config)
+            if _credentials_present(config, admin=True, env=None):
+                admin_connection = engine.get_connection(config, admin=True)
+            # Without admin credentials the primary-key metadata is read over the runtime connection.
+            _ensure_history_tables(config, engine, admin_connection or connection, tables_config)
             history_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
             if history_tables_for_privileges and _credentials_present(config, admin=True, env="HISTORY"):
                 history_admin_priv_conn = engine.get_connection(config, admin=True, env="HISTORY")

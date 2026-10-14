@@ -256,9 +256,32 @@ What it creates in both source and history environments:
 - **Database link** — bidirectional links between source and history so the ILM
   engine can reach both environments from either side.
 
-`ldb-impl` requires all four credential pairs to be present and encrypted in
-`secrets[.<PROFILE>].json`: `source_password`, `history_password`,
-`admin_source_password`, and `admin_history_password`. Run `ldb-crypt` first.
+`ldb-impl` needs the runtime credentials (`source_password`, `history_password`)
+encrypted in `secrets[.<PROFILE>].json`. Run `ldb-crypt` first.
+
+### Without admin credentials
+
+Admin credentials (`admin_source_*`, `admin_history_*`) are optional per
+database. When they are absent for a database, `ldb-impl` creates nothing in it
+and writes a SQL*Plus script for a DBA instead, one file per database:
+`bootstrap_<schema>_<source|history>_<YYYYMMDD_HHMMSS>.sql` under
+`ddl_pending_dir` (the same parameter as `ldb-run`: `--ddl-pending-dir`,
+`LDB_DDL_PENDING_DIR`, default `ldb_ddl_pending`). A database whose admin credentials are present is still
+provisioned directly. Generating scripts is not an error (exit code 0, with a
+warning naming each file); if a script cannot be written, `ldb-impl` exits 1.
+
+The script:
+
+- stops at the first error (`whenever sqlerror exit failure`) and ends with a
+  `LimitsDb: OK` banner on success;
+- contains no passwords: it prompts for them (hidden input);
+- can be rerun: each object is created in a PL/SQL block that ignores only its
+  own "already exists" error, and an existing database link is skipped;
+- creates the database link after reconnecting as the runtime user, who owns it
+  (it asks for that user's password).
+
+Run it in SQL*Plus connected as a user with administrative privileges:
+`sqlplus admin@<dsn> @bootstrap_<schema>_<env>_<timestamp>.sql`.
 
 ## Run ILM
 
