@@ -998,15 +998,11 @@ end;"""
                 effective_pk_index = desired_constraint_name
             elif existing_pk_cols != desired_pk:
                 if existing_pk_name:
-                    statements.append(
-                        f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT"
-                        f" {OracleEngine._format_identifier(existing_pk_name)}"
-                    )
-                    # Use the raw (uppercase) name for dict lookup; format only for the SQL statement.
-                    index_to_drop = existing_pk_index or existing_pk_name
-                    if index_to_drop and index_to_drop in effective_indexes:
-                        statements.append(f"DROP INDEX {fmttd_owner}.{OracleEngine._format_identifier(index_to_drop)}")
-                        effective_indexes.pop(index_to_drop, None)
+                    # One statement drops the constraint and its index, whether Oracle created the index
+                    # implicitly or not; a separate DROP INDEX would fail with ORA-01418 in the implicit case.
+                    statements.append(f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP PRIMARY KEY DROP INDEX")
+                    # Use the raw (uppercase) name for dict lookup.
+                    effective_indexes.pop(existing_pk_index or existing_pk_name, None)
                     effective_pk_name = None
                     effective_pk_index = None
                 existing_index_info = effective_indexes.get(desired_constraint_name)
@@ -1020,14 +1016,8 @@ end;"""
                 effective_pk_name = desired_constraint_name
                 effective_pk_index = desired_constraint_name
         elif existing_pk_cols and existing_pk_name:
-            statements.append(
-                f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT"
-                f" {OracleEngine._format_identifier(existing_pk_name)}"
-            )
-            index_to_drop = existing_pk_index or existing_pk_name
-            if index_to_drop and index_to_drop in effective_indexes:
-                statements.append(f"DROP INDEX {fmttd_owner}.{OracleEngine._format_identifier(index_to_drop)}")
-                effective_indexes.pop(index_to_drop, None)
+            statements.append(f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP PRIMARY KEY DROP INDEX")
+            effective_indexes.pop(existing_pk_index or existing_pk_name, None)
             effective_pk_name = None
             effective_pk_index = None
 

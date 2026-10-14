@@ -1005,6 +1005,79 @@ def test_table_structure_reconciliation_drops_unmanaged_indexes(
         _drop_table_if_present(oracle_connection, table_name)
 
 
+def _fetch_table_index_names(connection: oracledb.Connection, table_name: str) -> set[str]:
+    cursor = connection.cursor()
+    try:
+        cursor.execute("SELECT index_name FROM user_indexes WHERE table_name = :1", [table_name.upper()])
+        return {row[0] for row in cursor}
+    finally:
+        cursor.close()
+
+
+def test_ddl_script_drops_primary_key_with_its_index_and_the_unrelated_index_and_runs_to_the_end(
+    oracle_connection: oracledb.Connection,
+):
+    # Spec: README § Run ILM > Admin credentials in ldb-run — the history DDL left for a DBA
+    # is plain SQL that must run to the end: a primary key is removed together with the
+    # index backing it in one statement (a separate DROP INDEX would fail with ORA-01418),
+    # and indexes unrelated to the definition are dropped too.
+    username = os.environ["LDB_ORACLE_TEST_USER"].upper()
+    table_name = "LDBT_PKS_TEST"
+    pk_index = "LDBT_PKS_PK_IX"
+    other_index = "LDBT_PKS_OTHER_IX"
+
+    # Given: two unique indexes on the table, one of them backing the primary key
+    _drop_table_if_present(oracle_connection, table_name)
+    cursor = oracle_connection.cursor()
+    try:
+        cursor.execute(f"CREATE TABLE {table_name} (a NUMBER(5) NOT NULL, b NUMBER(5) NOT NULL)")
+        cursor.execute(f"CREATE UNIQUE INDEX {pk_index} ON {table_name} (a)")
+        cursor.execute(f"CREATE UNIQUE INDEX {other_index} ON {table_name} (b)")
+        cursor.execute(
+            f"ALTER TABLE {table_name} ADD CONSTRAINT {table_name}_PK PRIMARY KEY (a) USING INDEX {pk_index}"
+        )
+        oracle_connection.commit()
+    finally:
+        cursor.close()
+
+    # And: a desired definition with neither a primary key nor indexes
+    desired = TableDefinition(
+        owner=username,
+        name=table_name,
+        columns=(
+            ColumnDefinition(name="A", data_type="number", precision=5, nullable=False),
+            ColumnDefinition(name="B", data_type="number", precision=5, nullable=False),
+        ),
+        primary_key=None,
+        indexes=(),
+    )
+
+    try:
+        # When: the structure script is generated
+        statements = OracleEngine.generate_table_structure_script(oracle_connection, desired, {})
+
+        # Then: the script drops the PK together with its index, then the unrelated index,
+        # and has no standalone DROP INDEX for the index backing the PK
+        assert [statement.lower() for statement in statements] == [
+            f"alter table {username.lower()}.{table_name.lower()} drop primary key drop index",
+            f"drop index {username.lower()}.{other_index.lower()}",
+        ]
+
+        # When: the script is executed
+        failures = OracleEngine.execute_ddl_statements(oracle_connection, statements)
+
+        # Then: every statement succeeded and nothing is left on the table
+        assert failures == []
+        assert _fetch_constraint_type(oracle_connection, table_name, "P") == []
+        assert _fetch_table_index_names(oracle_connection, table_name) == set()
+
+        # When: the script is generated again
+        # Then: there is nothing left to do
+        assert OracleEngine.generate_table_structure_script(oracle_connection, desired, {}) == []
+    finally:
+        _drop_table_if_present(oracle_connection, table_name)
+
+
 def test_table_structure_reconciliation_fails_when_not_null_column_added_to_populated_table(
     oracle_connection: oracledb.Connection,
 ):

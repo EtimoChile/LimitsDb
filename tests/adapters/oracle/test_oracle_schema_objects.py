@@ -409,3 +409,97 @@ def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run():
     assert [statement for statement, _ in failures] == ["ALTER TABLE BAD ADD (X NUMBER)"]
     assert "ORA-01031" in failures[0][1]
     assert "\n" not in failures[0][1]
+
+
+def _history_pk_replacement_script(
+    monkeypatch: pytest.MonkeyPatch,
+    desired_pk: tuple[str, ...] | None,
+    existing_pk_column: str = "OLD_COL",
+    extra_index: str | None = None,
+) -> list[str]:
+    """Generate the structure script for a table whose existing PK is on existing_pk_column."""
+
+    class ScriptedCursor:
+        def __init__(self) -> None:
+            self._rows: list[tuple] = []
+
+        def execute(self, sql: str, params=None, **kwargs) -> None:
+            if "FROM all_tables" in sql:
+                self._rows = [(1,)]
+            elif "FROM all_constraints" in sql:
+                self._rows = [("ITEMS_PK", "ITEMS_PK")]
+            elif "FROM all_cons_columns" in sql:
+                self._rows = [(existing_pk_column,)]
+            elif "FROM all_indexes" in sql:
+                self._rows = [("ITEMS_PK", "UNIQUE", existing_pk_column)]
+                if extra_index:
+                    self._rows.append((extra_index, "NONUNIQUE", "ID"))
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def __iter__(self):
+            return iter(self._rows)
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> ScriptedCursor:
+            return ScriptedCursor()
+
+    column = ColumnDefinition(name="ID", data_type="integer")
+    monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, name: (["ID"], {"ID": column}))
+    monkeypatch.setattr(OracleEngine, "_column_needs_update", lambda existing, desired: False)
+    table = TableDefinition(owner="OWNER", name="ITEMS", columns=(column,), primary_key=desired_pk)
+    return OracleEngine.generate_table_structure_script(DummyConnection(), table, {})  # type: ignore[arg-type]
+
+
+def test_replacing_a_primary_key_in_a_ddl_script_drops_its_index_in_the_same_statement(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — the history DDL left for a DBA
+    # must run to the end: the index Oracle created for the old PK is removed together with
+    # the constraint, so a separate DROP INDEX would fail with ORA-01418 and stop the script.
+
+    # Given: an existing PK on OLD_COL and a desired PK on ID
+
+    # When: the structure script is generated
+    statements = _history_pk_replacement_script(monkeypatch, ("ID",))
+
+    # Then: one statement drops the PK with its index, and no standalone DROP INDEX follows
+    assert statements[0] == "ALTER TABLE owner.items DROP PRIMARY KEY DROP INDEX"
+    assert statements[1].startswith("ALTER TABLE owner.items ADD CONSTRAINT items_pk PRIMARY KEY")
+    assert not any(statement.startswith("DROP INDEX") for statement in statements)
+
+
+def test_removing_an_unexpected_primary_key_in_a_ddl_script_leaves_no_standalone_drop_index(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — same ORA-01418 hazard when the
+    # table must have no primary key at all.
+
+    # Given: an existing PK and a table definition without one
+
+    # When: the structure script is generated
+    statements = _history_pk_replacement_script(monkeypatch, None)
+
+    # Then: the PK and its index go in one statement and nothing else is emitted
+    assert statements == ["ALTER TABLE owner.items DROP PRIMARY KEY DROP INDEX"]
+
+
+def test_unchanged_primary_key_index_is_kept_while_unrelated_indexes_are_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — the index backing a primary
+    # key that already matches the definition is not an unmanaged index; indexes unrelated
+    # to the definition and to the PK are still dropped.
+
+    # Given: a PK on ID that already matches, its backing index ITEMS_PK, and a stray index
+    # When: the structure script is generated
+    statements = _history_pk_replacement_script(monkeypatch, ("ID",), existing_pk_column="ID", extra_index="STRAY_IDX")
+
+    # Then: only the stray index is dropped; the PK and its index are untouched
+    assert statements == ["DROP INDEX owner.stray_idx"]

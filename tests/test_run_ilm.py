@@ -1666,3 +1666,78 @@ def test_run_exits_1_and_logs_failed_statements_when_pending_file_cannot_be_writ
         )
     assert exc_info.value.code == 1
     assert any(statement in message and "could not be written" in message for message in errors)
+
+
+# ---------------------------------------------------------------------------
+# History DDL through ldb_run — mode gating and credential wiring
+# ---------------------------------------------------------------------------
+
+
+class _CredentialCheckingDdlEngine(_RuntimeDdlEngine):
+    """Runtime-DDL engine double that resolves credentials like a real engine, so a missing
+    admin credential raises when a connection is requested."""
+
+    def get_connection(self, config, *, admin=False, env=None):
+        ldb_utils.get_effective_credentials(config, admin=admin, env=env)
+        return super().get_connection(config, admin=admin, env=env)
+
+
+def _run_ldb_with_history_delta(
+    monkeypatch: pytest.MonkeyPatch, config: Config, engine: _CredentialCheckingDdlEngine
+) -> int:
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: _make_tables_config_with_one_table())
+    monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", lambda *args: 0)
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner.ldb_run(config)
+    return exc_info.value.code
+
+
+def _history_runtime_only_config(action: str, mode: str, tmp_path) -> Config:
+    return Config(
+        schema="s",
+        action=action,
+        mode=mode,
+        source_dsn="src-dsn",
+        source_username="src-user",
+        source_password="src-pw",
+        history_dsn="hist-dsn",
+        history_username="hist-user",
+        history_password="hist-pw",
+        ddl_pending_dir=str(tmp_path / "pending"),
+    )
+
+
+def test_preview_run_does_not_apply_history_ddl_without_admin_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM — history tables are created or altered only before an EXECUTE
+    # run; PREVIEW simulates without changes.
+    # Given: PREVIEW mode, no history admin credentials, and a pending DDL delta
+    engine = _CredentialCheckingDdlEngine(["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"])
+
+    # When: ldb-run executes
+    rc = _run_ldb_with_history_delta(
+        monkeypatch, _history_runtime_only_config("SOURCE_ILM", "PREVIEW", tmp_path), engine
+    )
+
+    # Then: the run completes and no DDL was attempted
+    assert rc == 0
+    assert engine.attempted == []
+
+
+def test_execute_run_applies_history_ddl_over_runtime_connection_when_history_ilm_has_no_admin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without history admin
+    # credentials the DDL goes over the runtime history connection, for HISTORY_ILM too.
+    # Given: HISTORY_ILM in EXECUTE mode, no admin credentials at all, a pending delta
+    engine = _CredentialCheckingDdlEngine(["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"])
+
+    # When: ldb-run executes
+    rc = _run_ldb_with_history_delta(
+        monkeypatch, _history_runtime_only_config("HISTORY_ILM", "EXECUTE", tmp_path), engine
+    )
+
+    # Then: the delta was applied and the run did not fail on the missing admin credentials
+    assert rc == 0
+    assert engine.attempted == engine.delta
