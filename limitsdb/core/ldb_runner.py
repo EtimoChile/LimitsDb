@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from datetime import datetime
 from operator import attrgetter
@@ -514,7 +515,54 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
             engine.close_connection(conn)
 
 
-def generate_script_output(config: Config, tables_config: TablesConfig) -> int:
+def _script_history_ddl(
+    config: Config, engine: DatabaseEngine, source_connection: Any, tables_config: TablesConfig
+) -> list[str]:
+    """DDL for the history tables to embed in the SCRIPT output; nothing is applied (DEC-024).
+
+    The current history structure is read over the runtime HISTORY connection when it works, so
+    the script holds only the missing changes. Otherwise ``history_baseline`` states what to
+    assume: EMPTY (no history objects, everything is created) or SOURCE (history holds the same
+    objects as source, so only the history-specific differences are emitted).
+    """
+    table_defs_and_cnf = [
+        (_build_history_table_definition(config, engine, source_connection, table_cnf), table_cnf)
+        for table_cnf in tables_config.values()
+        if not table_cnf.get("skip")
+    ]
+    if _credentials_present(config, admin=False, env="HISTORY"):
+        history_connection: Any | None = None
+        try:
+            history_connection = engine.get_connection(config, admin=False, env="HISTORY")
+            return [
+                statement
+                for table_def, table_cnf in table_defs_and_cnf
+                for statement in engine.generate_table_structure_script(history_connection, table_def, table_cnf)
+            ]
+        except Exception as exc:
+            logger.warning(
+                "History schema could not be read (%s); assuming baseline %s.",
+                " ".join(str(exc.__cause__ or exc).split()),
+                config.execution.history_baseline,
+            )
+        finally:
+            if history_connection:
+                engine.close_connection(history_connection)
+    else:
+        logger.info("No runtime HISTORY credentials; assuming baseline %s.", config.execution.history_baseline)
+    statements: list[str] = []
+    for table_def, table_cnf in table_defs_and_cnf:
+        if config.execution.history_baseline == "SOURCE":
+            reference = (table_cnf["conds"][0]["source_owner"], table_def.name)
+            statements.extend(
+                engine.generate_table_structure_script(source_connection, table_def, table_cnf, reference)
+            )
+        else:
+            statements.extend(engine.generate_table_structure_script(None, table_def, table_cnf))
+    return statements
+
+
+def generate_script_output(config: Config, tables_config: TablesConfig, history_ddl: Sequence[str] = ()) -> int:
     print(
         f"""
 whenever oserror exit 1
@@ -525,6 +573,11 @@ COLUMN process_date NEW_VALUE process_date
 SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
     """
     )
+    if history_ddl:
+        print(f"rem history table DDL: {len(history_ddl)} statement(s)")
+        for statement in history_ddl:
+            print(f"{statement};")
+        print()
     while True:
         cycle_printed = False
         for (owner, table_name), table_info in tables_config.items():
@@ -899,7 +952,8 @@ def ldb_run(config: Config) -> None:
         tables_conf_rows = _load_offline_rows(config)
         source_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
         if (
-            config.execution.action == "SOURCE_ILM"
+            not config.execution.generate_script
+            and config.execution.action == "SOURCE_ILM"
             and source_tables_for_privileges
             and _credentials_present(config, admin=True, env="SOURCE")
         ):
@@ -916,7 +970,9 @@ def ldb_run(config: Config) -> None:
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)
         if config.execution.generate_script:
-            rc = generate_script_output(config, tables_config)
+            rc = generate_script_output(
+                config, tables_config, _script_history_ddl(config, engine, connection, tables_config)
+            )
         else:
             if _credentials_present(config, admin=True, env=None):
                 admin_connection = engine.get_connection(config, admin=True)

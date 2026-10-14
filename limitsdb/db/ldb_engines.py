@@ -302,10 +302,19 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def generate_table_structure_script(conn: Any, table: TableDefinition, table_cnf: Mapping[str, Any]) -> list[str]:
+    def generate_table_structure_script(
+        conn: Any,
+        table: TableDefinition,
+        table_cnf: Mapping[str, Any],
+        reference: tuple[str, str] | None = None,
+    ) -> list[str]:
         """Return DDL statements to synchronize the table to the definition without executing them.
         Uses accessible dictionary views and can be called with a non-administrative connection.
-        Returns an empty list when the table already matches the required definition."""
+        Returns an empty list when the table already matches the required definition.
+
+        By default the current structure is read from the table itself. ``reference`` gives an
+        (owner, table name) whose structure is taken as the current one instead, and a ``conn`` of
+        None means the table does not exist yet, so every object is created."""
         pass
 
     @staticmethod

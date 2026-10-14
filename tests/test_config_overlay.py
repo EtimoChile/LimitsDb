@@ -536,6 +536,25 @@ def test_ddl_pending_dir_defaults_and_is_overridable_by_env_and_cli(monkeypatch:
     assert ldb_params_config.read_env_overrides(bindings)["ddl_pending_dir"] == "from_env"
 
 
+def test_history_baseline_defaults_to_empty_and_is_overridable_by_env_and_cli(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Configuration parameters reference — history_baseline defaults to EMPTY and
+    # can be set with --history-baseline or LDB_HISTORY_BASELINE.
+    # Given: the live parameter schema
+    bindings = ldb_params_config.env_bindings_from_config()
+    parser = ldb_params_config.build_argparser_from_config()
+
+    # Then: default, env binding, and CLI flag are all exposed
+    assert ldb_params_config.Config.__dataclass_fields__["history_baseline"].default == "EMPTY"
+    assert bindings["LDB_HISTORY_BASELINE"] == "history_baseline"
+    assert parser.parse_args(["--schema", "s", "--history-baseline", "SOURCE"]).history_baseline == "SOURCE"
+
+    # When: the env var is set
+    monkeypatch.setenv("LDB_HISTORY_BASELINE", "SOURCE")
+
+    # Then: the env override is read
+    assert ldb_params_config.read_env_overrides(bindings)["history_baseline"] == "SOURCE"
+
+
 def test_persistent_column_settings_cannot_be_overridden_via_cli_set(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/configuration-contract.md (DEC-013) — use_added_columns and
     # add_ldb_columns are set in persistent YAML only; --set must reject them to
@@ -694,6 +713,7 @@ def test_execution_view_is_frozen_and_reflects_config():
         parallel_max=10,
         log_level="INFO",
         ddl_pending_dir="ldb_ddl_pending",
+        history_baseline="EMPTY",
     )
     assert cfg.to_dict()["chunk_size"] == 250
     with pytest.raises(FrozenInstanceError):

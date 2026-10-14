@@ -168,5 +168,7 @@ but does not replace the sources defined in `AGENTS.md`.
   `ddl_pending_dir` and the run exits 1. `PEND-015` and `PEND-016` are resolved.
 - `DEC-023`: `PREVIEW` applies the same DDL and grants as `EXECUTE` and skips only the
   data movement; `VALIDATE` and `PLAN` stay read-only.
+- `DEC-024`: `SCRIPT` applies nothing and always emits the history DDL; `history_baseline`
+  (`EMPTY`|`SOURCE`) is assumed when history cannot be read.
 - `DEC-022`: without admin credentials, `ldb-impl` writes one bootstrap script
   per database (PL/SQL blocks tolerating only "already exists"); `PEND-017` is resolved.

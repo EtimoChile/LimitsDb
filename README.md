@@ -299,6 +299,7 @@ Common overrides:
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
+--history-baseline EMPTY|SOURCE               # SCRIPT without a readable history: assume no history objects (default) or the same objects as source
 --log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Adjust logger verbosity
 --ilm-config-file <path>                      # Point to a specific ILM YAML file
 --config-dir <root>                           # Override config root discovery
@@ -356,19 +357,36 @@ History table management follows the same principle:
   written to stdout, and the directory is created only when a file is written.
   If the file cannot be written (for example the directory is not writable),
   `ldb-run` logs the error with the failed statements and exits with code 1.
-  This is unrelated to `--mode SCRIPT`, which emits the ILM SQL blocks.
+
+### History DDL in `--mode SCRIPT`
+
+`--mode SCRIPT` applies nothing to the databases. It prints, to stdout, the
+history table DDL followed by the ILM SQL blocks, so a DBA can review and run
+the whole script. The history DDL is always emitted, computed like this:
+
+- **The runtime history connection works**: the current history structure is
+  read, and the script holds only the missing changes.
+- **It does not work or has no credentials**: `history_baseline` states what to
+  assume. `EMPTY` (default) assumes history has no objects, so every table, key
+  and index is created. `SOURCE` assumes history holds the same objects as
+  source, so only the history-specific differences are emitted (for example the
+  `LDB_PROCESS_DATE` column and the matching primary key).
+
+Table privilege grants are not applied in `SCRIPT` mode, and are not part of the
+script.
 
 ### Configuration parameters reference
 
 | Parameter                | Purpose                                                                                                                                                         | Default / values                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history).                                                                         | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
-| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit SQL, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
+| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
 | `chunk_size`             | Rows per chunk when processing large tables.                                                                                                                    | Default `100000`.                                                                    |
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
 | `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials.                                                                      | Default `ldb_ddl_pending`.                                                           |
+| `history_baseline`       | State assumed for the history tables by `--mode SCRIPT` when it cannot read them over the runtime history connection: `EMPTY` (no objects) or `SOURCE` (same objects as source). | Default `EMPTY`; choices `EMPTY`, `SOURCE`. |
 | `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
 | `schema`                 | Configuration set name: identifies a system or application (e.g., `billing`). Not a database schema — it is the folder that groups all configuration files for one target. | Required on CLI; no persisted default. |
@@ -396,6 +414,7 @@ History table management follows the same principle:
 | `add_ldb_columns`        | —                          | —                            | `config[.<PROFILE>].yml: add_ldb_columns`          |
 | `parallel_max`           | `--parallel-max`           | `LDB_PARALLEL_MAX`           | `config[.<PROFILE>].yml: parallel_max`             |
 | `ddl_pending_dir`        | `--ddl-pending-dir`        | `LDB_DDL_PENDING_DIR`        | `config[.<PROFILE>].yml: ddl_pending_dir`          |
+| `history_baseline`       | `--history-baseline`       | `LDB_HISTORY_BASELINE`       | `config[.<PROFILE>].yml: history_baseline`         |
 | `db_engine`              | `--db-engine`              | `LDB_DB_ENGINE`              | `config[.<PROFILE>].yml: db_engine`                |
 | `log_level`              | `--log-level`              | `LDB_LOG_LEVEL`              | `config[.<PROFILE>].yml: log_level`                |
 | `schema`                 | `--schema`                 | `LDB_SCHEMA`                 | CLI only (not stored).                             |
@@ -454,6 +473,7 @@ Every key is commented; the default value and short help appear inline. Example:
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables
 # parallel_max: 10      # Maximum number of parallel processes
 # ddl_pending_dir: "ldb_ddl_pending"  # Where failed history DDL is written for a DBA
+# history_baseline: "EMPTY"  # SCRIPT without readable history: EMPTY | SOURCE
 # db_engine: "oracle"   # Database engine
 # log_level: "INFO"     # Logging level
 ```

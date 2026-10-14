@@ -889,8 +889,36 @@ end;"""
                 cursor.close()
 
     @staticmethod
+    def _create_table_statements(table: TableDefinition) -> list[str]:
+        """DDL that creates the table with its primary key and desired indexes."""
+        fmttd_owner = OracleEngine._format_identifier(table.owner)
+        fmttd_table_name = OracleEngine._format_identifier(table.name)
+        fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
+        statements = [f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )"]
+        desired_pk = tuple(table.primary_key or ())
+        if desired_pk:
+            fmttd_pk = tuple(OracleEngine._format_identifier(c) for c in desired_pk)
+            fmttd_cn = OracleEngine._format_identifier(f"{table.name}_PK")
+            statements.append(
+                f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_cn}"
+                f" PRIMARY KEY ({', '.join(fmttd_pk)})"
+            )
+        for index_name, (columns, is_unique) in OracleEngine._prepare_desired_indexes(table).items():
+            fmttd_iname = OracleEngine._format_identifier(index_name)
+            fmttd_cols = ", ".join(OracleEngine._format_identifier(c) for c in columns)
+            unique_clause = "UNIQUE " if is_unique else ""
+            statements.append(
+                f"CREATE {unique_clause}INDEX {fmttd_owner}.{fmttd_iname}"
+                f" ON {fmttd_owner}.{fmttd_table_name} ({fmttd_cols})"
+            )
+        return statements
+
+    @staticmethod
     def _compute_table_structure_delta(
-        conn: oracledb.Connection, cursor: oracledb.Cursor, table: TableDefinition
+        conn: oracledb.Connection,
+        cursor: oracledb.Cursor,
+        table: TableDefinition,
+        reference: tuple[str, str] | None = None,
     ) -> list[str]:
         """Compute DDL statements to bring the table to the required structure using accessible views.
 
@@ -902,36 +930,18 @@ end;"""
         statements: list[str] = []
         fmttd_owner = OracleEngine._format_identifier(table.owner)
         fmttd_table_name = OracleEngine._format_identifier(table.name)
+        # The current structure is read from the reference when one is given, else from the table.
+        current_owner, current_name = reference or (table.owner, table.name)
 
         cursor.execute(
             "SELECT 1 FROM all_tables WHERE owner = :1 AND table_name = :2",
-            [table.owner, table.name],
+            [current_owner, current_name],
         )
         if cursor.fetchone() is None:
-            fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-            statements.append(f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )")
-            desired_pk = tuple(table.primary_key or ())
-            if desired_pk:
-                fmttd_pk = tuple(OracleEngine._format_identifier(c) for c in desired_pk)
-                desired_constraint_name = f"{table.name}_PK"
-                fmttd_cn = OracleEngine._format_identifier(desired_constraint_name)
-                statements.append(
-                    f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_cn}"
-                    f" PRIMARY KEY ({', '.join(fmttd_pk)})"
-                )
-            desired_indexes = OracleEngine._prepare_desired_indexes(table)
-            for index_name, (columns, is_unique) in desired_indexes.items():
-                fmttd_iname = OracleEngine._format_identifier(index_name)
-                fmttd_cols = ", ".join(OracleEngine._format_identifier(c) for c in columns)
-                unique_clause = "UNIQUE " if is_unique else ""
-                statements.append(
-                    f"CREATE {unique_clause}INDEX {fmttd_owner}.{fmttd_iname}"
-                    f" ON {fmttd_owner}.{fmttd_table_name} ({fmttd_cols})"
-                )
-            return statements
+            return OracleEngine._create_table_statements(table)
 
         # Table exists: check columns
-        _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
+        _, existing_columns = OracleEngine.get_table_columns(conn, current_owner, current_name)
         for column in table.columns:
             column_definition = OracleEngine._column_sql(column)
             if column.name not in existing_columns:
@@ -946,7 +956,7 @@ end;"""
               FROM all_constraints
              WHERE owner = :1 AND table_name = :2 AND constraint_type = 'P'
             """,
-            [table.owner, table.name],
+            [current_owner, current_name],
         )
         row = cursor.fetchone()
         existing_pk_name: str | None = None
@@ -956,7 +966,7 @@ end;"""
             existing_pk_name, existing_pk_index = row[0], row[1]
             cursor.execute(
                 "SELECT column_name FROM all_cons_columns WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
-                [table.owner, existing_pk_name],
+                [current_owner, existing_pk_name],
             )
             existing_pk_cols = tuple(r[0] for r in cast(Iterable[tuple[str]], cursor))
 
@@ -969,8 +979,8 @@ end;"""
              WHERE i.owner = :owner AND i.table_name = :table_name
              ORDER BY i.index_name, c.column_position
             """,
-            owner=table.owner,
-            table_name=table.name,
+            owner=current_owner,
+            table_name=current_name,
         )
         idx_map: dict[str, dict[str, Any]] = {}
         for index_name, uniqueness, column_name in cast(Iterable[tuple[str, str, str]], cursor):
@@ -1059,12 +1069,17 @@ end;"""
 
     @staticmethod
     def generate_table_structure_script(
-        conn: oracledb.Connection, table: TableDefinition, table_cnf: Mapping[str, Any]
+        conn: oracledb.Connection | None,
+        table: TableDefinition,
+        table_cnf: Mapping[str, Any],
+        reference: tuple[str, str] | None = None,
     ) -> list[str]:
+        if conn is None:
+            return OracleEngine._create_table_statements(table)
         cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
-            return OracleEngine._compute_table_structure_delta(conn, cursor, table)
+            return OracleEngine._compute_table_structure_delta(conn, cursor, table, reference)
         except Exception as exc:
             raise ExecutionError("Failed to generate table structure script") from exc
         finally:

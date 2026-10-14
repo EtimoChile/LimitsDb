@@ -1218,7 +1218,12 @@ def _make_tables_config(*table_names: str) -> ldb_runner.TablesConfig:  # type: 
         "join_expr": None,
     }
     return {  # type: ignore[return-value]
-        ("SRC", name): {"conds": [{**row, "table_name": name}], "referencing_tables": [], "skip": False}
+        ("SRC", name): {
+            "conds": [{**row, "table_name": name}],
+            "referencing_tables": [],
+            "skip": False,
+            "sql_block": "select 1 from dual",
+        }
         for name in table_names
     }
 
@@ -1246,6 +1251,7 @@ class _HistoryDdlEngine:
         self.connections: list[tuple[bool, str | None]] = []
         self.attempted: list[str] = []
         self.admin_applied: list[str] = []
+        self.structure_reads: list[tuple[str | None, str | None]] = []
 
     def get_connection(self, config, *, admin=False, env=None):
         ldb_utils.get_effective_credentials(config, admin=admin, env=env)
@@ -1260,7 +1266,12 @@ class _HistoryDdlEngine:
     def close_connection(self, conn):
         pass
 
-    def generate_table_structure_script(self, conn, table, table_cnf):
+    def generate_table_structure_script(self, conn, table, table_cnf, reference=None):
+        self.structure_reads.append((conn.env if conn else None, reference[0] if reference else None))
+        if conn is None:
+            return [f"CREATE TABLE {table.owner}.{table.name} (ID NUMBER)"]
+        if reference:
+            return [f"ALTER TABLE {table.owner}.{table.name} ADD (LDB_PROCESS_DATE DATE)"]
         return list(self.delta.get(table.name, []))
 
     def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
@@ -1576,3 +1587,77 @@ def test_execute_run_applies_history_ddl_over_runtime_connection_when_history_il
     # Then: the delta was applied and the run did not fail on the missing admin credentials
     assert rc == 0
     assert engine.attempted == [statement]
+
+
+def _script_output(capsys: pytest.CaptureFixture) -> str:
+    return capsys.readouterr().out
+
+
+def test_script_run_emits_the_history_delta_read_over_the_runtime_history_connection(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    # Spec: README > Run ILM > --mode SCRIPT — the script holds the history DDL; with a working
+    # runtime history connection it holds only the missing changes, and nothing is applied.
+    # Given: SCRIPT mode, a readable history schema and a pending delta
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    engine = _HistoryDdlEngine({"T1": [statement]})
+
+    # When: ldb-run generates the script
+    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE"), engine)
+
+    # Then: the delta is in the script, the baseline was not needed and no DDL was applied
+    assert rc == 0
+    assert f"{statement};" in _script_output(capsys)
+    assert engine.structure_reads == [("HISTORY", None)]
+    assert engine.attempted == [] and engine.admin_applied == []
+
+
+def test_script_run_creates_every_history_object_when_history_is_unreadable_and_baseline_is_empty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    # Spec: README > Run ILM > --mode SCRIPT — history_baseline EMPTY assumes history has no objects.
+    # Given: SCRIPT mode, no usable history connection and the default baseline
+    engine = _HistoryDdlEngine(history_unreachable=True)
+
+    # When: ldb-run generates the script
+    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT"), engine)
+
+    # Then: the table is created from scratch, without inspecting any database
+    assert rc == 0
+    assert "CREATE TABLE HIST.T1 (ID NUMBER);" in _script_output(capsys)
+    assert engine.structure_reads == [(None, None)]
+    assert engine.attempted == [] and engine.admin_applied == []
+
+
+def test_script_run_aligns_history_with_source_when_history_is_unreadable_and_baseline_is_source(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    # Spec: README > Run ILM > --mode SCRIPT — history_baseline SOURCE assumes history holds the
+    # same objects as source, so the delta is computed against the source table.
+    # Given: SCRIPT mode, no usable history connection and baseline SOURCE
+    engine = _HistoryDdlEngine(history_unreachable=True)
+
+    # When: ldb-run generates the script
+    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE"), engine)
+
+    # Then: the source table is the reference and only the history-specific change is emitted
+    assert rc == 0
+    assert "ALTER TABLE HIST.T1 ADD (LDB_PROCESS_DATE DATE);" in _script_output(capsys)
+    assert engine.structure_reads == [(None, "SRC")]  # runtime source connection, SRC as reference
+    assert engine.attempted == [] and engine.admin_applied == []
+
+
+def test_script_run_does_not_apply_table_grants(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode SCRIPT — SCRIPT applies nothing to the target databases.
+    # Given: SCRIPT mode with admin credentials and tables that need grants
+    granted: list[str] = []
+    engine = _HistoryDdlEngine()
+    engine.ensure_table_privileges = lambda *args: granted.append("granted")  # type: ignore[attr-defined]
+    monkeypatch.setattr(ldb_runner, "_collect_privilege_targets", lambda *args: [("SRC", "T1")])
+
+    # When: ldb-run generates the script
+    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="SCRIPT", history_admin=True), engine)
+
+    # Then: no grant was applied
+    assert rc == 0
+    assert granted == []
