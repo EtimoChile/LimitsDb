@@ -1512,12 +1512,11 @@ end;"""
 
     @staticmethod
     def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:
-        scope = OracleEngine._dictionary_scope(cursor)
         return OracleEngine._object_exists(
             cursor,
-            f"""
+            """
             SELECT 1
-              FROM {scope}_tab_privs
+              FROM dba_tab_privs
              WHERE grantee = :grantee
                AND owner = :owner
                AND table_name = :table_name
@@ -1578,7 +1577,7 @@ end;"""
     def _table_exists(cursor: oracledb.Cursor, owner: str, table_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_tables WHERE owner = :1 AND table_name = :2",
+            "SELECT 1 FROM dba_tables WHERE owner = :1 AND table_name = :2",
             [owner, table_name],
         )
 
@@ -1586,7 +1585,7 @@ end;"""
     def _index_exists(cursor: oracledb.Cursor, owner: str, index_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_indexes WHERE owner = :1 AND index_name = :2",
+            "SELECT 1 FROM dba_indexes WHERE owner = :1 AND index_name = :2",
             [owner, index_name],
         )
 
@@ -1594,7 +1593,7 @@ end;"""
     def _constraint_exists(cursor: oracledb.Cursor, owner: str, constraint_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_constraints WHERE owner = :1 AND constraint_name = :2",
+            "SELECT 1 FROM dba_constraints WHERE owner = :1 AND constraint_name = :2",
             [owner, constraint_name],
         )
 
@@ -1602,7 +1601,7 @@ end;"""
     def _sequence_exists(cursor: oracledb.Cursor, owner: str, sequence_name: str) -> bool:
         return OracleEngine._object_exists(
             cursor,
-            f"SELECT 1 FROM {OracleEngine._dictionary_scope(cursor)}_sequences WHERE sequence_owner = :1 AND sequence_name = :2",
+            "SELECT 1 FROM dba_sequences WHERE sequence_owner = :1 AND sequence_name = :2",
             [owner, sequence_name],
         )
 
@@ -1813,11 +1812,10 @@ end;"""
         if not constraint_types:
             return dropped
         type_list = ", ".join(f"'{constraint_type}'" for constraint_type in constraint_types)
-        scope = OracleEngine._dictionary_scope(cursor)
         cursor.execute(
             f"""
             SELECT constraint_name
-              FROM {scope}_constraints
+              FROM dba_constraints
              WHERE owner = :owner
                AND table_name = :table_name
                AND constraint_type IN ({type_list})
