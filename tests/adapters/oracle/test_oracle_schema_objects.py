@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import oracledb
 import pytest
 
 from limitsdb.core.ldb_errors import ExecutionError
@@ -376,3 +377,35 @@ def test_ddl_secret_markers_are_stripped_before_statement_is_executed():
         assert executed == ["CREATE USER SECRET IDENTIFIED BY password"]
     finally:
         OracleEngine._register_connection_env(conn, None)
+
+
+def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run():
+    # Spec: README > Run ILM > Admin credentials in ldb-run — DDL applied with runtime
+    # credentials continues after a rejected statement and reports each failure with
+    # its Oracle error, so the caller can write the failed statements for a DBA.
+    executed = []
+
+    class DummyCursor:
+        def execute(self, statement: str) -> None:
+            executed.append(statement)
+            if "BAD" in statement:
+                raise oracledb.DatabaseError("ORA-01031: insufficient privileges\nHelp: ...")
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> DummyCursor:
+            return DummyCursor()
+
+    # When
+    failures = OracleEngine.execute_ddl_statements(
+        DummyConnection(),  # type: ignore[arg-type]
+        ["ALTER TABLE A ADD (X NUMBER)", "ALTER TABLE BAD ADD (X NUMBER)", "ALTER TABLE C ADD (X NUMBER)"],
+    )
+
+    # Then: all three were attempted and only the rejected one is reported
+    assert len(executed) == 3
+    assert [statement for statement, _ in failures] == ["ALTER TABLE BAD ADD (X NUMBER)"]
+    assert "ORA-01031" in failures[0][1]
+    assert "\n" not in failures[0][1]

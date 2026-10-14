@@ -61,6 +61,52 @@ source .venv/bin/activate
 pip install limitsdb
 ```
 
+### Air-gapped or internet-restricted servers
+
+For production database servers without internet access (common in enterprise Oracle
+environments on Linux, AIX, or Solaris), download the packages on a machine that
+does have access and transfer them to the target server.
+
+**Step 1 — Download on a connected machine**
+
+If the target server is Linux x86_64:
+
+```bash
+pip download limitsdb \
+  --dest ./limitsdb-bundle \
+  --platform linux_x86_64 \
+  --python-version 312 \
+  --only-binary=:all:
+```
+
+For the same platform as the current machine (Windows or macOS build host
+copying to an identical Linux target, omit `--platform` and `--python-version`):
+
+```bash
+pip download limitsdb --dest ./limitsdb-bundle
+```
+
+**Step 2 — Transfer to the target server**
+
+```bash
+scp -r ./limitsdb-bundle user@server:/opt/limitsdb-bundle
+```
+
+**Step 3 — Install on the target server (no internet required)**
+
+```bash
+python3 -m venv /opt/limitsdb-venv
+source /opt/limitsdb-venv/bin/activate
+pip install --no-index --find-links /opt/limitsdb-bundle limitsdb
+ldb-run --help
+```
+
+> **Note for AIX and Solaris**: `oracledb` may not have a prebuilt wheel for your
+> platform. If `pip download --only-binary=:all:` finds nothing, the package must
+> be compiled from source on the target, which requires Python development headers
+> and a C compiler (`gcc` or `xlc`). Contact your system administrator before
+> proceeding.
+
 For development setup (cloning the repo, running tests, CI) see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Quickstart
@@ -229,6 +275,7 @@ Common overrides:
 --mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW simulate, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
+--ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
 --log-level DEBUG|INFO|WARNING|ERROR|CRITICAL # Adjust logger verbosity
 --ilm-config-file <path>                      # Point to a specific ILM YAML file
 --config-dir <root>                           # Override config root discovery
@@ -255,8 +302,37 @@ run. Both operations are idempotent.
 
 If admin credentials are absent from `secrets[.<PROFILE>].json`, the privilege
 grants are skipped silently — the assumption is that grants are already in
-place. History table management in `EXECUTE` mode still requires admin
-credentials in the current version.
+place.
+
+History table management follows the same principle:
+
+- **Admin credentials present, tables already up to date**: the admin connection
+  is not opened. No DDL is executed.
+- **Admin credentials present, DDL changes are required**: the admin connection
+  is opened and the changes are applied as before.
+- **Admin credentials absent, tables already up to date**: `ldb-run` proceeds
+  without an admin connection. This is the normal case for environments where a
+  DBA pre-creates all history objects and admin credentials are not stored.
+- **Admin credentials absent, history schema cannot be inspected** (for example
+  the runtime connection or dictionary query fails): `ldb-run` exits with code 1
+  and logs the cause. It does not run ILM against a history schema whose state is
+  unknown.
+- **Admin credentials absent, DDL changes are required**: `ldb-run` applies the
+  DDL directly over the runtime history connection, with no prior privilege
+  check. It succeeds when the runtime user owns the objects or holds the needed
+  privileges (for example `ALTER`). Any DDL statement that fails, for whatever
+  reason, is recorded and the remaining statements are still attempted. If at least one
+  statement failed, `ldb-run` writes the failed statements, each preceded by its
+  error, to `history_ddl_<schema>_<YYYYMMDD_HHMMSS>.sql` under `ddl_pending_dir`
+  (default `ldb_ddl_pending`), logs an error naming the file, and exits with
+  code 1. The file is plain SQL for SQL*Plus (no PL/SQL): it stops at the first
+  failing statement with a non-zero exit code, and only a run that reaches the
+  final `LimitsDb: OK` banner applied everything. The recorded errors are
+  comments. A DBA reviews and runs the file, then `ldb-run` is rerun. Nothing is
+  written to stdout, and the directory is created only when a file is written.
+  If the file cannot be written (for example the directory is not writable),
+  `ldb-run` logs the error with the failed statements and exits with code 1.
+  This is unrelated to `--mode SCRIPT`, which emits the ILM SQL blocks.
 
 ### Configuration parameters reference
 
@@ -268,6 +344,7 @@ credentials in the current version.
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
+| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials.                                                                      | Default `ldb_ddl_pending`.                                                           |
 | `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
 | `schema`                 | Configuration set name: identifies a system or application (e.g., `billing`). Not a database schema — it is the folder that groups all configuration files for one target. | Required on CLI; no persisted default. |
@@ -294,6 +371,7 @@ credentials in the current version.
 | `use_added_columns`      | —                          | —                            | `config[.<PROFILE>].yml: use_added_columns`        |
 | `add_ldb_columns`        | —                          | —                            | `config[.<PROFILE>].yml: add_ldb_columns`          |
 | `parallel_max`           | `--parallel-max`           | `LDB_PARALLEL_MAX`           | `config[.<PROFILE>].yml: parallel_max`             |
+| `ddl_pending_dir`        | `--ddl-pending-dir`        | `LDB_DDL_PENDING_DIR`        | `config[.<PROFILE>].yml: ddl_pending_dir`          |
 | `db_engine`              | `--db-engine`              | `LDB_DB_ENGINE`              | `config[.<PROFILE>].yml: db_engine`                |
 | `log_level`              | `--log-level`              | `LDB_LOG_LEVEL`              | `config[.<PROFILE>].yml: log_level`                |
 | `schema`                 | `--schema`                 | `LDB_SCHEMA`                 | CLI only (not stored).                             |
@@ -351,6 +429,7 @@ Every key is commented; the default value and short help appear inline. Example:
 # use_added_columns: True  # Populate derived columns in history tables
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables
 # parallel_max: 10      # Maximum number of parallel processes
+# ddl_pending_dir: "ldb_ddl_pending"  # Where failed history DDL is written for a DBA
 # db_engine: "oracle"   # Database engine
 # log_level: "INFO"     # Logging level
 ```
