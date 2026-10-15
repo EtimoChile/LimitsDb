@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from limitsdb.core.ldb_crypto import load_or_create_key
-from limitsdb.core.ldb_errors import LimitsDbError
+from limitsdb.core.ldb_ddl import render_script
+from limitsdb.core.ldb_errors import InvalidCredentialsError, LimitsDbError
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
 from limitsdb.core.ldb_params_config import Config, build_config
 from limitsdb.core.ldb_utils import encrypt_secrets_in_place
@@ -16,6 +18,7 @@ from limitsdb.db.ldb_engine_loader import get_db_engine
 from limitsdb.db.ldb_engines import (
     ColumnDefinition,
     DatabaseLinkDefinition,
+    DdlSink,
     RoleDefinition,
     SequenceDefinition,
     TableDefinition,
@@ -164,13 +167,15 @@ def run_cli() -> None:
     source_has_admin = bool(administration.source.username and administration.source.password)
     history_has_admin = bool(administration.history.username and administration.history.password)
 
-    def write_script(env: str, **definitions: Any) -> None:
-        content = engine.generate_bootstrap_script(title=f"{env} database of schema {config.schema}", **definitions)
+    def write_script(env: str, steps: Callable[[DdlSink], None]) -> None:
+        fragments: list[str] = []
+        steps(fragments.append)
+        title = f"{env} database of schema {config.schema}"
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = Path(config.execution.ddl_pending_dir) / f"bootstrap_{config.schema}_{env.lower()}_{stamp}.sql"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            path.write_text(render_script(title, fragments), encoding="utf-8")
         except OSError as exc:
             logger.error(
                 "Admin credentials for %s are absent and the script could not be written to %s: %s", env, path, exc
@@ -178,29 +183,48 @@ def run_cli() -> None:
             raise SystemExit(1) from exc
         script_files.append(path)
 
+    def bootstrap_steps(
+        roles: list[RoleDefinition],
+        user: UserDefinition,
+        tables: list[TableDefinition],
+        sequences: list[SequenceDefinition],
+        link: DatabaseLinkDefinition,
+        runtime: tuple[str, str],
+    ) -> Callable[[DdlSink], None]:
+        def steps(sink: DdlSink) -> None:
+            engine.script_password_prompts([user], [link], ddl_sink=sink)
+            engine.ensure_roles(None, roles, ddl_sink=sink)
+            engine.ensure_users(None, [user], ddl_sink=sink)
+            engine.ensure_tables(None, tables, ddl_sink=sink)
+            engine.ensure_sequences(None, sequences, ddl_sink=sink)
+            engine.ensure_supporting_objects(None, runtime[0], ddl_sink=sink)
+            engine.ensure_database_links(None, [link], ddl_sink=sink, connect_as=runtime)
+
+        return steps
+
     if not source_has_admin:
         write_script(
             "SOURCE",
-            roles=source_roles,
-            users=[source_user],
-            tables=source_tables,
-            sequences=source_sequences,
-            supporting_owner=connections.source.username,
-            links=[source_db_link],
-            runtime_username=connections.source.username,
-            runtime_dsn=connections.source.dsn,
+            bootstrap_steps(
+                source_roles,
+                source_user,
+                source_tables,
+                source_sequences,
+                source_db_link,
+                (connections.source.username, connections.source.dsn),
+            ),
         )
     if not history_has_admin:
         write_script(
             "HISTORY",
-            roles=history_roles,
-            users=[history_user],
-            tables=history_tables,
-            sequences=history_sequences,
-            supporting_owner=connections.history.username,
-            links=[history_db_link],
-            runtime_username=connections.history.username,
-            runtime_dsn=connections.history.dsn,
+            bootstrap_steps(
+                history_roles,
+                history_user,
+                history_tables,
+                history_sequences,
+                history_db_link,
+                (connections.history.username, connections.history.dsn),
+            ),
         )
 
     if source_has_admin:
@@ -229,15 +253,29 @@ def run_cli() -> None:
         finally:
             engine.close_connection(history_admin_conn)
 
+    def connect_as_runtime(env: Literal["SOURCE", "HISTORY"], username: str) -> Any:
+        # The user exists here (ensure_users ran and never changes an existing password), so a rejected
+        # login can only be a configured password that differs from the one the user already has.
+        try:
+            return engine.get_connection(config, admin=False, env=env)
+        except InvalidCredentialsError as exc:
+            logger.error(
+                "The runtime user %s exists in %s but rejected the configured password; ldb-impl does not "
+                "change the password of an existing user. Set the configured password to the user's current one.",
+                username,
+                env,
+            )
+            raise SystemExit(1) from exc
+
     if source_has_admin:
-        source_user_conn = engine.get_connection(config, admin=False, env="SOURCE")
+        source_user_conn = connect_as_runtime("SOURCE", connections.source.username)
         try:
             summary["source_database_links"] = engine.ensure_database_links(source_user_conn, [source_db_link])
         finally:
             engine.close_connection(source_user_conn)
 
     if history_has_admin:
-        history_user_conn = engine.get_connection(config, admin=False, env="HISTORY")
+        history_user_conn = connect_as_runtime("HISTORY", connections.history.username)
         try:
             summary["history_database_links"] = engine.ensure_database_links(history_user_conn, [history_db_link])
         finally:

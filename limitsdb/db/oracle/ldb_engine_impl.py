@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Literal, cast
 
 import oracledb
 
-from limitsdb.core.ldb_errors import DatabaseConnectionError, ExecutionError
+from limitsdb.core.ldb_errors import DatabaseConnectionError, ExecutionError, InvalidCredentialsError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
@@ -15,6 +15,8 @@ from limitsdb.db.ldb_engines import (
     ColumnMetadata,
     DatabaseEngine,
     DatabaseLinkDefinition,
+    DdlFailures,
+    DdlSink,
     IndexMap,
     RoleDefinition,
     SequenceDefinition,
@@ -234,7 +236,15 @@ class OracleEngine(DatabaseEngine):
             return cast(oracledb.Connection, connection)
         except Exception as exc:
             logger.critical("Failed to connect to Oracle DB.", exc_info=True)
+            if OracleEngine._is_invalid_credentials(exc):
+                raise InvalidCredentialsError("Failed to connect to Oracle database") from exc
             raise DatabaseConnectionError("Failed to connect to Oracle database") from exc
+
+    @staticmethod
+    def _is_invalid_credentials(exc: Exception) -> bool:
+        """True for ORA-01017, which Oracle raises alike for an unknown user and a wrong password."""
+        error = exc.args[0] if exc.args else None
+        return getattr(error, "code", None) == 1017 or "ORA-01017" in str(exc)
 
     @staticmethod
     def close_connection(conn: oracledb.Connection) -> None:
@@ -675,10 +685,17 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def ensure_users(conn: oracledb.Connection, users: Sequence[UserDefinition]) -> list[str]:
+    def ensure_users(
+        conn: oracledb.Connection | None, users: Sequence[UserDefinition], *, ddl_sink: DdlSink | None = None
+    ) -> list[str]:
         created: list[str] = []
         if not users:
             return created
+        if ddl_sink is not None:
+            OracleEngine._require_script_mode(conn)
+            OracleEngine._script_users(users, ddl_sink)
+            return created
+        assert conn is not None
         cursor: oracledb.Cursor | None = None
         changed = False
         try:
@@ -734,10 +751,17 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_tables(conn: oracledb.Connection, tables: Sequence[TableDefinition]) -> list[str]:
+    def ensure_tables(
+        conn: oracledb.Connection | None, tables: Sequence[TableDefinition], *, ddl_sink: DdlSink | None = None
+    ) -> list[str]:
         created: list[str] = []
         if not tables:
             return created
+        if ddl_sink is not None:
+            OracleEngine._require_script_mode(conn)
+            OracleEngine._script_tables(tables, ddl_sink)
+            return created
+        assert conn is not None
         cursor: oracledb.Cursor | None = None
         changed = False
         try:
@@ -780,106 +804,48 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_table_structure(conn: oracledb.Connection, table: TableDefinition, table_cnf: Mapping[str, Any]) -> None:
+    def _emit_ddl(
+        conn: oracledb.Connection,
+        cursor: oracledb.Cursor,
+        statement: str,
+        ddl_sink: DdlSink | None,
+        ddl_failures: DdlFailures | None,
+    ) -> None:
+        """Hand the statement to the sink, or execute it, recording a failure when the caller collects them."""
+        if ddl_sink is not None:
+            ddl_sink(statement)
+            return
+        try:
+            OracleEngine._execute_ddl(conn, cursor, statement)
+        except oracledb.Error as exc:
+            if ddl_failures is None:
+                raise
+            message = " ".join(str(exc).split())
+            logger.warning("DDL statement failed and was left pending: %s", message)
+            ddl_failures.append((statement, message))
+
+    @staticmethod
+    def ensure_table_structure(
+        conn: oracledb.Connection | None,
+        table: TableDefinition,
+        table_cnf: Mapping[str, Any],
+        *,
+        reference: tuple[str, str] | None = None,
+        ddl_sink: DdlSink | None = None,
+        ddl_failures: DdlFailures | None = None,
+    ) -> None:
+        if conn is None:
+            if ddl_sink is None:
+                raise ValueError("ensure_table_structure needs a ddl_sink when conn is None")
+            for statement in OracleEngine._create_table_statements(table):
+                ddl_sink(statement)
+            return
         cursor: oracledb.Cursor | None = None
-        fmttd_owner = OracleEngine._format_identifier(table.owner)
-        fmttd_table_name = OracleEngine._format_identifier(table.name)
         logger.debug(f"Ensuring structure for table {table.owner}.{table.name} conn: {conn}")
         try:
             cursor = conn.cursor()
-            if not OracleEngine._table_exists(cursor, table.owner, table.name):
-                fmttd_columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-                sql = f"CREATE TABLE {fmttd_owner}.{fmttd_table_name} (\n        {fmttd_columns_sql}\n    )"
-                OracleEngine._execute_ddl(conn, cursor, sql)
-            else:
-                _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
-                for column in table.columns:
-                    column_definition = OracleEngine._column_sql(column)
-                    if column.name not in existing_columns:
-                        sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD ({column_definition})"
-                        OracleEngine._execute_ddl(conn, cursor, sql)
-                    else:
-                        existing = existing_columns[column.name]
-                        if OracleEngine._column_needs_update(existing, column):
-                            sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} MODIFY ({column_definition})"
-                            OracleEngine._execute_ddl(conn, cursor, sql)
-            existing_indexes = OracleEngine._get_table_indexes(cursor, fmttd_owner, fmttd_table_name)
-            desired_pk = tuple(table.primary_key or ())
-            fmttd_desired_pk = tuple(OracleEngine._format_identifier(col) for col in desired_pk)
-            existing_pk_name, existing_pk_cols, existing_pk_index = OracleEngine._get_primary_key_info(
-                cursor, table.owner, table.name
-            )
-            fmttd_existing_pk_cols = tuple(OracleEngine._format_identifier(col) for col in existing_pk_cols)
-            fmttd_existing_pk_index = OracleEngine._format_identifier(existing_pk_index) if existing_pk_index else None
-            desired_constraint_name = f"{table.name}_PK"
-            fmttd_desired_constraint_name = OracleEngine._format_identifier(desired_constraint_name)
-            if desired_pk:
-                if not existing_pk_cols:
-                    existing_index_info = existing_indexes.get(desired_constraint_name)
-                    if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
-                        drop_sql = f"DROP INDEX {fmttd_owner}.{fmttd_desired_constraint_name}"
-                        OracleEngine._execute_ddl(conn, cursor, drop_sql)
-                        existing_indexes.pop(desired_constraint_name, None)
-                    add_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_constraint_name} PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
-                    OracleEngine._execute_ddl(conn, cursor, add_pk_sql)
-                elif existing_pk_cols != desired_pk:
-                    if existing_pk_name:
-                        drop_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {OracleEngine._format_identifier(existing_pk_name)}"
-                        OracleEngine._execute_ddl(conn, cursor, drop_pk_sql)
-                        index_to_drop = fmttd_existing_pk_index or existing_pk_name
-                        if index_to_drop:
-                            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
-                        if index_to_drop and index_to_drop in existing_indexes:
-                            drop_index_sql = f"DROP INDEX {fmttd_owner}.{index_to_drop}"
-                            OracleEngine._execute_ddl(conn, cursor, drop_index_sql)
-                            existing_indexes.pop(index_to_drop, None)
-                    existing_index_info = existing_indexes.get(desired_constraint_name)
-                    if existing_index_info and (existing_index_info[0] != desired_pk or not existing_index_info[1]):
-                        drop_conflict_sql = f"DROP INDEX {fmttd_owner}.{fmttd_desired_constraint_name}"
-                        OracleEngine._execute_ddl(conn, cursor, drop_conflict_sql)
-                        existing_indexes.pop(desired_constraint_name, None)
-                    recreate_pk_sql = f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD CONSTRAINT {fmttd_desired_constraint_name} PRIMARY KEY ({', '.join(fmttd_desired_pk)})"
-                    OracleEngine._execute_ddl(conn, cursor, recreate_pk_sql)
-            elif fmttd_existing_pk_cols and existing_pk_name:
-                drop_unexpected_pk_sql = (
-                    f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} DROP CONSTRAINT {existing_pk_name}"
-                )
-                OracleEngine._execute_ddl(conn, cursor, drop_unexpected_pk_sql)
-                index_to_drop = fmttd_existing_pk_index or existing_pk_name
-                if index_to_drop:
-                    existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
-                if index_to_drop and index_to_drop in existing_indexes:
-                    drop_unexpected_index_sql = f"DROP INDEX {fmttd_owner}.{index_to_drop}"
-                    OracleEngine._execute_ddl(conn, cursor, drop_unexpected_index_sql)
-                    existing_indexes.pop(index_to_drop, None)
-            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
-            desired_indexes = OracleEngine._prepare_desired_indexes(table)
-            for index_name, (columns, is_unique) in desired_indexes.items():
-                fmttd_index_name = OracleEngine._format_identifier(index_name)
-                fmttd_columns = tuple(OracleEngine._format_identifier(col) for col in columns)
-                existing_index = existing_indexes.get(index_name)
-                if existing_index == (columns, is_unique):
-                    continue
-                if existing_index is not None:
-                    drop_mismatch_index_sql = f"DROP INDEX {fmttd_owner}.{fmttd_index_name}"
-                    OracleEngine._execute_ddl(conn, cursor, drop_mismatch_index_sql)
-                fmttd_columns_sql = ", ".join(fmttd_columns)
-                unique_clause = "UNIQUE " if is_unique else ""
-                create_index_sql = f"CREATE {unique_clause}INDEX {fmttd_owner}.{index_name} ON {fmttd_owner}.{fmttd_table_name} ({fmttd_columns_sql})"
-                OracleEngine._execute_ddl(conn, cursor, create_index_sql)
-            final_pk_name, _, final_pk_index = OracleEngine._get_primary_key_info(cursor, table.owner, table.name)
-            expected_indexes = set(desired_indexes.keys())
-            if final_pk_name:
-                expected_indexes.add(final_pk_name)
-            if final_pk_index:
-                expected_indexes.add(final_pk_index)
-            existing_indexes = OracleEngine._get_table_indexes(cursor, table.owner, table.name)
-            for index_name in list(existing_indexes.keys()):
-                if index_name not in expected_indexes:
-                    fmttd_index_name = OracleEngine._format_identifier(index_name)
-                    logger.info("Dropping unmanaged index %s on %s.%s", fmttd_index_name, fmttd_owner, fmttd_table_name)
-                    drop_unmanaged_index_sql = f"DROP INDEX {fmttd_owner}.{fmttd_index_name}"
-                    OracleEngine._execute_ddl(conn, cursor, drop_unmanaged_index_sql)
+            for statement in OracleEngine._compute_table_structure_delta(conn, cursor, table, reference):
+                OracleEngine._emit_ddl(conn, cursor, statement, ddl_sink, ddl_failures)
         except Exception as exc:
             conn.rollback()
             logger.critical("Failed to ensure table structure.", exc_info=True)
@@ -1068,41 +1034,6 @@ end;"""
         return statements
 
     @staticmethod
-    def generate_table_structure_script(
-        conn: oracledb.Connection | None,
-        table: TableDefinition,
-        table_cnf: Mapping[str, Any],
-        reference: tuple[str, str] | None = None,
-    ) -> list[str]:
-        if conn is None:
-            return OracleEngine._create_table_statements(table)
-        cursor: oracledb.Cursor | None = None
-        try:
-            cursor = conn.cursor()
-            return OracleEngine._compute_table_structure_delta(conn, cursor, table, reference)
-        except Exception as exc:
-            raise ExecutionError("Failed to generate table structure script") from exc
-        finally:
-            if cursor:
-                cursor.close()
-
-    @staticmethod
-    def execute_ddl_statements(conn: oracledb.Connection, statements: Sequence[str]) -> list[tuple[str, str]]:
-        failures: list[tuple[str, str]] = []
-        cursor = conn.cursor()
-        try:
-            for statement in statements:
-                try:
-                    OracleEngine._execute_ddl(conn, cursor, statement)
-                except oracledb.Error as exc:
-                    message = " ".join(str(exc).split())
-                    logger.warning("DDL statement failed and was left pending: %s", message)
-                    failures.append((statement, message))
-        finally:
-            cursor.close()
-        return failures
-
-    @staticmethod
     def get_primary_key_columns(
         conn: oracledb.Connection, owner: str, table_name: str, table_cnf: Mapping[str, Any]
     ) -> tuple[str, ...]:
@@ -1162,10 +1093,20 @@ end;"""
                 cursor.close()
 
     @staticmethod
-    def ensure_roles(conn: oracledb.Connection, roles: Sequence[RoleDefinition]) -> list[str]:
+    def ensure_roles(
+        conn: oracledb.Connection | None, roles: Sequence[RoleDefinition], *, ddl_sink: DdlSink | None = None
+    ) -> list[str]:
         created: list[str] = []
         if not roles:
             return created
+        if ddl_sink is not None:
+            OracleEngine._require_script_mode(conn)
+            for role in roles:
+                create_role = f"CREATE ROLE {OracleEngine._format_identifier(role.name)}"
+                ddl_sink(OracleEngine._tolerant_block(create_role, (-1921,)))
+                ddl_sink("")
+            return created
+        assert conn is not None
         cursor: oracledb.Cursor | None = None
         changed = False
         try:
@@ -1190,10 +1131,19 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_sequences(conn: oracledb.Connection, sequences: Sequence[SequenceDefinition]) -> list[str]:
+    def ensure_sequences(
+        conn: oracledb.Connection | None, sequences: Sequence[SequenceDefinition], *, ddl_sink: DdlSink | None = None
+    ) -> list[str]:
         created: list[str] = []
         if not sequences:
             return created
+        if ddl_sink is not None:
+            OracleEngine._require_script_mode(conn)
+            for sequence in sequences:
+                ddl_sink(OracleEngine._tolerant_block(OracleEngine._create_sequence_sql(sequence), (-955,)))
+                ddl_sink("")
+            return created
+        assert conn is not None
         cursor: oracledb.Cursor | None = None
         changed = False
         try:
@@ -1218,10 +1168,35 @@ end;"""
         return created
 
     @staticmethod
-    def ensure_database_links(conn: oracledb.Connection, links: Sequence[DatabaseLinkDefinition]) -> list[str]:
+    def script_password_prompts(
+        users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
+    ) -> None:
+        literal = OracleEngine._quote_literal
+        for position, user in enumerate(users, start=1):
+            prompt = f"Password for user {user.name} (set if it does not exist yet; must match it if it does): "
+            ddl_sink(f"accept ldb_user_pwd_{position} char prompt {literal(prompt)} hide")
+        for position, link in enumerate(links, start=1):
+            prompt = f"Password of {link.username} for database link {link.name}: "
+            ddl_sink(f"accept ldb_link_pwd_{position} char prompt {literal(prompt)} hide")
+
+    @staticmethod
+    def ensure_database_links(
+        conn: oracledb.Connection | None,
+        links: Sequence[DatabaseLinkDefinition],
+        *,
+        ddl_sink: DdlSink | None = None,
+        connect_as: tuple[str, str] | None = None,
+    ) -> list[str]:
         created: list[str] = []
         if not links:
             return created
+        if ddl_sink is not None:
+            OracleEngine._require_script_mode(conn)
+            if connect_as is None:
+                raise ValueError("connect_as (runtime username, dsn) is required to script database links")
+            OracleEngine._script_database_links(links, connect_as, ddl_sink)
+            return created
+        assert conn is not None
         cursor: oracledb.Cursor | None = None
         changed = False
         try:
@@ -1249,16 +1224,6 @@ end;"""
         return created
 
     @staticmethod
-    def generate_table_privilege_script(
-        role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
-    ) -> list[str]:
-        return [
-            OracleEngine._grant_sql(role, owner, table_name, privilege.upper())
-            for owner, table_name in tables
-            for privilege in privileges
-        ]
-
-    @staticmethod
     def _grant_sql(role: str, owner: str, table_name: str, privilege: str) -> str:
         fmttd_owner = OracleEngine._format_identifier(owner)
         fmttd_table_name = OracleEngine._format_identifier(table_name)
@@ -1266,13 +1231,27 @@ end;"""
 
     @staticmethod
     def ensure_table_privileges(
-        conn: oracledb.Connection, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+        conn: oracledb.Connection | None,
+        role: str,
+        tables: Sequence[tuple[str, str]],
+        privileges: Sequence[str],
+        *,
+        ddl_sink: DdlSink | None = None,
+        ddl_failures: DdlFailures | None = None,
     ) -> list[str]:
-        cursor: oracledb.Cursor | None = None
         granted: list[str] = []
-        changed = False
         if not tables:
             return granted
+        if conn is None:
+            if ddl_sink is None:
+                raise ValueError("ensure_table_privileges needs a ddl_sink when conn is None")
+            for owner, table_name in tables:
+                for privilege in privileges:
+                    ddl_sink(OracleEngine._grant_sql(role, owner, table_name, privilege.upper()))
+                    granted.append(f"{owner}.{table_name}:{privilege.upper()}")
+            return granted
+        cursor: oracledb.Cursor | None = None
+        changed = False
         try:
             cursor = conn.cursor()
             for owner, table_name in tables:
@@ -1285,7 +1264,7 @@ end;"""
                     ):
                         continue
                     sql = OracleEngine._grant_sql(role, owner, table_name, privilege_upper)
-                    OracleEngine._execute_ddl(conn, cursor, sql)
+                    OracleEngine._emit_ddl(conn, cursor, sql, ddl_sink, ddl_failures)
                     granted.append(f"{fmttd_owner}.{fmttd_table_name}:{privilege_upper}")
                     changed = True
             if changed:
@@ -1345,108 +1324,100 @@ end;"""
         )
 
     @staticmethod
-    def generate_bootstrap_script(
-        *,
-        title: str,
-        roles: Sequence[RoleDefinition],
-        users: Sequence[UserDefinition],
-        tables: Sequence[TableDefinition],
-        sequences: Sequence[SequenceDefinition],
-        supporting_owner: str,
-        links: Sequence[DatabaseLinkDefinition],
-        runtime_username: str,
-        runtime_dsn: str,
-    ) -> str:
+    def _require_script_mode(conn: oracledb.Connection | None) -> None:
+        if conn is not None:
+            raise ValueError("a ddl_sink on this method needs conn=None: no database is read when scripting")
+
+    @staticmethod
+    def _script_users(users: Sequence[UserDefinition], sink: DdlSink) -> None:
         fmt = OracleEngine._format_identifier
         literal = OracleEngine._quote_literal
-        block = OracleEngine._tolerant_block
-        lines = [
-            f"-- LimitsDb: bootstrap DDL for {title}.",
-            "-- Run it in SQL*Plus connected as a user with administrative privileges on this database.",
-            "-- It asks for the passwords it needs and can be rerun: objects that already exist are skipped.",
-            "-- The database link section reconnects as the runtime user, who owns the link.",
-            "whenever oserror exit failure",
-            "whenever sqlerror exit failure",
-            "set echo on define on verify off sqlblanklines on serveroutput on",
-            "",
-        ]
-        for role in roles:
-            lines += [block(f"CREATE ROLE {fmt(role.name)}", (-1921,)), ""]
         for position, user in enumerate(users, start=1):
             name = fmt(user.name)
             variable = f"ldb_user_pwd_{position}"
-            prompt = f"Password for user {user.name} (used only if it does not exist yet): "
-            lines += [
-                f"accept {variable} char prompt {literal(prompt)} hide",
-                OracleEngine._existing_user_notice(user.name),
-                block(OracleEngine._create_user_sql(user, f'"&{variable}"'), (-1920,)),
-            ]
+            sink(OracleEngine._existing_user_notice(user.name))
+            sink(OracleEngine._tolerant_block(OracleEngine._create_user_sql(user, f'"&{variable}"'), (-1920,)))
             admin_option_roles = {fmt(role_name) for role_name in user.roles_with_admin_option}
             for role_name in user.roles:
                 option = " WITH ADMIN OPTION" if fmt(role_name) in admin_option_roles else ""
-                lines.append(f"GRANT {fmt(role_name)} TO {name}{option};")
-            lines += [f"GRANT {privilege} TO {name};" for privilege in user.system_privileges]
+                sink(f"GRANT {fmt(role_name)} TO {name}{option};")
+            for privilege in user.system_privileges:
+                sink(f"GRANT {privilege} TO {name};")
             if user.default_tablespace:
-                lines.append(f"ALTER USER {name} QUOTA UNLIMITED ON {fmt(user.default_tablespace)};")
+                sink(f"ALTER USER {name} QUOTA UNLIMITED ON {fmt(user.default_tablespace)};")
             else:
-                lines += [
-                    "column ldb_ts new_value ldb_ts noprint",
+                sink("column ldb_ts new_value ldb_ts noprint")
+                sink(
                     "select nvl((select default_tablespace from dba_users where username = "
                     f"{literal(OracleEngine.get_identifier_str(user.name))}), (select property_value from "
-                    "database_properties where property_name = 'DEFAULT_PERMANENT_TABLESPACE')) ldb_ts from dual;",
-                    f"ALTER USER {name} QUOTA UNLIMITED ON &ldb_ts;",
-                ]
-            lines.append("")
+                    "database_properties where property_name = 'DEFAULT_PERMANENT_TABLESPACE')) ldb_ts from dual;"
+                )
+                sink(f"ALTER USER {name} QUOTA UNLIMITED ON &ldb_ts;")
+            sink("")
+
+    @staticmethod
+    def _script_tables(tables: Sequence[TableDefinition], sink: DdlSink) -> None:
+        fmt = OracleEngine._format_identifier
+        block = OracleEngine._tolerant_block
         for table in tables:
             owner, table_name = fmt(table.owner), fmt(table.name)
             columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
-            lines.append(block(f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )", (-955,)))
+            sink(block(f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )", (-955,)))
             if table.primary_key:
                 cols = ", ".join(fmt(col) for col in table.primary_key)
                 pk_sql = (
                     f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {fmt(f'{table.name}_PK')} PRIMARY KEY ({cols})"
                 )
-                lines.append(block(pk_sql, (-2260, -2264)))
+                sink(block(pk_sql, (-2260, -2264)))
             for index in table.indexes:
                 unique = "UNIQUE " if index.unique else ""
                 cols = ", ".join(fmt(col) for col in index.columns)
                 index_sql = f"CREATE {unique}INDEX {owner}.{fmt(index.name)} ON {owner}.{table_name} ({cols})"
-                lines.append(block(index_sql, (-955,)))
-            lines.append("")
-        for sequence in sequences:
-            lines += [block(OracleEngine._create_sequence_sql(sequence), (-955,)), ""]
-        lines += [f"alter session set current_schema = {fmt(supporting_owner)};", "set define off"]
-        for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
-            body = statement.strip()
-            lines += [body if body.endswith(";") and "PROCEDURE" in body else body.rstrip(";"), "/", ""]
-        lines.append("set define on")
-        if links:
-            lines += [
-                "",
-                f"accept ldb_runtime_pwd char prompt {literal(f'Password of the runtime user {runtime_username}: ')} hide",
-                f'connect {fmt(runtime_username)}/"&ldb_runtime_pwd"@"{runtime_dsn}"',
-            ]
-            for position, link in enumerate(links, start=1):
-                variable = f"ldb_link_pwd_{position}"
-                create_link = (
-                    f"CREATE DATABASE LINK {fmt(link.name)} CONNECT TO {fmt(link.username)} "
-                    f'IDENTIFIED BY "&{variable}" USING {literal(link.dsn)}'
-                ).replace("'", "''")
-                prompt = f"Password of {link.username} for database link {link.name}: "
-                lines += [
-                    f"accept {variable} char prompt {literal(prompt)} hide",
-                    "declare n number;",
-                    "begin",
-                    f"  select count(*) into n from user_db_links where upper(db_link) like upper({literal(link.name)}) || '%';",
-                    f"  if n = 0 then execute immediate '{create_link}'; end if;",
-                    "end;",
-                    "/",
-                ]
-        lines += ["", f"prompt LimitsDb: OK - bootstrap for {title} completed.", "exit success", ""]
-        return "\n".join(lines)
+                sink(block(index_sql, (-955,)))
+            sink("")
 
     @staticmethod
-    def ensure_supporting_objects(conn: oracledb.Connection, owner: str) -> list[str]:
+    def _script_database_links(
+        links: Sequence[DatabaseLinkDefinition], connect_as: tuple[str, str], sink: DdlSink
+    ) -> None:
+        fmt = OracleEngine._format_identifier
+        literal = OracleEngine._quote_literal
+        runtime_username, runtime_dsn = connect_as
+        # The runtime user is the one ensure_users scripted first in this same script: its password was already
+        # asked once (ldb_user_pwd_1) by script_password_prompts, so the DBA is never asked twice for it.
+        sink(
+            f"prompt Connecting as {runtime_username}. If this fails with ORA-01017, the user already existed with "
+            "a password different from the one entered above."
+        )
+        sink(f'connect {fmt(runtime_username)}/"&ldb_user_pwd_1"@"{runtime_dsn}"')
+        for position, link in enumerate(links, start=1):
+            variable = f"ldb_link_pwd_{position}"
+            create_link = (
+                f"CREATE DATABASE LINK {fmt(link.name)} CONNECT TO {fmt(link.username)} "
+                f'IDENTIFIED BY "&{variable}" USING {literal(link.dsn)}'
+            ).replace("'", "''")
+            sink(
+                "declare n number;\n"
+                "begin\n"
+                f"  select count(*) into n from user_db_links where upper(db_link) like upper({literal(link.name)}) || '%';\n"
+                f"  if n = 0 then execute immediate '{create_link}'; end if;\n"
+                "end;\n/"
+            )
+
+    @staticmethod
+    def ensure_supporting_objects(
+        conn: oracledb.Connection | None, owner: str, *, ddl_sink: DdlSink | None = None
+    ) -> list[str]:
+        if ddl_sink is not None:
+            OracleEngine._require_script_mode(conn)
+            lines = [f"alter session set current_schema = {OracleEngine._format_identifier(owner)};", "set define off"]
+            for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
+                body = statement.strip()
+                lines += [body if body.endswith(";") and "PROCEDURE" in body else body.rstrip(";"), "/", ""]
+            lines.append("set define on")
+            ddl_sink("\n".join(lines))
+            return []
+        assert conn is not None
         cursor: oracledb.Cursor | None = None
         try:
             cursor = conn.cursor()
@@ -1542,13 +1513,16 @@ end;"""
 
     @staticmethod
     def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:
+        # ALL_TAB_PRIVS names the owner column TABLE_SCHEMA; a runtime connection cannot read DBA_TAB_PRIVS.
+        scope = OracleEngine._dictionary_scope(cursor)
+        owner_column = "owner" if scope == "dba" else "table_schema"
         return OracleEngine._object_exists(
             cursor,
-            """
+            f"""
             SELECT 1
-              FROM dba_tab_privs
+              FROM {scope}_tab_privs
              WHERE grantee = :grantee
-               AND owner = :owner
+               AND {owner_column} = :owner
                AND table_name = :table_name
                AND privilege = :privilege
             """,

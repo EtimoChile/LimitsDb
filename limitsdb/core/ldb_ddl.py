@@ -1,19 +1,21 @@
 """Single delivery point for generated DDL: apply it to a database or write it to a file (DEC-026).
 
-Generating the statements is the engine's job and is the same in every mode. What differs is the
-destination, and that choice lives here, outside ``DatabaseEngine``.
+The engine generates the statements and, unless it is given a ``ddl_sink``, executes them. What
+differs between modes is the destination, and that choice lives here, outside ``DatabaseEngine``:
+``deliver_ddl`` hands the engine either a sink that collects the statements for a file or a list that
+collects the failures of the statements it executes.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from limitsdb.core.ldb_params_config import Config
-from limitsdb.db.ldb_engines import DatabaseEngine
+from limitsdb.db.ldb_engines import DdlFailures, DdlSink
 
 logger = logging.getLogger(__name__)
 
@@ -61,47 +63,69 @@ def write_ddl_file(
     return path
 
 
+def render_script(title: str, fragments: Sequence[str]) -> str:
+    """Compose a SQL*Plus script from engine fragments that are already terminated and ready to run.
+
+    Used by ``ldb-impl``: the fragments ask for the passwords they need, so the script can be rerun
+    by a DBA and embeds no secret.
+    """
+    lines = [
+        f"-- LimitsDb: bootstrap DDL for {title}.",
+        "-- Run it in SQL*Plus connected as a user with administrative privileges on this database.",
+        "-- It asks for the passwords it needs and can be rerun: objects that already exist are skipped.",
+        "-- The database link section reconnects as the runtime user, who owns the link.",
+        "whenever oserror exit failure",
+        "whenever sqlerror exit failure",
+        "set echo on define on verify off sqlblanklines on serveroutput on",
+        "",
+        *fragments,
+        "",
+        f"prompt LimitsDb: OK - bootstrap for {title} completed.",
+        "exit success",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def deliver_ddl(
     config: Config,
-    engine: DatabaseEngine,
-    statements: Sequence[str],
+    produce: Callable[[DdlSink | None, DdlFailures | None], None],
     *,
     destination: DdlDestination,
     env: DdlEnv,
     file_stem: str,
     description: str,
-    connection: Any | None = None,
-    grants: Sequence[str] = (),
 ) -> Path | None:
-    """Deliver DDL (and the grants that go with it) to its destination.
+    """Deliver the DDL that ``produce`` asks the engine for to its destination.
 
-    - ``destination="file"``: write ``statements`` then ``grants`` to a file under ``ddl_pending_dir``
-      and touch no database. ``connection`` is not needed. Returns the file path.
-    - ``destination="execute"``: run ``statements`` then ``grants`` over ``connection`` (the caller
-      opens it with the credentials that fit, admin or runtime). Every statement that fails is
-      written, with its error, to a file under ``ddl_pending_dir`` and the process exits 1 after all
-      were attempted, so a DBA can run the file. Returns None when everything was applied.
+    ``produce(ddl_sink, ddl_failures)`` calls the engine's ``ensure_*`` methods, passing both
+    arguments through. The caller opens whatever connection fits (admin or runtime) inside it.
+
+    - ``destination="file"``: ``produce`` gets a sink and the statements it collects are written to a
+      file under ``ddl_pending_dir``; no database is changed. Returns the file path, or None when
+      there was nothing to write.
+    - ``destination="execute"``: ``produce`` gets a failure list and the engine executes the
+      statements. Every statement that fails is written, with its error, to a file under
+      ``ddl_pending_dir`` and the process exits 1 after all were attempted, so a DBA can run the
+      file. Returns None when everything was applied.
 
     A file that cannot be written is logged with the pending statements and exits 1.
     """
     if destination == "file":
-        entries: list[tuple[str | None, str]] = [(None, s) for s in [*statements, *grants]]
-        if not entries:
+        collected: list[str] = []
+        produce(collected.append, None)
+        if not collected:
             return None
         try:
-            path = write_ddl_file(config, file_stem, description, entries, env=env)
+            path = write_ddl_file(config, file_stem, description, [(None, s) for s in collected], env=env)
         except OSError as exc:
             logger.error("The DDL file could not be written under %s: %s.", config.execution.ddl_pending_dir, exc)
             raise SystemExit(1) from exc
-        logger.info("%s: %d statement(s) written to %s", file_stem, len(entries), path)
+        logger.info("%s: %d statement(s) written to %s", file_stem, len(collected), path)
         return path
 
-    total = len(statements) + len(grants)
-    if not total:
-        return None
-    if connection is None:
-        raise ValueError("deliver_ddl needs a connection for destination 'execute'")
-    failures = engine.execute_ddl_statements(connection, [*statements, *grants])
+    failures: DdlFailures = []
+    produce(None, failures)
     if not failures:
         return None
     try:
@@ -123,10 +147,9 @@ def deliver_ddl(
         )
         raise SystemExit(1) from exc
     logger.error(
-        "%d of %d DDL change(s) could not be applied. They were written to %s; "
+        "%d DDL change(s) could not be applied. They were written to %s; "
         "ask a DBA to review and run that file, then rerun.",
         len(failures),
-        total,
         path,
     )
     raise SystemExit(1)

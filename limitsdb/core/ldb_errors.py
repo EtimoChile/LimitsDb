@@ -22,6 +22,10 @@ class DatabaseConnectionError(LimitsDbError, ConnectionError):
     """A database connection could not be established or checked."""
 
 
+class InvalidCredentialsError(DatabaseConnectionError):
+    """The database rejected the credentials; it does not say whether the user or the password is wrong."""
+
+
 class ValidationError(LimitsDbError, ValueError):
     """Configuration or runtime state failed domain validation."""
 

@@ -1054,7 +1054,8 @@ def test_ddl_script_drops_primary_key_with_its_index_and_the_unrelated_index_and
 
     try:
         # When: the structure script is generated
-        statements = OracleEngine.generate_table_structure_script(oracle_connection, desired, {})
+        statements: list[str] = []
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {}, ddl_sink=statements.append)
 
         # Then: the script drops the PK together with its index, then the unrelated index,
         # and has no standalone DROP INDEX for the index backing the PK
@@ -1064,7 +1065,8 @@ def test_ddl_script_drops_primary_key_with_its_index_and_the_unrelated_index_and
         ]
 
         # When: the script is executed
-        failures = OracleEngine.execute_ddl_statements(oracle_connection, statements)
+        failures: list[tuple[str, str]] = []
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {}, ddl_failures=failures)
 
         # Then: every statement succeeded and nothing is left on the table
         assert failures == []
@@ -1073,7 +1075,9 @@ def test_ddl_script_drops_primary_key_with_its_index_and_the_unrelated_index_and
 
         # When: the script is generated again
         # Then: there is nothing left to do
-        assert OracleEngine.generate_table_structure_script(oracle_connection, desired, {}) == []
+        remaining: list[str] = []
+        OracleEngine.ensure_table_structure(oracle_connection, desired, {}, ddl_sink=remaining.append)
+        assert remaining == []
     finally:
         _drop_table_if_present(oracle_connection, table_name)
 
@@ -1447,28 +1451,43 @@ def test_source_orphan_purge_archives_orphan_and_snapshots_process_date(
 def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run(oracle_connection: oracledb.Connection):
     # Spec: README § Run ILM > Admin credentials in ldb-run — a DDL statement that fails
     # is reported with its Oracle error and the remaining statements are still attempted
+    owner = os.environ["LDB_ORACLE_TEST_USER"].upper()
     test_table = "LDBT_DDLX_TABLE"
+    missing_table = "LDBT_DDLX_MISSING"
+    role_name = "LDBT_DDLX_ROLE"
 
-    # Given: a table plus a batch whose first statement targets a missing table
+    # Given: a role and an existing table, plus a table that does not exist
+    _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role_name}", missing_error_code=1919)
     _drop_table_if_present(oracle_connection, test_table)
+    OracleEngine.ensure_roles(oracle_connection, (RoleDefinition(name=role_name),))
     cursor = oracle_connection.cursor()
     try:
         cursor.execute(f"CREATE TABLE {test_table} (id NUMBER(10))")
     finally:
         cursor.close()
-    failing = "ALTER TABLE LDBT_DDLX_MISSING ADD (c1 NUMBER)"
-    valid = f"ALTER TABLE {test_table} ADD (c2 NUMBER)"
 
     try:
-        # When: the batch is executed
-        failures = OracleEngine.execute_ddl_statements(oracle_connection, [failing, valid])
+        # When: grants are applied with a failure collector, the first one on the missing table
+        failures: list[tuple[str, str]] = []
+        OracleEngine.ensure_table_privileges(
+            oracle_connection,
+            role_name,
+            ((owner, missing_table), (owner, test_table)),
+            ("SELECT",),
+            ddl_failures=failures,
+        )
 
         # Then: only the first statement is reported (with ORA-00942) and the second was applied
-        assert [statement for statement, _ in failures] == [failing]
+        assert len(failures) == 1
+        assert missing_table.lower() in failures[0][0].lower()
         assert "ORA-00942" in failures[0][1]
-        assert "C2" in _fetch_column_names(oracle_connection, test_table)
+        assert (
+            OracleEngine.ensure_table_privileges(oracle_connection, role_name, ((owner, test_table),), ("SELECT",))
+            == []
+        )
     finally:
         _drop_table_if_present(oracle_connection, test_table)
+        _execute_cleanup_ddl(oracle_connection, f"DROP ROLE {role_name}", missing_error_code=1919)
 
 
 def _write_ddl_pending_e2e_configuration(root: Path, *, with_history_admin: bool, **credentials: str) -> None:
@@ -1771,19 +1790,19 @@ def test_ldb_impl_without_admin_credentials_generates_scripts_a_dba_can_run_and_
         (history_script,) = pending_dir.glob("bootstrap_bootstrap-e2e_history_*.sql")
         assert source_script.name in result.stderr + result.stdout
 
-        # When: the DBA runs both scripts, twice (answers: user password, runtime password, link password)
+        # When: the DBA runs both scripts, twice (answers: user password, reused to reconnect as it, then link password)
         for _ in range(2):
             _run_script_in_oracle_container(
                 container,
                 history_script,
                 admin_login=admin_login,
-                answers=[history_password, history_password, source_password],
+                answers=[history_password, source_password],
             )
             _run_script_in_oracle_container(
                 container,
                 source_script,
                 admin_login=admin_login,
-                answers=[source_password, source_password, history_password],
+                answers=[source_password, history_password],
             )
 
         # Then: control objects exist and each database link is owned by its runtime user

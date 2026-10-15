@@ -1267,13 +1267,15 @@ class _HistoryDdlEngine:
     def close_connection(self, conn):
         pass
 
-    def generate_table_structure_script(self, conn, table, table_cnf, reference=None):
+    def ensure_table_structure(self, conn, table, table_cnf, *, reference=None, ddl_sink=None, ddl_failures=None):
         self.structure_reads.append((conn.env if conn else None, reference[0] if reference else None))
         if conn is None:
-            return [f"CREATE TABLE {table.owner}.{table.name} (ID NUMBER)"]
-        if reference:
-            return [f"ALTER TABLE {table.owner}.{table.name} ADD (LDB_PROCESS_DATE DATE)"]
-        return list(self.delta.get(table.name, []))
+            statements = [f"CREATE TABLE {table.owner}.{table.name} (ID NUMBER)"]
+        elif reference:
+            statements = [f"ALTER TABLE {table.owner}.{table.name} ADD (LDB_PROCESS_DATE DATE)"]
+        else:
+            statements = list(self.delta.get(table.name, []))
+        self._emit(conn, statements, ddl_sink, ddl_failures)
 
     def get_primary_key_columns(self, conn, owner, table_name, table_cnf):
         return ()
@@ -1282,15 +1284,20 @@ class _HistoryDdlEngine:
     def get_identifier_str(value):
         return value.upper()
 
-    def generate_table_privilege_script(self, role, tables, privileges):
-        return [f"GRANT {p} ON {o}.{t} TO {role}" for o, t in tables for p in privileges]
+    def ensure_table_privileges(self, conn, role, tables, privileges, *, ddl_sink=None, ddl_failures=None):
+        statements = [f"GRANT {p} ON {o}.{t} TO {role}" for o, t in tables for p in privileges]
+        self._emit(conn, statements, ddl_sink, ddl_failures)
+        return statements
 
     def get_table_columns(self, conn, owner, table_name):
         return [], {}
 
-    def execute_ddl_statements(self, conn, statements):
-        failures = []
+    def _emit(self, conn, statements, ddl_sink, ddl_failures):
+        """Send the statements to the sink, or apply them like a real engine would over ``conn``."""
         for statement in statements:
+            if ddl_sink is not None:
+                ddl_sink(statement)
+                continue
             if conn.admin:
                 assert conn.env == "HISTORY", "history DDL is applied over a history connection"
                 self.admin_applied.append(statement)
@@ -1300,8 +1307,9 @@ class _HistoryDdlEngine:
             else:
                 self.attempted.append(statement)
             if statement in self.failing:
-                failures.append((statement, self.failing[statement]))
-        return failures
+                if ddl_failures is None:
+                    raise RuntimeError(self.failing[statement])
+                ddl_failures.append((statement, self.failing[statement]))
 
     @property
     def history_admin_opened(self) -> bool:
@@ -1705,7 +1713,14 @@ def test_script_run_emits_grants_in_files_instead_of_applying_them(monkeypatch: 
     # Given: SCRIPT mode with admin credentials, where a normal run would apply the grants
     granted: list[str] = []
     engine = _HistoryDdlEngine()
-    engine.ensure_table_privileges = lambda *args: granted.append("granted")  # type: ignore[attr-defined]
+    emit_grants = engine.ensure_table_privileges
+
+    def ensure_table_privileges(conn, *args, ddl_sink=None, **kwargs):
+        if ddl_sink is None:
+            granted.append("granted")  # applied to a database instead of sent to a file
+        return emit_grants(conn, *args, ddl_sink=ddl_sink, **kwargs)
+
+    engine.ensure_table_privileges = ensure_table_privileges  # type: ignore[method-assign]
     monkeypatch.setattr(
         ldb_runner,
         "_collect_privilege_targets",

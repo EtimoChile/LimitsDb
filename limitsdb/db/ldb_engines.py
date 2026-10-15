@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -22,6 +22,12 @@ class ColumnDefinition:
     nullable: bool = True
     default: str | None = None
 
+
+DdlSink = Callable[[str], None]
+"""Receives the DDL an ``ensure_*`` method would otherwise execute."""
+
+DdlFailures = list[tuple[str, str]]
+"""Collects one (statement, error message) pair per statement that failed, instead of raising."""
 
 IndexMap = dict[str, dict[str, Any]]
 ColumnMetadata = dict[str, ColumnDefinition]
@@ -278,90 +284,110 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def ensure_roles(conn: Any, roles: Sequence[RoleDefinition]) -> list[str]:
-        """Ensure that the provided roles exist, returning newly created ones."""
+    def ensure_roles(conn: Any, roles: Sequence[RoleDefinition], *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure that the provided roles exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): nothing is read or executed; the sink receives the
+        script fragments a DBA runs to create the roles, each ready to be written as is, tolerating
+        only "already exists" so the script can be rerun. Returns an empty list."""
         pass
 
     @staticmethod
     @abstractmethod
-    def ensure_users(conn: Any, users: Sequence[UserDefinition]) -> list[str]:
-        """Ensure that the provided users exist, returning newly created ones."""
+    def ensure_users(conn: Any, users: Sequence[UserDefinition], *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure that the provided users exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``. The fragments hold no
+        password: they prompt for it and warn when a user already exists, since its password is kept."""
         pass
 
     @staticmethod
     @abstractmethod
-    def ensure_tables(conn: Any, tables: Sequence[TableDefinition]) -> list[str]:
-        """Ensure that the provided tables exist, returning newly created ones."""
+    def ensure_tables(conn: Any, tables: Sequence[TableDefinition], *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure that the provided tables exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``."""
         pass
 
     @staticmethod
     @abstractmethod
-    def ensure_table_structure(conn: Any, table: TableDefinition, table_cnf: Mapping[str, Any]) -> None:
-        """Ensure that the provided table matches the expected structure."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def generate_table_structure_script(
+    def ensure_table_structure(
         conn: Any,
         table: TableDefinition,
         table_cnf: Mapping[str, Any],
-        reference: tuple[str, str] | None = None,
-    ) -> list[str]:
-        """Return DDL statements to synchronize the table to the definition without executing them.
-        Uses accessible dictionary views and can be called with a non-administrative connection.
-        Returns an empty list when the table already matches the required definition.
-
-        By default the current structure is read from the table itself. ``reference`` gives an
-        (owner, table name) whose structure is taken as the current one instead, and a ``conn`` of
-        None means the table does not exist yet, so every object is created."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def execute_ddl_statements(conn: Any, statements: Sequence[str]) -> list[tuple[str, str]]:
-        """Execute DDL statements in order, continuing after a failed statement.
-        Returns one (statement, error message) pair for each statement that failed;
-        an empty list means every statement was applied."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def ensure_sequences(conn: Any, sequences: Sequence[SequenceDefinition]) -> list[str]:
-        """Ensure that the provided sequences exist, returning newly created ones."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def ensure_database_links(conn: Any, links: Sequence[DatabaseLinkDefinition]) -> list[str]:
-        """Ensure that the provided database links exist, returning newly created ones."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def generate_bootstrap_script(
         *,
-        title: str,
-        roles: Sequence[RoleDefinition],
-        users: Sequence[UserDefinition],
-        tables: Sequence[TableDefinition],
-        sequences: Sequence[SequenceDefinition],
-        supporting_owner: str,
+        reference: tuple[str, str] | None = None,
+        ddl_sink: DdlSink | None = None,
+        ddl_failures: DdlFailures | None = None,
+    ) -> None:
+        """Ensure that the provided table matches the expected structure.
+
+        The statements needed are computed from dictionary views readable with a non-administrative
+        connection; nothing is changed when the table already matches.
+
+        - ``ddl_sink``: the statements go to the sink instead of being executed.
+        - ``ddl_failures``: when executing, a statement that fails is recorded here and the next one
+          is attempted; without it the first failure raises.
+        - ``reference``: an (owner, table name) whose structure is taken as the current one instead
+          of the table's own.
+        - ``conn`` None (needs ``ddl_sink``): no table is read and everything is created."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_sequences(
+        conn: Any, sequences: Sequence[SequenceDefinition], *, ddl_sink: DdlSink | None = None
+    ) -> list[str]:
+        """Ensure that the provided sequences exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def script_password_prompts(
+        users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
+    ) -> None:
+        """Hand ``ddl_sink`` the fragments that ask the DBA for every password a script needs, hidden.
+
+        A script calls it first, so all passwords are asked up front. The users' passwords are asked in
+        order, then the links'; the fragments of ``ensure_users`` and ``ensure_database_links`` only use
+        the answers. Nothing is read from the database."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_database_links(
+        conn: Any,
         links: Sequence[DatabaseLinkDefinition],
-        runtime_username: str,
-        runtime_dsn: str,
-    ) -> str:
-        """Return a script a DBA can run to create the bootstrap objects without admin credentials in LimitsDb.
-        It must be safe to rerun, must not contain passwords (it prompts for them) and must create the
-        database links connected as the runtime user."""
+        *,
+        ddl_sink: DdlSink | None = None,
+        connect_as: tuple[str, str] | None = None,
+    ) -> list[str]:
+        """Ensure that the provided database links exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``, plus ``connect_as``, the
+        (username, dsn) of the runtime user that must own the links: the fragments reconnect as that
+        user with the password already asked by ``script_password_prompts`` for it in the same script (it must be
+        the first user), and use the password of each link asked there."""
         pass
 
     @staticmethod
     @abstractmethod
     def ensure_table_privileges(
-        conn: Any, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+        conn: Any,
+        role: str,
+        tables: Sequence[tuple[str, str]],
+        privileges: Sequence[str],
+        *,
+        ddl_sink: DdlSink | None = None,
+        ddl_failures: DdlFailures | None = None,
     ) -> list[str]:
-        """Ensure the role has the specified privileges on each table, returning new grants."""
+        """Ensure the role has the specified privileges on each table, returning new grants.
+
+        Grants the role already holds are skipped. ``ddl_sink`` and ``ddl_failures`` work as in
+        ``ensure_table_structure``. With ``conn`` None (needs ``ddl_sink``) nothing is read, so every
+        grant is emitted; they are safe to run again."""
         pass
 
     @staticmethod
@@ -375,8 +401,10 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def ensure_supporting_objects(conn: Any, owner: str) -> list[str]:
-        """Ensure auxiliary PL/SQL objects required by LimitsDb exist in the schema."""
+    def ensure_supporting_objects(conn: Any, owner: str, *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure auxiliary PL/SQL objects required by LimitsDb exist in the schema.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``."""
         pass
 
     @staticmethod
