@@ -4,7 +4,7 @@ import pytest
 
 from limitsdb.cli import ldb_crypt, ldb_impl, ldb_init, ldb_run
 from limitsdb.core import ldb_params_config
-from limitsdb.core.ldb_errors import LimitsDbError
+from limitsdb.core.ldb_errors import InvalidCredentialsError, LimitsDbError
 from limitsdb.core.ldb_params_config import Config
 
 _FULL_IMPL_DICT = {
@@ -185,7 +185,9 @@ def test_ldb_impl_run_cli_exits_with_error_when_credential_is_missing(monkeypatc
     assert caught.value.code == 1
 
 
-def _run_impl_with_admin_absent(monkeypatch: pytest.MonkeyPatch, tmp_path, absent_envs: set[str], **extra):
+def _run_impl_with_admin_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, absent_envs: set[str], *, runtime_login_error=None, **extra
+):
     """Run ldb-impl with a recording engine double; admin credentials are removed for absent_envs."""
     cfg = {**_FULL_IMPL_DICT, "ddl_pending_dir": str(tmp_path / "pending"), **extra}
     if "SOURCE" in absent_envs:
@@ -196,15 +198,22 @@ def _run_impl_with_admin_absent(monkeypatch: pytest.MonkeyPatch, tmp_path, absen
     scripts: list[dict] = []
 
     def record(name, result=None):
-        def method(conn, *args, **kwargs):
+        def method(conn, *args, ddl_sink=None, **kwargs):
+            if ddl_sink is not None:
+                # Script mode: nothing is read or executed, the engine only hands over script fragments.
+                assert conn is None
+                scripts.append({"step": name, "args": args, **kwargs})
+                ddl_sink(f"-- fragment {name}")
+                return []
             calls.append((name, conn.env))
             return result or []
 
         return method
 
-    def generate(**definitions):
-        scripts.append(definitions)
-        return "-- generated script\nexit success\n"
+    def connect(config, *, admin=False, env=None):
+        if runtime_login_error is not None and not admin:
+            raise runtime_login_error
+        return SimpleNamespace(env=env, admin=admin)
 
     engine = SimpleNamespace(
         REQUIRED_SYSTEM_PRIVILEGES=("CREATE SESSION",),
@@ -214,8 +223,7 @@ def _run_impl_with_admin_absent(monkeypatch: pytest.MonkeyPatch, tmp_path, absen
         ensure_sequences=record("sequences", ["seq"]),
         ensure_supporting_objects=record("supporting", ["obj"]),
         ensure_database_links=record("links", ["dblink"]),
-        generate_bootstrap_script=generate,
-        get_connection=lambda config, *, admin=False, env=None: SimpleNamespace(env=env, admin=admin),
+        get_connection=connect,
         close_connection=lambda conn: None,
     )
     monkeypatch.setattr(
@@ -245,10 +253,37 @@ def test_ldb_impl_without_admin_credentials_writes_one_script_per_database_and_c
     files = sorted(path.name for path in (tmp_path / "pending").glob("*.sql"))
     assert len(files) == 2
     assert files[0].startswith("bootstrap_s_history_") and files[1].startswith("bootstrap_s_source_")
-    assert {definition["runtime_username"] for definition in scripts} == {
+    assert {step["connect_as"][0] for step in scripts if step["step"] == "links"} == {
         _FULL_IMPL_DICT["source_username"],
         _FULL_IMPL_DICT["history_username"],
     }
+
+
+def test_ldb_impl_names_the_user_whose_existing_password_differs_from_the_configured_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > ldb-impl — when the runtime user already existed with another password, the
+    # reconnection is rejected (ORA-01017); ldb-impl says which user rejected the configured password
+    # and exits 1, instead of the generic connection failure
+    errors: list[str] = []
+    monkeypatch.setattr(
+        ldb_impl,
+        "get_logger",
+        lambda name=None: SimpleNamespace(
+            info=lambda *a, **k: None,
+            debug=lambda *a, **k: None,
+            error=lambda msg, *a, **k: errors.append(msg % a),
+        ),
+    )
+    with pytest.raises(SystemExit) as caught:
+        _run_impl_with_admin_absent(
+            monkeypatch, tmp_path, set(), runtime_login_error=InvalidCredentialsError("Failed to connect")
+        )
+
+    assert caught.value.code == 1
+    logged = " ".join(errors)
+    assert f"runtime user {_FULL_IMPL_DICT['source_username']} exists in SOURCE" in logged
+    assert "does not change the password of an existing user" in logged
 
 
 def test_ldb_impl_only_writes_a_script_for_the_database_whose_admin_credentials_are_absent(
@@ -264,7 +299,10 @@ def test_ldb_impl_only_writes_a_script_for_the_database_whose_admin_credentials_
     assert {"roles", "users", "tables", "sequences", "supporting", "links"} == {name for name, _ in calls}
     (written,) = (tmp_path / "pending").glob("*.sql")
     assert written.name.startswith("bootstrap_s_history_")
-    assert len(scripts) == 1
+    assert {step["step"] for step in scripts} == {"roles", "users", "tables", "sequences", "supporting", "links"}
+    assert [step["connect_as"][0] for step in scripts if step["step"] == "links"] == [
+        _FULL_IMPL_DICT["history_username"]
+    ]
 
 
 def test_ldb_impl_exits_1_when_the_script_cannot_be_written(monkeypatch: pytest.MonkeyPatch, tmp_path):

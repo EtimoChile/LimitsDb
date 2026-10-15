@@ -6,6 +6,10 @@ LimitsDb translates failures at subsystem boundaries into the hierarchy in
 - `ConfigurationError`: configuration input cannot be read or interpreted.
 - `SecretError`: secret files, master keys, or decryption fail.
 - `DatabaseConnectionError`: a database connection cannot be established.
+- `InvalidCredentialsError` (a `DatabaseConnectionError`): the database rejected the
+  credentials (Oracle ORA-01017). It does not say whether the user or the password is
+  wrong, because the database does not; only a caller that knows the user exists, such
+  as `ldb-impl` right after creating or verifying it, can tell.
 - `ValidationError`: configuration or runtime state violates the domain contract.
 - `ExecutionError`: ILM, status persistence, or administrative work fails.
 

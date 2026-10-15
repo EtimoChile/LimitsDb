@@ -386,10 +386,15 @@ def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run():
     executed = []
 
     class DummyCursor:
-        def execute(self, statement: str) -> None:
+        def execute(self, statement: str, params=None) -> None:
+            if statement.lstrip().startswith("SELECT"):
+                return  # the role holds no privilege yet
             executed.append(statement)
-            if "BAD" in statement:
+            if "OWNER.BAD" in statement.upper():
                 raise oracledb.DatabaseError("ORA-01031: insufficient privileges\nHelp: ...")
+
+        def fetchone(self):
+            return None
 
         def close(self) -> None:
             pass
@@ -398,17 +403,63 @@ def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run():
         def cursor(self) -> DummyCursor:
             return DummyCursor()
 
-    # When
-    failures = OracleEngine.execute_ddl_statements(
+        def commit(self) -> None:
+            pass
+
+        def rollback(self) -> None:
+            pass
+
+    # When: three grants are applied and the middle one is rejected
+    failures: list[tuple[str, str]] = []
+    OracleEngine.ensure_table_privileges(
         DummyConnection(),  # type: ignore[arg-type]
-        ["ALTER TABLE A ADD (X NUMBER)", "ALTER TABLE BAD ADD (X NUMBER)", "ALTER TABLE C ADD (X NUMBER)"],
+        "LDB_ROLE",
+        [("OWNER", "A"), ("OWNER", "BAD"), ("OWNER", "C")],
+        ("SELECT",),
+        ddl_failures=failures,
     )
 
     # Then: all three were attempted and only the rejected one is reported
     assert len(executed) == 3
-    assert [statement for statement, _ in failures] == ["ALTER TABLE BAD ADD (X NUMBER)"]
+    assert [statement for statement, _ in failures] == ["GRANT SELECT ON owner.bad TO ldb_role"]
     assert "ORA-01031" in failures[0][1]
     assert "\n" not in failures[0][1]
+
+
+def test_failed_ddl_statement_raises_when_the_caller_does_not_collect_failures():
+    # Spec: README > Bootstrap Database Objects — without a failure collector a rejected statement stops the run
+    class DummyCursor:
+        def execute(self, statement: str, params=None) -> None:
+            if not statement.lstrip().startswith("SELECT"):
+                raise oracledb.DatabaseError("ORA-01031: insufficient privileges")
+
+        def fetchone(self):
+            return None
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> DummyCursor:
+            return DummyCursor()
+
+        def rollback(self) -> None:
+            pass
+
+    with pytest.raises(ExecutionError):
+        OracleEngine.ensure_table_privileges(
+            DummyConnection(),  # type: ignore[arg-type]
+            "LDB_ROLE",
+            [("OWNER", "A")],
+            ("SELECT",),
+        )
+
+
+def _structure_statements(conn, table, reference=None) -> list[str]:
+    """The statements ensure_table_structure sends to a sink instead of executing."""
+    statements: list[str] = []
+    OracleEngine.ensure_table_structure(conn, table, {}, reference=reference, ddl_sink=statements.append)
+    return statements
 
 
 def _history_pk_replacement_script(
@@ -454,7 +505,7 @@ def _history_pk_replacement_script(
     monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, name: (["ID"], {"ID": column}))
     monkeypatch.setattr(OracleEngine, "_column_needs_update", lambda existing, desired: False)
     table = TableDefinition(owner="OWNER", name="ITEMS", columns=(column,), primary_key=desired_pk)
-    return OracleEngine.generate_table_structure_script(DummyConnection(), table, {})  # type: ignore[arg-type]
+    return _structure_statements(DummyConnection(), table)
 
 
 def test_replacing_a_primary_key_in_a_ddl_script_drops_its_index_in_the_same_statement(
@@ -557,7 +608,7 @@ def test_structure_script_without_a_connection_creates_every_object(monkeypatch:
     table = TableDefinition(owner="OWNER", name="ITEMS", columns=(column,), primary_key=("ID",))
 
     # When: the structure script is generated without a connection
-    statements = OracleEngine.generate_table_structure_script(None, table, {})
+    statements = _structure_statements(None, table)
 
     # Then: the table and its primary key are created
     assert statements[0].startswith("CREATE TABLE owner.items")
@@ -600,12 +651,7 @@ def test_structure_script_with_a_reference_reads_the_reference_and_emits_ddl_for
     table = TableDefinition(owner="HIST", name="ITEMS", columns=(id_column, date_column), primary_key=None)
 
     # When: the structure script is generated against the reference
-    statements = OracleEngine.generate_table_structure_script(
-        DummyConnection(),  # type: ignore[arg-type]
-        table,
-        {},
-        reference=("SRC", "ITEMS"),
-    )
+    statements = _structure_statements(DummyConnection(), table, reference=("SRC", "ITEMS"))
 
     # Then: every dictionary lookup targeted the reference, and the DDL targets the history table
     assert lookups and all(lookup == ("SRC", "ITEMS") for lookup in lookups)
@@ -616,8 +662,9 @@ def test_table_privilege_script_grants_every_privilege_on_every_table_without_a_
     # Spec: README > Run ILM > --mode SCRIPT — the grants a DBA runs are unconditional GRANT
     # statements, one per table and privilege, safe to run again.
     # When: the privilege script is generated for two tables and two privileges
-    statements = OracleEngine.generate_table_privilege_script(
-        "LDB_ROLE", [("OWNER", "A"), ("OWNER", "B")], ("select", "DELETE")
+    statements: list[str] = []
+    OracleEngine.ensure_table_privileges(
+        None, "LDB_ROLE", [("OWNER", "A"), ("OWNER", "B")], ("select", "DELETE"), ddl_sink=statements.append
     )
 
     # Then: each table gets each privilege for the role

@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-14
-last-updated: 2026-10-13
+last-reviewed: 2026-10-15
+last-updated: 2026-10-15
 ---
 
 # Current state
@@ -31,9 +31,9 @@ but does not replace the sources defined in `AGENTS.md`.
 - ILM operations can archive, purge, create objects, and manage privileges.
   They are not executed against a real database without explicit authorization
   and an identified environment.
-- The test suite lives in `tests/`. Local tests are 180 (non-oracle-integration)
+- The test suite lives in `tests/`. Local tests are 206 (non-oracle-integration)
   and 16 E2E (oracle_integration, 3 new ones for DEC-021 not yet run in CI). Ruff validates format and lint, and strict
-  `mypy` completes without findings across the 23 package modules. The test
+  `mypy` completes without findings across the 24 package modules. The test
   layout follows `docs/prompts/test-organization.md`: core contracts in `tests/test_*.py`,
   Oracle adapter tests (no real DB) in `tests/adapters/oracle/`, and E2E with an
   ephemeral Oracle DB in `tests/integration/oracle/`. `PEND-018` is resolved:
@@ -173,6 +173,10 @@ but does not replace the sources defined in `AGENTS.md`.
   is assumed when history cannot be read.
 - `DEC-025`: history DDL always travels with the matching grants (executed or written to a file).
 - `DEC-026`: one function (`deliver_ddl`, `limitsdb/core/ldb_ddl.py`) decides execute-or-file for every
-  DDL helper; the engine only generates statements and executes them.
+  DDL helper. `DEC-027`: the engine's `ensure_*` methods take an optional `ddl_sink` (and
+  `ddl_failures`) instead of generate/execute twins; `PEND-021` is resolved.
 - `DEC-022`: without admin credentials, `ldb-impl` writes one bootstrap script
   per database (PL/SQL blocks tolerating only "already exists"); `PEND-017` is resolved.
+- `DEC-029`: `get_connection` marks ORA-01017 as `InvalidCredentialsError` without telling a missing user from a wrong
+  password; `ldb-impl` names the runtime user whose existing password differs, and its bootstrap script asks
+  for that password once; `PEND-020` is resolved.
