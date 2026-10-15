@@ -80,8 +80,7 @@ jobs:
       contents: read
     timeout-minutes: 30
     env:
-      # gvenzl/oracle-free:23.26.2-slim-faststart, pinned to an immutable multi-platform digest.
-      ORACLE_IMAGE: ghcr.io/gvenzl/oracle-free@sha256:5e340d72c5cd93b5ce8bab6c128b8f37a5ec485d5d9d98dc2cdc5353fe640f96
+      ORACLE_IMAGE: ghcr.io/gvenzl/oracle-free:23.26.3-faststart
       LDB_ORACLE_TEST_DSN: localhost:1521/FREEPDB1
       LDB_ORACLE_TEST_USER: system
       LDB_ORACLE_TEST_CONTAINER: limitsdb-oracle
