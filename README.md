@@ -368,7 +368,7 @@ History table management follows the same principle:
 
 ### History DDL in `--mode SCRIPT`
 
-`--mode SCRIPT` applies nothing to the databases. The ILM SQL blocks, which
+`--mode SCRIPT` applies no DDL and no history grants to the databases. The ILM SQL blocks, which
 run many times, go to stdout. The one-time statements go to files under
 `ddl_pending_dir`, so they stay out of the script that is rerun:
 
@@ -378,7 +378,14 @@ run many times, go to stdout. The one-time statements go to files under
 - `source_grants_<schema>_<YYYYMMDD_HHMMSS>.sql` (`SOURCE_ILM` only): the grants
   on the source tables for the source role. Run it against the source database.
 
-Both are plain SQL for SQL*Plus that stop at the first failing statement; the
+The runtime user reads the column metadata of the source tables through their
+grants, so when source admin credentials exist `SCRIPT` applies the source
+grants itself and writes no `source_grants` file. Without them the file is
+written and `ldb-run` logs a warning. In every mode, a table the runtime user
+cannot see (it does not exist, or `SELECT` is not granted) is skipped with a
+warning instead of failing the run, and so is a table that references it.
+
+Both files are plain SQL for SQL*Plus that stop at the first failing statement; the
 grants are unconditional and safe to run again. The history DDL is always
 emitted, computed like this:
 

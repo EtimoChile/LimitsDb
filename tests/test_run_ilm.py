@@ -1252,6 +1252,7 @@ class _HistoryDdlEngine:
         self.attempted: list[str] = []
         self.admin_applied: list[str] = []
         self.grants_attempted: list[str] = []
+        self.source_granted: list[str] = []
         self.structure_reads: list[tuple[str | None, str | None]] = []
 
     def get_connection(self, config, *, admin=False, env=None):
@@ -1297,6 +1298,10 @@ class _HistoryDdlEngine:
         for statement in statements:
             if ddl_sink is not None:
                 ddl_sink(statement)
+                continue
+            if conn.admin and conn.env == "SOURCE":
+                assert statement.startswith("GRANT "), "only grants are applied over the source admin connection"
+                self.source_granted.append(statement)
                 continue
             if conn.admin:
                 assert conn.env == "HISTORY", "history DDL is applied over a history connection"
@@ -1629,7 +1634,9 @@ def test_script_run_writes_the_history_delta_read_over_the_runtime_history_conne
     # When: ldb-run generates the script
     rc = _run_ldb(
         monkeypatch,
-        _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE", ddl_pending_dir=str(pending_dir)),
+        _history_ddl_config(
+            mode="SCRIPT", history_baseline="SOURCE", source_admin=False, ddl_pending_dir=str(pending_dir)
+        ),
         engine,
     )
 
@@ -1707,25 +1714,22 @@ def test_script_run_aligns_history_with_source_when_history_is_unreadable_and_ba
     assert engine.attempted == [] and engine.admin_applied == []
 
 
-def test_script_run_emits_grants_in_files_instead_of_applying_them(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    # Spec: README > Run ILM > --mode SCRIPT — SCRIPT applies nothing to the target databases, so the
-    # table grants go to files: history grants with the history DDL, source grants in their own file.
-    # Given: SCRIPT mode with admin credentials, where a normal run would apply the grants
-    granted: list[str] = []
-    engine = _HistoryDdlEngine()
-    emit_grants = engine.ensure_table_privileges
-
-    def ensure_table_privileges(conn, *args, ddl_sink=None, **kwargs):
-        if ddl_sink is None:
-            granted.append("granted")  # applied to a database instead of sent to a file
-        return emit_grants(conn, *args, ddl_sink=ddl_sink, **kwargs)
-
-    engine.ensure_table_privileges = ensure_table_privileges  # type: ignore[method-assign]
+def _grant_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ldb_runner,
         "_collect_privilege_targets",
         lambda rows, key, engine: [("SRC" if key == "source_owner" else "HIST", "T1")],
     )
+
+
+def test_script_run_applies_source_grants_when_source_admin_credentials_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode SCRIPT — the runtime user reads column metadata through the source
+    # grants, so SCRIPT applies them when source admin credentials exist; history grants stay in the file.
+    # Given: SCRIPT mode with source and history admin credentials
+    engine = _HistoryDdlEngine()
+    _grant_targets(monkeypatch)
     pending_dir = tmp_path / "pending"
 
     # When: ldb-run generates the script
@@ -1735,13 +1739,133 @@ def test_script_run_emits_grants_in_files_instead_of_applying_them(monkeypatch: 
         engine,
     )
 
-    # Then: nothing was granted, and each database has its own file with its grants
+    # Then: the source grants were applied and have no file; the history grants are in the history file
     assert rc == 0
-    assert granted == []
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE" in engine.source_granted
     files = _script_files(pending_dir)
+    assert "source_grants" not in files
     assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE;" in files["history_ddl"]
-    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in files["source_grants"]
-    assert "LDB_SOURCE_ROLE" not in files["history_ddl"]
+    assert engine.admin_applied == []
+
+
+def test_script_run_writes_source_grants_file_and_warns_without_source_admin_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode SCRIPT — without source admin credentials the source grants go to a
+    # file and a warning says tables not yet granted are skipped.
+    # Given: SCRIPT mode without source admin credentials
+    engine = _HistoryDdlEngine()
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    pending_dir = tmp_path / "pending"
+
+    # When: ldb-run generates the script
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", source_admin=False, ddl_pending_dir=str(pending_dir)),
+        engine,
+    )
+
+    # Then: nothing was granted, the grants are in their file and the warning was logged
+    assert rc == 0
+    assert engine.source_granted == []
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in _script_files(pending_dir)["source_grants"]
+    assert any("Source admin credentials are absent" in m for m in recorder.messages["warning"])
+
+
+def test_execute_run_without_source_admin_credentials_warns_that_ungranted_tables_are_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — every mode that applies grants needs source
+    # admin credentials; without them tables the runtime user cannot see are skipped, with a warning.
+    # Given: EXECUTE mode without source admin credentials
+    engine = _HistoryDdlEngine()
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+
+    # When: ldb-run executes
+    rc = _run_ldb(monkeypatch, _history_ddl_config(source_admin=False, ddl_pending_dir=str(tmp_path / "p")), engine)
+
+    # Then: no source grant was applied and the warning was logged
+    assert rc == 0
+    assert engine.source_granted == []
+    assert any("Source admin credentials are absent" in m for m in recorder.messages["warning"])
+
+
+def _full_row(table_name: str, **kwargs) -> dict:
+    """A configuration row complete enough for a table whose columns are visible to be fully processed."""
+    return {
+        **_minimal_row(table_name, **kwargs),
+        "ctl_status": None,
+        "cond_expr": "",
+        "retain_months_source": 3,
+        "retain_months_history": None,
+        "purge_date_expr": "@created",
+        "additional_filter_expr": None,
+        "history_addtl_filter_expr": None,
+        "has_lob_columns": "N",
+        "long_columns": None,
+    }
+
+
+class _VisibilityEngine(_MinimalEngine):
+    """Engine stub where only the listed tables have columns visible to the runtime user."""
+
+    def __init__(self, visible: set[str]) -> None:
+        self.visible = visible
+
+    @staticmethod
+    def generate_sql_block(config, table_cnf, process_date):
+        return "select 1 from dual"
+
+    @staticmethod
+    def get_date_condition(expr, months):
+        return f"{expr} < add_months(sysdate, -{months})"
+
+    def get_table_columns(self, conn, owner, table_name):
+        if table_name in self.visible:
+            return ["id"], {"ID": SimpleNamespace(id=1)}
+        return [], {}
+
+
+def test_table_without_visible_columns_is_skipped_with_a_warning_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM — a table the runtime user cannot see (missing, or SELECT not granted) is
+    # skipped with a warning; it does not abort the run.
+    # Given: one visible table and one with no visible columns
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    rows = [_full_row("OK"), _full_row("INV")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"OK"}), "20261007")
+
+    # Then: the invisible table is skipped with the message and the other one is kept
+    assert tables[("A", "INV")]["skip"] is True
+    assert not tables[("A", "OK")].get("skip")
+    assert any("A.INV is not visible to the runtime user" in m for m in recorder.messages["warning"])
+
+
+def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM — a child inherits its parent's conditions, so it is skipped when the
+    # parent is not visible.
+    # Given: a child whose parent has no visible columns
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    rows = [_full_row("PARENT"), _full_row("CHILD", referencing_tables="A.PARENT p")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"CHILD"}), "20261007")
+
+    # Then: both are skipped and the child names the parent
+    assert tables[("A", "PARENT")]["skip"] is True
+    assert tables[("A", "CHILD")]["skip"] is True
+    assert any("references A.PARENT" in m for m in recorder.messages["warning"])
 
 
 def test_grants_that_go_with_history_ddl_are_applied_over_the_runtime_connection_without_admin(
