@@ -1505,13 +1505,16 @@ end;"""
 
     @staticmethod
     def _role_has_table_priv(cursor: oracledb.Cursor, role: str, owner: str, table_name: str, privilege: str) -> bool:
+        # ALL_TAB_PRIVS names the owner column TABLE_SCHEMA; a runtime connection cannot read DBA_TAB_PRIVS.
+        scope = OracleEngine._dictionary_scope(cursor)
+        owner_column = "owner" if scope == "dba" else "table_schema"
         return OracleEngine._object_exists(
             cursor,
-            """
+            f"""
             SELECT 1
-              FROM dba_tab_privs
+              FROM {scope}_tab_privs
              WHERE grantee = :grantee
-               AND owner = :owner
+               AND {owner_column} = :owner
                AND table_name = :table_name
                AND privilege = :privilege
             """,

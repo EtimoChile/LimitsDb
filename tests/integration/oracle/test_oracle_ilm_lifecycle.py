@@ -1790,19 +1790,19 @@ def test_ldb_impl_without_admin_credentials_generates_scripts_a_dba_can_run_and_
         (history_script,) = pending_dir.glob("bootstrap_bootstrap-e2e_history_*.sql")
         assert source_script.name in result.stderr + result.stdout
 
-        # When: the DBA runs both scripts, twice (answers: user password, runtime password, link password)
+        # When: the DBA runs both scripts, twice (answers: user password, reused to reconnect as it, then link password)
         for _ in range(2):
             _run_script_in_oracle_container(
                 container,
                 history_script,
                 admin_login=admin_login,
-                answers=[history_password, history_password, source_password],
+                answers=[history_password, source_password],
             )
             _run_script_in_oracle_container(
                 container,
                 source_script,
                 admin_login=admin_login,
-                answers=[source_password, source_password, history_password],
+                answers=[source_password, history_password],
             )
 
         # Then: control objects exist and each database link is owned by its runtime user

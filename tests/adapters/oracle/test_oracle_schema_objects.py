@@ -600,6 +600,52 @@ def test_primary_key_metadata_is_read_from_the_view_set_the_connection_can_acces
     assert not any(f"{other}_constraints" in sql or f"{other}_indexes" in sql for sql in executed)
 
 
+@pytest.mark.parametrize(
+    ("admin_connection", "prefix", "owner_column"), [(False, "all", "table_schema"), (True, "dba", "owner")]
+)
+def test_existing_table_privileges_are_read_from_the_view_set_the_connection_can_access(
+    monkeypatch: pytest.MonkeyPatch, admin_connection: bool, prefix: str, owner_column: str
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin credentials the history
+    # grants are applied over the runtime connection, which cannot read dba_* views; admin
+    # connections keep using them.
+    # Given: a runtime or an admin connection and a role without the privilege
+    executed: list[str] = []
+
+    class RecordingCursor:
+        def __init__(self, connection) -> None:
+            self.connection = connection
+
+        def execute(self, sql: str, *args, **kwargs) -> None:
+            executed.append(sql)
+
+        def fetchone(self):
+            return None
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> RecordingCursor:
+            return RecordingCursor(self)
+
+        def commit(self) -> None:
+            pass
+
+    connection = DummyConnection()
+    if admin_connection:
+        monkeypatch.setattr(OracleEngine, "_admin_connections", {id(connection)})
+
+    # When: the table privileges are ensured
+    OracleEngine.ensure_table_privileges(connection, "ROLE", [("OWNER", "ITEMS")], ["SELECT"])  # type: ignore[arg-type]
+
+    # Then: the existing grants were read only from the matching view set
+    other = "dba" if prefix == "all" else "all"
+    check = next(sql for sql in executed if f"{prefix}_tab_privs" in sql)
+    assert f"{owner_column} = :owner" in check
+    assert not any(f"{other}_tab_privs" in sql for sql in executed)
+
+
 def test_structure_script_without_a_connection_creates_every_object(monkeypatch: pytest.MonkeyPatch):
     # Spec: README > Run ILM > --mode SCRIPT — with history_baseline EMPTY nothing is read from
     # the database: the script creates the table, its primary key and its indexes.

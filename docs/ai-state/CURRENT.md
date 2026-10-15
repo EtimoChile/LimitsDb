@@ -31,7 +31,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - ILM operations can archive, purge, create objects, and manage privileges.
   They are not executed against a real database without explicit authorization
   and an identified environment.
-- The test suite lives in `tests/`. Local tests are 206 (non-oracle-integration)
+- The test suite lives in `tests/`. Local tests are 208 (non-oracle-integration)
   and 16 E2E (oracle_integration, 3 new ones for DEC-021 not yet run in CI). Ruff validates format and lint, and strict
   `mypy` completes without findings across the 24 package modules. The test
   layout follows `docs/prompts/test-organization.md`: core contracts in `tests/test_*.py`,
