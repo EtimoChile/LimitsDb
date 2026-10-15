@@ -6,6 +6,8 @@
 - `ldb-run` and `ldb-impl` deliver their DDL through the `ensure_*` methods; their behavior and generated files are unchanged.
 - The `ldb-impl` bootstrap script asks once for the runtime user's password and reuses it to reconnect for the database link, instead of asking twice.
 - `ldb-impl` now logs which runtime user rejected the configured password (an existing user keeps its password) and exits 1, instead of failing with the generic connection error; the bootstrap script prints the same hint before reconnecting. New `InvalidCredentialsError`, a `DatabaseConnectionError` subclass that `get_connection` raises for ORA-01017.
+- **Breaking for runtime usernames in lowercase:** `source_username` and `history_username` are data-dictionary names. A lowercase name (`ldb`) is a quoted user created as `"ldb"`, and the runtime login now quotes it the same way, so it no longer logs in as `LDB`. A regular user stored in uppercase (`LDB`) must now be configured as `LDB`. Admin usernames are used as configured.
+- Fix `ldb-impl` for lowercase users: the quota DDL quotes the user, the quota lookup binds the tablespace as the dictionary stores it, and the bootstrap script looks the user up in `dba_users` under its own name.
 
 ## [0.6.0] - 2026-10-14
 
