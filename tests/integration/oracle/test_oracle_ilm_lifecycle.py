@@ -32,7 +32,8 @@ def _oracle_config() -> Config:
     return Config(
         schema="oracle-integration",
         source_dsn=values["dsn"],
-        source_username=values["username"],
+        # Runtime logins quote the configured name, so SYSTEM is given in its dictionary (uppercase) form
+        source_username=values["username"].upper(),
         source_password=values["password"],
     )
 
