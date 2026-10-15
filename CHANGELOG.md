@@ -2,10 +2,14 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-15
+
 - **Breaking for custom engines:** `DatabaseEngine` no longer has `generate_table_structure_script`, `execute_ddl_statements`, `generate_table_privilege_script` or `generate_bootstrap_script`. Every `ensure_*` method now takes an optional keyword `ddl_sink`; when given, the engine hands it the DDL instead of executing it (a `None` connection then means nothing is read from the database). `ensure_table_structure` and `ensure_table_privileges` also take `ddl_failures`: with it, statements that fail are collected with their error and the rest still run. `ensure_table_structure` and `ensure_table_privileges` no longer return the generated statements.
 - `ldb-run` and `ldb-impl` deliver their DDL through the `ensure_*` methods; their behavior and generated files are unchanged.
 - The `ldb-impl` bootstrap script asks once for the runtime user's password and reuses it to reconnect for the database link, instead of asking twice.
 - `ldb-impl` now logs which runtime user rejected the configured password (an existing user keeps its password) and exits 1, instead of failing with the generic connection error; the bootstrap script prints the same hint before reconnecting. New `InvalidCredentialsError`, a `DatabaseConnectionError` subclass that `get_connection` raises for ORA-01017.
+- The `ldb-impl` bootstrap script now asks for every password at its start, before it changes anything. `DatabaseEngine` has a new abstract method, `script_password_prompts`, which a script calls first.
+- Fix `ldb-run` without history admin credentials failing with ORA-00942 while applying history grants: existing table grants are now read from `all_tab_privs` on runtime connections, keeping `dba_tab_privs` on admin connections.
 
 ## [0.6.0] - 2026-10-14
 

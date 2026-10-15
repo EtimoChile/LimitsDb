@@ -15,7 +15,7 @@ but does not replace the sources defined in `AGENTS.md`.
 
 - The integration branch is `development`; `main` represents stable versions
   per `README.md`.
-- The version declared in `pyproject.toml` is `0.6.0` and requires Python
+- The version declared in `pyproject.toml` is `0.7.0` and requires Python
   `>=3.12,<4.0`.
 - The current name is `LimitsDb`, the Python package is `limitsdb`, and the
   public technical prefix is `ldb` / `LDB`; the change from the previous name
@@ -180,3 +180,5 @@ but does not replace the sources defined in `AGENTS.md`.
 - `DEC-029`: `get_connection` marks ORA-01017 as `InvalidCredentialsError` without telling a missing user from a wrong
   password; `ldb-impl` names the runtime user whose existing password differs, and its bootstrap script asks
   for that password once; `PEND-020` is resolved.
+- `DEC-030`: generated scripts ask for every password at their start (`script_password_prompts`), before
+  changing anything.
