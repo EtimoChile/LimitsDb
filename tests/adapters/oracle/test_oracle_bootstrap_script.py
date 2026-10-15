@@ -31,6 +31,7 @@ def _bootstrap(
 ) -> str:
     """The script ldb-impl writes when admin credentials are absent: the ensure_* fragments, rendered."""
     fragments: list[str] = []
+    OracleEngine.script_password_prompts(users, links, ddl_sink=fragments.append)
     OracleEngine.ensure_roles(None, roles, ddl_sink=fragments.append)
     OracleEngine.ensure_users(None, users, ddl_sink=fragments.append)
     OracleEngine.ensure_tables(None, tables, ddl_sink=fragments.append)
@@ -75,6 +76,16 @@ def test_bootstrap_script_never_contains_passwords_and_prompts_for_them_hidden()
     prompts = re.findall(r"^accept (\w+) char prompt .* hide$", script, flags=re.MULTILINE)
     assert len(prompts) == 2  # the user (asked once, reused to reconnect as it) and the database link
     assert "ldb_runtime_pwd" not in script
+
+
+def test_bootstrap_script_asks_for_every_password_before_changing_anything():
+    # Spec: README > ldb-impl without admin credentials — the script asks for all passwords at its start
+    script = _script()
+
+    last_prompt = max(match.start() for match in re.finditer(r"^accept ", script, flags=re.MULTILINE))
+    first_change = min(script.index(marker) for marker in ("begin\n  execute immediate", "GRANT ", "connect "))
+    assert last_prompt < first_change
+    assert script.index("accept ldb_user_pwd_1") < script.index("accept ldb_link_pwd_1")
 
 
 def test_bootstrap_script_follows_the_sqlplus_contract_of_the_pending_ddl_file():

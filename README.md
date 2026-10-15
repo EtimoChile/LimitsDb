@@ -274,12 +274,12 @@ The script:
 
 - stops at the first error (`whenever sqlerror exit failure`) and ends with a
   `LimitsDb: OK` banner on success;
-- contains no passwords: it prompts for them (hidden input);
+- contains no passwords: it prompts for all of them (hidden input) at its start,
+  before it changes anything;
 - can be rerun: each object is created in a PL/SQL block that ignores only its
   own "already exists" error, and an existing database link is skipped;
 - creates the database link after reconnecting as the runtime user, who owns it.
-  It asks for that user's password once, when it creates the user, and reuses it
-  to reconnect. An existing user keeps its password, so the one entered must
+  It asks for that user's password once and reuses it to reconnect. An existing user keeps its password, so the one entered must
   match it; the script says so before it reconnects.
 
 Run it in SQL*Plus connected as a user with administrative privileges:

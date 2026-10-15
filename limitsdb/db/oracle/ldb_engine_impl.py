@@ -1168,6 +1168,18 @@ end;"""
         return created
 
     @staticmethod
+    def script_password_prompts(
+        users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
+    ) -> None:
+        literal = OracleEngine._quote_literal
+        for position, user in enumerate(users, start=1):
+            prompt = f"Password for user {user.name} (set if it does not exist yet; must match it if it does): "
+            ddl_sink(f"accept ldb_user_pwd_{position} char prompt {literal(prompt)} hide")
+        for position, link in enumerate(links, start=1):
+            prompt = f"Password of {link.username} for database link {link.name}: "
+            ddl_sink(f"accept ldb_link_pwd_{position} char prompt {literal(prompt)} hide")
+
+    @staticmethod
     def ensure_database_links(
         conn: oracledb.Connection | None,
         links: Sequence[DatabaseLinkDefinition],
@@ -1323,8 +1335,6 @@ end;"""
         for position, user in enumerate(users, start=1):
             name = fmt(user.name)
             variable = f"ldb_user_pwd_{position}"
-            prompt = f"Password for user {user.name} (set if it does not exist yet; must match it if it does): "
-            sink(f"accept {variable} char prompt {literal(prompt)} hide")
             sink(OracleEngine._existing_user_notice(user.name))
             sink(OracleEngine._tolerant_block(OracleEngine._create_user_sql(user, f'"&{variable}"'), (-1920,)))
             admin_option_roles = {fmt(role_name) for role_name in user.roles_with_admin_option}
@@ -1374,7 +1384,7 @@ end;"""
         literal = OracleEngine._quote_literal
         runtime_username, runtime_dsn = connect_as
         # The runtime user is the one ensure_users scripted first in this same script: its password was already
-        # asked once (ldb_user_pwd_1), so the DBA is never asked twice for it.
+        # asked once (ldb_user_pwd_1) by script_password_prompts, so the DBA is never asked twice for it.
         sink(
             f"prompt Connecting as {runtime_username}. If this fails with ORA-01017, the user already existed with "
             "a password different from the one entered above."
@@ -1386,8 +1396,6 @@ end;"""
                 f"CREATE DATABASE LINK {fmt(link.name)} CONNECT TO {fmt(link.username)} "
                 f'IDENTIFIED BY "&{variable}" USING {literal(link.dsn)}'
             ).replace("'", "''")
-            prompt = f"Password of {link.username} for database link {link.name}: "
-            sink(f"accept {variable} char prompt {literal(prompt)} hide")
             sink(
                 "declare n number;\n"
                 "begin\n"

@@ -121,6 +121,7 @@ def test_ldb_impl_run_cli_creates_database_objects(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(ldb_impl, "_parse_args", lambda: args)
     engine = SimpleNamespace(
         REQUIRED_SYSTEM_PRIVILEGES=("CREATE SESSION",),
+        script_password_prompts=lambda *a, **k: None,
         ensure_roles=lambda *a, **k: ["role"],
         ensure_users=lambda *a, **k: ["user"],
         ensure_tables=lambda *a, **k: ["table"],
@@ -217,6 +218,7 @@ def _run_impl_with_admin_absent(
 
     engine = SimpleNamespace(
         REQUIRED_SYSTEM_PRIVILEGES=("CREATE SESSION",),
+        script_password_prompts=lambda *a, **k: None,
         ensure_roles=record("roles", ["role"]),
         ensure_users=record("users", ["user"]),
         ensure_tables=record("tables", ["table"]),
@@ -351,6 +353,7 @@ def test_ldb_impl_run_cli_logs_when_all_objects_already_exist(monkeypatch: pytes
     )
     engine = SimpleNamespace(
         REQUIRED_SYSTEM_PRIVILEGES=(),
+        script_password_prompts=lambda *a, **k: None,
         ensure_roles=lambda *a, **k: [],
         ensure_users=lambda *a, **k: [],
         ensure_tables=lambda *a, **k: [],

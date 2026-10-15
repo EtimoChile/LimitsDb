@@ -345,6 +345,18 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def script_password_prompts(
+        users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
+    ) -> None:
+        """Hand ``ddl_sink`` the fragments that ask the DBA for every password a script needs, hidden.
+
+        A script calls it first, so all passwords are asked up front. The users' passwords are asked in
+        order, then the links'; the fragments of ``ensure_users`` and ``ensure_database_links`` only use
+        the answers. Nothing is read from the database."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def ensure_database_links(
         conn: Any,
         links: Sequence[DatabaseLinkDefinition],
@@ -356,8 +368,8 @@ class DatabaseEngine(ABC):
 
         ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``, plus ``connect_as``, the
         (username, dsn) of the runtime user that must own the links: the fragments reconnect as that
-        user with the password already asked by ``ensure_users`` for it in the same script (it must be
-        the first user), and prompt for the password of each link."""
+        user with the password already asked by ``script_password_prompts`` for it in the same script (it must be
+        the first user), and use the password of each link asked there."""
         pass
 
     @staticmethod

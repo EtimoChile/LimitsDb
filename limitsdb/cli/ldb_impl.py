@@ -192,6 +192,7 @@ def run_cli() -> None:
         runtime: tuple[str, str],
     ) -> Callable[[DdlSink], None]:
         def steps(sink: DdlSink) -> None:
+            engine.script_password_prompts([user], [link], ddl_sink=sink)
             engine.ensure_roles(None, roles, ddl_sink=sink)
             engine.ensure_users(None, [user], ddl_sink=sink)
             engine.ensure_tables(None, tables, ddl_sink=sink)
