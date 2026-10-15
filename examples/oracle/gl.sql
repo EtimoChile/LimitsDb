@@ -226,8 +226,8 @@ define P_DISPATCHES   = 150000
 define P_DSP_LINES    = 300000
 
 -- Date range for INV/DSP
-define P_DATE_FROM = "date '2024-01-01'"
-define P_DATE_TO   = "date '2026-02-01'"
+define P_DATE_FROM = "add_months(trunc(sysdate), -24)"
+define P_DATE_TO   = "trunc(sysdate)"
 
 prompt === Disable FK constraints (GL) ===
 begin

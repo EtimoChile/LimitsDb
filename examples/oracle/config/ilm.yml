@@ -1,0 +1,84 @@
+# ILM contract for the test model created by examples/oracle/gl.sql
+#
+# Relationships inferred from the model's foreign keys:
+#
+#   INV_HEAD (INV_ID)  <-- INV_DET (INV_ID)
+#   DSP_HEAD (DSP_ID)  <-- DSP_DET (DSP_ID)
+#   INV_DET  (IND_ID)  <-- DSP_DET (IND_ID)
+#
+# CST_MASTER and PRO_MASTER are reference tables without a date column, so they
+# are not managed by ILM.
+#
+# Retention is defined on the parent tables only; child tables inherit the
+# conditions of every parent listed in referencing_tables.
+#
+# Status codes in the generated data:
+#   INV_HEAD.INV_STS: N = new, P = paid, C = cancelled, A = active
+#   DSP_HEAD.DSP_STS: N = new, S = shipped, D = delivered
+
+tables:
+  # --- Invoices ---------------------------------------------------------
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: INV_HEAD
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true # Paid: short in source, long in history
+        retain_months_source: 3
+        retain_months_history: 12
+        purge_date_expr: "@INV_STS_DATE"
+        additional_filter_expr: "@INV_STS='P'"
+      - is_active: true # Cancelled: kept briefly, short history
+        retain_months_source: 1
+        retain_months_history: 6
+        purge_date_expr: "@INV_STS_DATE"
+        additional_filter_expr: "@INV_STS='C'"
+      - is_active: true # New / active: kept longer in source, no history
+        retain_months_source: 12
+        retain_months_history: 0
+        purge_date_expr: "@INV_DATE"
+        additional_filter_expr: "@INV_STS IN ('N','A')"
+
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: INV_DET
+    frecuency: D
+    hint_expr: full(A) full(B) use_hash(A B)
+    history_hint_expr: full(A)
+    referencing_tables: INV_HEAD B
+    join_expr: "@ JOIN GL.INV_HEAD B ON B.INV_ID=A.INV_ID"
+
+  # --- Dispatches -------------------------------------------------------
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: DSP_HEAD
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true # Delivered: short in source, long in history
+        retain_months_source: 2
+        retain_months_history: 12
+        purge_date_expr: "@DSP_STS_DATE"
+        additional_filter_expr: "@DSP_STS='D'"
+      - is_active: true # Shipped: in transit, kept a bit longer, short history
+        retain_months_source: 4
+        retain_months_history: 6
+        purge_date_expr: "@DSP_STS_DATE"
+        additional_filter_expr: "@DSP_STS='S'"
+      - is_active: true # New: pending, kept in source only
+        retain_months_source: 12
+        retain_months_history: 0
+        purge_date_expr: "@DSP_DATE"
+        additional_filter_expr: "@DSP_STS='N'"
+
+  # DSP_DET references DSP_HEAD directly and INV_HEAD through INV_DET, so it
+  # inherits the conditions of all three parents.
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: DSP_DET
+    frecuency: D
+    hint_expr: full(A) full(B) full(C) full(D) use_hash(A B C D)
+    history_hint_expr: full(A)
+    referencing_tables: DSP_HEAD B, INV_DET C, INV_HEAD D
+    join_expr: "@ JOIN GL.DSP_HEAD B ON B.DSP_ID=A.DSP_ID @ JOIN GL.INV_DET C ON C.IND_ID=A.IND_ID @ JOIN GL.INV_HEAD D ON D.INV_ID=C.INV_ID"

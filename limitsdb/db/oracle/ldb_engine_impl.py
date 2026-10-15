@@ -721,7 +721,7 @@ end;"""
                 admin_option_roles = set(OracleEngine._format_identifier(r) for r in user.roles_with_admin_option)
                 for role in user.roles:
                     fmttd_role_name = OracleEngine._format_identifier(role)
-                    requires_admin_option = role in admin_option_roles
+                    requires_admin_option = fmttd_role_name in admin_option_roles
                     has_role = OracleEngine._user_has_role(cursor, user.name, role)
                     if requires_admin_option:
                         if not has_role or not OracleEngine._user_has_role_with_admin_option(cursor, user.name, role):
@@ -1314,7 +1314,7 @@ end;"""
     @staticmethod
     def _existing_user_notice(username: str) -> str:
         """PL/SQL block that warns when the user already exists, so its password stays unchanged."""
-        name = OracleEngine.get_identifier_str(username)
+        name = username
         message = f"User {name} already exists: its password was not changed. The runtime password must match it."
         return (
             "declare n number;\nbegin\n"
@@ -1349,7 +1349,7 @@ end;"""
                 sink("column ldb_ts new_value ldb_ts noprint")
                 sink(
                     "select nvl((select default_tablespace from dba_users where username = "
-                    f"{literal(OracleEngine.get_identifier_str(user.name))}), (select property_value from "
+                    f"{literal(user.name)}),(select property_value from "
                     "database_properties where property_name = 'DEFAULT_PERMANENT_TABLESPACE')) ldb_ts from dual;"
                 )
                 sink(f"ALTER USER {name} QUOTA UNLIMITED ON &ldb_ts;")
@@ -1568,12 +1568,12 @@ end;"""
                AND tablespace_name = :tablespace
             """,
             username=username,
-            tablespace=tablespace_name,
+            tablespace=tablespace,
         )
         row = cursor.fetchone()
         if row and row[0] == -1:
             return False
-        sql = f"ALTER USER {username} QUOTA UNLIMITED ON {tablespace_name}"
+        sql = f"ALTER USER {OracleEngine._format_identifier(username)} QUOTA UNLIMITED ON {tablespace_name}"
         OracleEngine._execute_ddl(cursor.connection, cursor, sql)
         return True
 

@@ -165,3 +165,20 @@ def test_error_status_persistence_failure_is_chained_as_execution_error(monkeypa
 
     assert caught.value.__cause__ is cause
     assert connection.cursor_instance.closed is True
+
+
+def test_ensure_unlimited_quota_quotes_a_lowercase_user_and_binds_the_dictionary_tablespace(monkeypatch):
+    # Spec: identifiers are handled in data-dictionary form — SQL formats them, dictionary binds do not
+    from unittest.mock import MagicMock
+
+    from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    executed: list[str] = []
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda conn, cur, sql: executed.append(sql))
+
+    assert OracleEngine._ensure_unlimited_quota(cursor, "ldb", "USERS") is True
+
+    assert executed == ['ALTER USER "ldb" QUOTA UNLIMITED ON users']
+    assert cursor.execute.call_args.kwargs == {"username": "ldb", "tablespace": "USERS"}
