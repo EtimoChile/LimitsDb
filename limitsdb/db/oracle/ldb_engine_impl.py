@@ -228,6 +228,9 @@ class OracleEngine(DatabaseEngine):
         Returns:
             An active oracledb.Connection."""
         user, password, dsn = get_effective_credentials(config, admin=admin, env=env)
+        if not admin:
+            # The runtime user is created from its dictionary name, so the login must quote it the same way
+            user = OracleEngine._format_identifier(user)
         try:
             connection = oracledb.connect(user=user, password=password, dsn=dsn)
             OracleEngine._register_connection_env(connection, env)
