@@ -48,7 +48,7 @@ that raises them, per `docs/exception-handling.md`.
 **`test_config_overlay.py`** covers exclusively the invariants of
 `docs/configuration-contract.md`: layer precedence, typed views
 (`ExecutionConfig`, `ConnectionConfig`, `AdministrationConfig`, `RuntimeContext`),
-`DRY_RUN → PREVIEW` normalization, YAML-only persistent keys, and rejection of
+rejection of the removed `DRY_RUN` mode, YAML-only persistent keys, and rejection of
 unknown keys. It does not cover credentials or execution modes.
 
 **`test_run_ilm.py`** covers two sub-contracts of README § *Run ILM* that coexist

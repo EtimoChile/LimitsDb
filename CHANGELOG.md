@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- **Breaking:** the `DRY_RUN` mode, a legacy alias of `PREVIEW`, is removed; use `--mode PREVIEW`.
 - Without source admin credentials, `ldb-run` no longer warns on every run that the source grants are not applied; only privileges the runtime user really lacks are reported.
 - `ldb-run --mode PREPARE` no longer writes table grants when the runtime user does not hold the role (they cannot fix it): it reports that the role is not enabled, points to `ldb-impl` (which grants it again) and stops with exit code 1 without checking anything else.
 - **Breaking for custom engines:** `DatabaseEngine` no longer has `generate_table_structure_script`, `execute_ddl_statements`, `generate_table_privilege_script` or `generate_bootstrap_script`. Every `ensure_*` method now takes an optional keyword `ddl_sink`; when given, the engine hands it the DDL instead of executing it (a `None` connection then means nothing is read from the database). `ensure_table_structure` and `ensure_table_privileges` also take `ddl_failures`: with it, statements that fail are collected with their error and the rest still run. `ensure_table_structure` and `ensure_table_privileges` no longer return the generated statements.

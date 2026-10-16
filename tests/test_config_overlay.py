@@ -391,22 +391,20 @@ def test_read_env_overrides_maps_registered_variables_and_ignores_unregistered(
 # ---------------------------------------------------------------------------
 
 
-def test_dry_run_mode_is_normalized_to_preview():
-    # Spec: docs/configuration-contract.md — DRY_RUN is a deprecated alias for PREVIEW
-    # Given: a config built with the legacy DRY_RUN mode name
-    # When: the Config is constructed
-    cfg = ldb_params_config.Config.from_dict(
-        {
-            "schema": "s",
-            "mode": "DRY_RUN",
-            "source_dsn": "dsn",
-            "source_username": "user",
-            "source_password": "secret",
-        }
-    )
-
-    # Then: mode is silently normalised to PREVIEW
-    assert cfg.mode == "PREVIEW"
+def test_removed_dry_run_mode_is_rejected():
+    # Spec: docs/configuration-contract.md — DRY_RUN is no longer a mode
+    # Given: a config built with the removed DRY_RUN mode name
+    # When / Then: the Config is rejected as an invalid mode
+    with pytest.raises(ldb_params_config.ValidationError, match="invalid mode"):
+        ldb_params_config.Config.from_dict(
+            {
+                "schema": "s",
+                "mode": "DRY_RUN",
+                "source_dsn": "dsn",
+                "source_username": "user",
+                "source_password": "secret",
+            }
+        )
 
 
 def test_unknown_config_keys_fail_closed():
@@ -424,7 +422,7 @@ def test_to_dict_stays_flat_and_excludes_typed_views():
     cfg = ldb_params_config.Config.from_dict(
         {
             "schema": "s",
-            "mode": "DRY_RUN",
+            "mode": "PREVIEW",
             "source_dsn": "dsn",
             "source_username": "user",
             "source_password": "secret",

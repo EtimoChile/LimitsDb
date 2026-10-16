@@ -86,7 +86,7 @@ entry.
 
 ## Required invariants
 
-- `DRY_RUN` continues to normalize to `PREVIEW`.
+- `DRY_RUN` is no longer a mode; it is rejected like any unknown mode.
 - `SCRIPT` continues to enable script generation.
 - `PLAN` remains usable without database credentials.
 - Connection validation remains action- and mode-sensitive.

@@ -23,7 +23,6 @@ from limitsdb.core.ldb_utils import resolve_schema_file  # markers for Annotated
 logger = get_logger("params_config")
 
 VALID_MODES: tuple[str, ...] = ("VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE")
-MODE_ALIASES: dict[str, str] = {"DRY_RUN": "PREVIEW"}
 MODES_REQUIRING_CONNECTIONS: set[str] = {"VALIDATE", "PREPARE", "PREVIEW", "SCRIPT", "EXECUTE"}
 FILE_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"use_added_columns", "add_ldb_columns"})
 
@@ -36,8 +35,7 @@ SUPPORTED_DATABASE_ENGINES: tuple[DatabaseEngineName, ...] = ("oracle",)
 
 
 def _normalize_mode(value: str) -> str:
-    normalized = (value or "").upper()
-    return MODE_ALIASES.get(normalized, normalized)
+    return (value or "").upper()
 
 
 @dataclass(frozen=True)
@@ -118,7 +116,7 @@ class Config:
         Env("LDB_ACTION"),
     ] = "SOURCE_ILM"
     mode: Annotated[
-        Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"],
+        Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"],
         Help(
             "Runtime mode: VALIDATE config/credentials, "
             "PREPARE apply grants and DDL without running ILM, "

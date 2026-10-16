@@ -526,7 +526,7 @@ Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
 # action: "SOURCE_ILM"  # ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)
-# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE (PREVIEW mirrors legacy DRY_RUN)
+# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE
 # chunk_size: 100000    # Rows per chunk when processing large tables
 # use_added_columns: True  # Populate derived columns in history tables
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables

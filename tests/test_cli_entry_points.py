@@ -39,10 +39,10 @@ def test_argparser_requires_schema_and_rejects_unsupported_engine(monkeypatch: p
     with pytest.raises(SystemExit):
         parser.parse_args([])
 
-    # When: DRY_RUN is passed as --mode
-    parsed = parser.parse_args(["--schema", "s", "--mode", "DRY_RUN"])
-    # Then: it is accepted as a valid choice
-    assert parsed.mode == "DRY_RUN"
+    # When: the removed DRY_RUN is passed as --mode
+    # Then: parser exits
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--schema", "s", "--mode", "DRY_RUN"])
 
     # When: oracle is given as --db-engine
     # Then: it is accepted
