@@ -392,6 +392,24 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_missing_table_privileges(
+        conn: Any, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[tuple[str, str, str]]:
+        """Return the ``(owner, table, privilege)`` the role lacks, read with the connection's own user.
+
+        Needs no admin credentials: it reports what the connected user receives through the role, so it
+        also answers what a runtime user can do. A role that is not enabled for the user grants nothing,
+        so every privilege is then reported missing. Nothing is granted or changed."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def is_role_enabled(conn: Any, role: str) -> bool:
+        """Return whether the role is enabled for the connected user (granted to it and active in the session)."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def generate_table_privilege_script(
         role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
     ) -> list[str]:

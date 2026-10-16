@@ -1282,6 +1282,48 @@ end;"""
         return granted
 
     @staticmethod
+    def get_missing_table_privileges(
+        conn: oracledb.Connection, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[tuple[str, str, str]]:
+        cursor: oracledb.Cursor | None = None
+        missing: list[tuple[str, str, str]] = []
+        try:
+            cursor = conn.cursor()
+            # A role that is not enabled grants nothing, and all_tab_privs would not show it either
+            enabled = OracleEngine._role_enabled(cursor, role)
+            for owner, table_name in tables:
+                for privilege in privileges:
+                    privilege_upper = privilege.upper()
+                    if not enabled or not OracleEngine._role_has_table_priv(
+                        cursor, role, owner, table_name, privilege_upper
+                    ):
+                        missing.append((owner, table_name, privilege_upper))
+        except Exception as exc:
+            logger.critical("Failed to read table privileges.", exc_info=True)
+            raise ExecutionError("Failed to read Oracle table privileges") from exc
+        finally:
+            if cursor:
+                cursor.close()
+        return missing
+
+    @staticmethod
+    def is_role_enabled(conn: oracledb.Connection, role: str) -> bool:
+        cursor: oracledb.Cursor | None = None
+        try:
+            cursor = conn.cursor()
+            return OracleEngine._role_enabled(cursor, role)
+        except Exception as exc:
+            logger.critical("Failed to read the enabled roles.", exc_info=True)
+            raise ExecutionError("Failed to read the Oracle session roles") from exc
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def _role_enabled(cursor: oracledb.Cursor, role: str) -> bool:
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM session_roles WHERE role = :1", [role])
+
+    @staticmethod
     def _create_sequence_sql(sequence: SequenceDefinition) -> str:
         fmttd_owner = OracleEngine._format_identifier(sequence.owner)
         fmttd_sequence_name = OracleEngine._format_identifier(sequence.name)

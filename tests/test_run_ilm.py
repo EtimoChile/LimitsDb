@@ -1253,6 +1253,8 @@ class _HistoryDdlEngine:
         self.admin_applied: list[str] = []
         self.grants_attempted: list[str] = []
         self.source_granted: list[str] = []
+        self.missing_privileges: dict[str, list[tuple[str, str, str]]] = {}
+        self.enabled_roles: set[str] | None = None  # None: every role is enabled
         self.structure_reads: list[tuple[str | None, str | None]] = []
 
     def get_connection(self, config, *, admin=False, env=None):
@@ -1292,6 +1294,12 @@ class _HistoryDdlEngine:
 
     def get_table_columns(self, conn, owner, table_name):
         return [], {}
+
+    def is_role_enabled(self, conn, role):
+        return self.enabled_roles is None or role in self.enabled_roles
+
+    def get_missing_table_privileges(self, conn, role, tables, privileges):
+        return list(self.missing_privileges.get(role, []))
 
     def _emit(self, conn, statements, ddl_sink, ddl_failures):
         """Send the statements to the sink, or apply them like a real engine would over ``conn``."""
@@ -1952,49 +1960,118 @@ def test_prepare_applies_grants_and_history_ddl_without_running_ilm(monkeypatch:
     assert ilm_runs == []
 
 
-def _run_prepare_without_source_admin(monkeypatch: pytest.MonkeyPatch, tmp_path, *, visible: bool):
-    """Run PREPARE without source admin credentials over one table that the runtime user sees or not."""
+def _run_prepare_without_source_admin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, *, missing: list[tuple[str, str, str]]
+):
+    """Run PREPARE without source admin credentials where the runtime user lacks the given privileges."""
     engine = _HistoryDdlEngine()
+    engine.missing_privileges["LDB_SOURCE_ROLE"] = missing
     _grant_targets(monkeypatch)
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
-    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
-    tables = _make_tables_config("T1")
-    tables[("SRC", "T1")]["columns_metadata"] = {"ID": SimpleNamespace(id=1)} if visible else {}
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: tables)
     pending_dir = tmp_path / "pending"
     config = _history_ddl_config(mode="PREPARE", source_admin=False, ddl_pending_dir=str(pending_dir))
-    with pytest.raises(SystemExit):
-        ldb_runner.ldb_run(config)
-    return engine, recorder, pending_dir
+    rc = _run_ldb(monkeypatch, config, engine)
+    return rc, engine, recorder, pending_dir
 
 
-def test_prepare_without_source_admin_writes_grants_only_for_tables_it_cannot_see(
+def test_prepare_without_source_admin_writes_only_the_grants_that_are_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    # Spec: README > Run ILM > --mode PREPARE — without source admin credentials the source grants of the
-    # tables the runtime user cannot see go to a file for a DBA, and PREPARE says they must be applied.
-    # Given: PREPARE without source admin credentials over a table the runtime user cannot see
+    # Spec: README > Run ILM > --mode PREPARE — without source admin credentials the source grants the runtime
+    # user lacks through its role go to a file for a DBA, and PREPARE fails until they are applied.
+    # Given: PREPARE without source admin credentials where only DELETE is missing on SRC.T1
     # When: ldb-run executes
-    engine, recorder, pending_dir = _run_prepare_without_source_admin(monkeypatch, tmp_path, visible=False)
+    rc, engine, recorder, pending_dir = _run_prepare_without_source_admin(
+        monkeypatch, tmp_path, missing=[("SRC", "T1", "DELETE")]
+    )
 
-    # Then: nothing was granted over a source connection and the file holds the grants
+    # Then: the file holds that grant only, nothing was granted over a source connection and the run fails
+    source_file = _script_files(pending_dir)["source_grants"]
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in source_file
+    assert "GRANT SELECT" not in source_file
     assert engine.source_granted == []
-    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in _script_files(pending_dir)["source_grants"]
+    assert rc == 1
     assert any("a DBA must apply them" in m for m in recorder.messages["warning"])
+    assert any("SRC.T1 (DELETE)" in m for m in recorder.messages["error"])
 
 
-def test_prepare_without_source_admin_writes_no_grants_file_when_every_table_is_visible(
+def test_prepare_without_source_admin_writes_no_grants_file_when_nothing_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     # Spec: README > Run ILM > --mode PREPARE — a rerun after the grants were applied leaves no file behind
-    # Given: PREPARE without source admin credentials over a table the runtime user already sees
+    # Given: PREPARE without source admin credentials where the runtime user has every privilege
     # When: ldb-run executes
-    _, _, pending_dir = _run_prepare_without_source_admin(monkeypatch, tmp_path, visible=True)
+    rc, _, _, pending_dir = _run_prepare_without_source_admin(monkeypatch, tmp_path, missing=[])
 
-    # Then: no source grants file was written
+    # Then: no source grants file was written and PREPARE succeeds
     assert "source_grants" not in _script_files(pending_dir)
+    assert rc == 0
+
+
+def test_prepare_reports_a_role_that_is_not_enabled_for_the_runtime_user(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — a role granted but not active in the session gives no privilege
+    # Given: PREPARE where the source role is not enabled for the runtime user
+    engine = _HistoryDdlEngine()
+    engine.enabled_roles = {"LDB_HISTORY_ROLE"}
+    engine.missing_privileges["LDB_SOURCE_ROLE"] = [("SRC", "T1", "SELECT")]
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+
+    # When: ldb-run executes
+    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="PREPARE", ddl_pending_dir=str(tmp_path / "p")), engine)
+
+    # Then: the error names the role and PREPARE fails
+    assert rc == 1
+    assert any("role LDB_SOURCE_ROLE is not enabled" in m for m in recorder.messages["error"])
+
+
+def test_prepare_verifies_the_history_grants_with_the_runtime_history_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode PREPARE — after applying the history grants PREPARE confirms the runtime
+    # user receives them, and fails when it does not.
+    # Given: PREPARE with admin credentials where the history role still gives nothing to the runtime user
+    engine = _HistoryDdlEngine()
+    engine.missing_privileges["LDB_HISTORY_ROLE"] = [("HIST", "T1", "INSERT")]
+    _grant_targets(monkeypatch)
+
+    # When: ldb-run executes
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
+        engine,
+    )
+
+    # Then: PREPARE fails because the grant is not effective
+    assert rc == 1
+
+
+def test_validate_reports_missing_privileges_without_changing_anything(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode VALIDATE — VALIDATE reads the privileges the runtime users lack through
+    # their roles: missing ones on the action's own environment fail it, the other environment only warns.
+    # Given: a source run where both roles give nothing to their runtime users
+    engine = _HistoryDdlEngine()
+    engine.missing_privileges["LDB_SOURCE_ROLE"] = [("SRC", "T1", "SELECT")]
+    engine.missing_privileges["LDB_HISTORY_ROLE"] = [("HIST", "T1", "SELECT")]
+    runtime_conns = {"SOURCE": SimpleNamespace(), "HISTORY": SimpleNamespace()}
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+
+    # When: the privileges are validated
+    ok = ldb_runner._validate_privileges(
+        _history_ddl_config(mode="VALIDATE"),
+        engine,
+        runtime_conns,
+        _make_tables_config("T1"),  # type: ignore[arg-type]
+    )
+
+    # Then: validation fails on the source gap, the history gap is a warning and nothing was granted
+    assert ok is False
+    assert any("SOURCE runtime user lacks" in m for m in recorder.messages["error"])
+    assert any("HISTORY runtime user lacks" in m for m in recorder.messages["warning"])
+    assert engine.source_granted == [] and engine.admin_applied == []
 
 
 def test_prepare_fails_when_the_runtime_user_cannot_see_a_configured_table(monkeypatch: pytest.MonkeyPatch, tmp_path):

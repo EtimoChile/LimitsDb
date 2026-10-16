@@ -720,3 +720,73 @@ def test_table_privilege_script_grants_every_privilege_on_every_table_without_a_
         "GRANT SELECT ON owner.b TO ldb_role",
         "GRANT DELETE ON owner.b TO ldb_role",
     ]
+
+
+class _PrivilegeCursor:
+    """Cursor double answering the role and privilege lookups of a runtime user."""
+
+    def __init__(self, *, enabled_roles: set[str], granted: set[tuple[str, str, str]]) -> None:
+        self.enabled_roles = enabled_roles
+        self.granted = granted
+        self.executed: list[str] = []
+        self._row: tuple[int] | None = None
+        self.connection: object | None = None
+
+    def execute(self, sql: str, params=()) -> None:
+        self.executed.append(sql)
+        if "session_roles" in sql:
+            self._row = (1,) if params[0] in self.enabled_roles else None
+        else:
+            _, owner, table_name, privilege = params
+            self._row = (1,) if (owner, table_name, privilege) in self.granted else None
+
+    def fetchone(self):
+        return self._row
+
+    def close(self) -> None:
+        pass
+
+
+class _PrivilegeConnection:
+    def __init__(self, cursor: _PrivilegeCursor) -> None:
+        self._cursor = cursor
+        cursor.connection = self
+
+    def cursor(self) -> _PrivilegeCursor:
+        return self._cursor
+
+
+def test_missing_table_privileges_lists_what_the_role_does_not_give_the_runtime_user(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > --mode PREPARE — the privileges a runtime user receives through its role are
+    # read with its own connection, so no admin credentials are needed.
+    # Given: a role that gives SELECT but not DELETE on a table whose name is lowercase in the dictionary
+    monkeypatch.setattr(OracleEngine, "_admin_connections", set())  # a runtime connection
+    cursor = _PrivilegeCursor(enabled_roles={"LDB_ROLE"}, granted={("gl", "inv", "SELECT")})
+
+    # When: the missing privileges are requested
+    missing = OracleEngine.get_missing_table_privileges(
+        _PrivilegeConnection(cursor),
+        "LDB_ROLE",
+        [("gl", "inv")],
+        ["select", "delete"],  # type: ignore[arg-type]
+    )
+
+    # Then: only DELETE is missing, and the dictionary names were used as given
+    assert missing == [("gl", "inv", "DELETE")]
+    assert not any("dba_" in sql for sql in cursor.executed)
+
+
+def test_missing_table_privileges_reports_everything_when_the_role_is_not_enabled():
+    # Spec: README > Run ILM > --mode PREPARE — a role granted but not active in the session gives nothing
+    # Given: a role that is not enabled although its grants exist
+    cursor = _PrivilegeCursor(enabled_roles=set(), granted={("GL", "INV", "SELECT")})
+
+    # When: privileges and role state are requested
+    connection = _PrivilegeConnection(cursor)
+    missing = OracleEngine.get_missing_table_privileges(connection, "LDB_ROLE", [("GL", "INV")], ["SELECT"])  # type: ignore[arg-type]
+
+    # Then: the privilege counts as missing and the role is reported as not enabled
+    assert missing == [("GL", "INV", "SELECT")]
+    assert OracleEngine.is_role_enabled(connection, "LDB_ROLE") is False  # type: ignore[arg-type]

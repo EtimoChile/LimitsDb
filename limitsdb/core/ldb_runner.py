@@ -1,3 +1,4 @@
+import logging
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from operator import attrgetter
 from typing import Any, Literal, TypedDict, cast
@@ -218,6 +219,7 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
     ok = True
     connections: list[Any] = []
     primary_conn: Any | None = None
+    runtime_conns: dict[str, Any] = {}
     required_specs: list[tuple[str, bool, Literal["SOURCE", "HISTORY"] | None]] = []
     optional_specs: list[tuple[str, bool, Literal["SOURCE", "HISTORY"] | None]] = []
     primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
@@ -238,6 +240,8 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
             connections.append(conn)
             if description == f"{primary_env} runtime":
                 primary_conn = conn
+            if not admin:
+                runtime_conns[env or primary_env] = conn
     for description, admin, env in optional_specs:
         if not _credentials_present(config, admin=admin, env=env):
             logger.info("%s: credentials not provided; skipping.", description.upper())
@@ -245,6 +249,8 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
         conn = _open_connection(config, engine, admin=admin, env=env, description=description.upper())
         if conn:
             connections.append(conn)
+            if not admin:
+                runtime_conns[env or primary_env] = conn
     try:
         if primary_conn:
             process_date = engine.get_system_date(primary_conn).strftime("%Y%m%d")
@@ -252,6 +258,7 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
                 tables_config = process_tables_cnf(primary_conn, config, engine, process_date)
                 logger.info("Configuration ready: %d table(s) evaluated.", len(tables_config))
                 _log_where_predicates(tables_config)
+                ok = _validate_privileges(config, engine, runtime_conns, tables_config) and ok
             except Exception:
                 logger.error("Failed to process ILM configuration.", exc_info=True)
                 ok = False
@@ -261,6 +268,40 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
         for conn in connections:
             engine.close_connection(conn)
     return 0 if ok else 1
+
+
+def _validate_privileges(
+    config: Config, engine: DatabaseEngine, runtime_conns: dict[str, Any], tables_config: TablesConfig
+) -> bool:
+    """Report, read-only, the privileges the runtime users lack through their roles (DEC-033).
+
+    Missing privileges on the action's own environment fail the validation; those on the other one are
+    warnings, since PREPARE creates the history objects. Returns False when the validation must fail."""
+    targets = {
+        "SOURCE": sorted(tables_config),
+        "HISTORY": sorted({(cnf["conds"][0]["history_owner"], key[1]) for key, cnf in tables_config.items()}),
+    }
+    primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
+    ok = True
+    for env, conn in runtime_conns.items():
+        level = logging.ERROR if env == primary_env else logging.WARNING
+        try:
+            missing = _check_role_privileges(
+                config,
+                engine,
+                conn,
+                cast(Literal["SOURCE", "HISTORY"], env),
+                targets[env],
+                level,
+            )
+        except Exception:
+            logger.error("Failed to check the %s privileges of the runtime user.", env, exc_info=True)
+            return False
+        if missing and env == primary_env:
+            ok = False
+    if ok:
+        logger.info("Privileges checked; run --mode PREPARE to apply any that are missing.")
+    return ok
 
 
 def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDefinition:
@@ -612,16 +653,68 @@ def _write_script_ddl_files(
         )
 
 
-def _write_source_grants_file(
-    config: Config, engine: DatabaseEngine, source_tables: list[tuple[str, str]], origin: str
-) -> None:
-    """Write the source table grants to ``ddl_pending_dir`` for a DBA, since no source admin credentials exist."""
+Privilege = tuple[str, str, str]
+
+
+def _check_role_privileges(
+    config: Config,
+    engine: DatabaseEngine,
+    connection: Any,
+    env: Literal["SOURCE", "HISTORY"],
+    tables: list[tuple[str, str]],
+    level: int,
+) -> list[Privilege]:
+    """Return the table privileges the runtime user does not receive through the environment's role.
+
+    Reads only with the runtime connection, so it needs no admin credentials (DEC-033). A role that is not
+    enabled for the user gives nothing; both findings are logged at ``level``."""
+    if not tables:
+        return []
+    role = _app_role(config, env)
+    emit = logger.error if level >= logging.ERROR else logger.warning
+    if not engine.is_role_enabled(connection, role):
+        emit(
+            "%s role %s is not enabled for the runtime user: it is not granted to it or is not a default role.",
+            env,
+            role,
+        )
+    missing = engine.get_missing_table_privileges(connection, role, tables, _TABLE_PRIVILEGES)
+    if missing:
+        by_table: dict[tuple[str, str], list[str]] = {}
+        for owner, table_name, privilege in missing:
+            by_table.setdefault((owner, table_name), []).append(privilege)
+        emit(
+            "%s runtime user lacks privileges through role %s: %s.",
+            env,
+            role,
+            "; ".join(f"{owner}.{name} ({', '.join(privs)})" for (owner, name), privs in by_table.items()),
+        )
+    return missing
+
+
+def _verify_history_privileges(
+    config: Config, engine: DatabaseEngine, tables: list[tuple[str, str]], level: int = logging.ERROR
+) -> list[Privilege]:
+    """Check the history grants over the runtime HISTORY connection, once the objects and grants should exist."""
+    if not tables or not _credentials_present(config, admin=False, env="HISTORY"):
+        return []
+    history_connection = engine.get_connection(config, admin=False, env="HISTORY")
+    try:
+        return _check_role_privileges(config, engine, history_connection, "HISTORY", tables, level)
+    finally:
+        engine.close_connection(history_connection)
+
+
+def _write_source_grants_file(config: Config, engine: DatabaseEngine, missing: list[Privilege], origin: str) -> None:
+    """Write the missing source table grants to ``ddl_pending_dir`` for a DBA (no source admin credentials)."""
+    by_privilege: dict[str, list[tuple[str, str]]] = {}
+    for owner, table_name, privilege in missing:
+        by_privilege.setdefault(privilege, []).append((owner, table_name))
 
     def produce(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
         assert ddl_sink is not None
-        engine.ensure_table_privileges(
-            None, _app_role(config, "SOURCE"), source_tables, _TABLE_PRIVILEGES, ddl_sink=ddl_sink
-        )
+        for privilege, tables in by_privilege.items():
+            engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, (privilege,), ddl_sink=ddl_sink)
 
     deliver_ddl(
         config,
@@ -629,10 +722,10 @@ def _write_source_grants_file(
         destination="file",
         env="SOURCE",
         file_stem="source_grants",
-        description=f"source table grants generated by {origin}.",
+        description=f"missing source table grants found by {origin}.",
     )
     logger.warning(
-        "Source admin credentials are absent: the source table grants were written to the pending file; "
+        "Source admin credentials are absent: the missing source table grants were written to the pending file; "
         "a DBA must apply them and PREPARE must be rerun."
     )
 
@@ -642,17 +735,23 @@ def _invisible_tables(tables_config: TablesConfig) -> list[tuple[str, str]]:
     return sorted(key for key, cnf in tables_config.items() if cnf.get("columns_metadata") == {})
 
 
-def _prepare_result(tables_config: TablesConfig) -> int:
-    """Return PREPARE's exit code: 1 when the runtime user still cannot see a configured table (DEC-032)."""
+def _prepare_result(tables_config: TablesConfig, missing: list[Privilege]) -> int:
+    """Return PREPARE's exit code: 1 when a configured table or privilege is still out of the runtime user's reach."""
     invisible = [f"{owner}.{name}" for owner, name in _invisible_tables(tables_config)]
-    if not invisible:
+    if not invisible and not missing:
         logger.info("PREPARE completed: grants and history objects are in place.")
         return 0
-    logger.error(
-        "PREPARE incomplete: the runtime user cannot see %s (the table does not exist or SELECT is not granted). "
-        "Apply the pending grants and rerun PREPARE.",
-        ", ".join(invisible),
-    )
+    if invisible:
+        logger.error(
+            "PREPARE incomplete: the runtime user cannot see %s (the table does not exist or SELECT is not "
+            "granted). Apply the pending grants and rerun PREPARE.",
+            ", ".join(invisible),
+        )
+    if missing:
+        logger.error(
+            "PREPARE incomplete: %d table privilege(s) are still missing. Rerun PREPARE after they are applied.",
+            len(missing),
+        )
     return 1
 
 
@@ -1079,20 +1178,28 @@ def ldb_run(config: Config) -> None:
                 engine.close_connection(source_admin_priv_conn)
             source_grants_applied = True
         elif config.execution.mode == "PREPARE":
-            pass  # without source admin credentials PREPARE writes grants only for the tables it cannot see, below
+            pass  # without source admin credentials PREPARE writes the grants that are missing, below
         elif config.execution.action == "SOURCE_ILM" and source_tables_for_privileges:
             logger.warning(
                 "Source admin credentials are absent: the source table grants are not applied%s, so tables not yet "
                 "granted to the runtime user are skipped until a DBA applies them.",
                 " (they are only written to the pending file)" if config.execution.generate_script else "",
             )
+        source_missing: list[Privilege] = []
+        if config.execution.action == "SOURCE_ILM" and source_tables_for_privileges:
+            is_prepare = config.execution.mode == "PREPARE"
+            source_missing = _check_role_privileges(
+                config,
+                engine,
+                connection,
+                "SOURCE",
+                source_tables_for_privileges,
+                logging.ERROR if is_prepare else logging.WARNING,
+            )
+            if is_prepare and source_missing and not source_grants_applied:
+                _write_source_grants_file(config, engine, source_missing, "ldb-run --mode PREPARE")
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)
-        if config.execution.mode == "PREPARE" and config.execution.action == "SOURCE_ILM" and not source_grants_applied:
-            # Tables already visible are granted, so a rerun leaves them out of the file
-            not_visible = _invisible_tables(tables_config)
-            if not_visible:
-                _write_source_grants_file(config, engine, not_visible, "ldb-run --mode PREPARE")
         if config.execution.generate_script:
             _write_script_ddl_files(
                 config, engine, connection, tables_config, tables_conf_rows, source_grants_applied=source_grants_applied
@@ -1116,7 +1223,10 @@ def ldb_run(config: Config) -> None:
                 finally:
                     engine.close_connection(history_admin_priv_conn)
             if config.execution.mode == "PREPARE":
-                rc = _prepare_result(tables_config)
+                rc = _prepare_result(
+                    tables_config,
+                    source_missing + _verify_history_privileges(config, engine, history_tables_for_privileges),
+                )
             else:
                 rc = ldb_exec_ilm(config, tables_config, process_date, engine, connection)
         raise SystemExit(rc)
