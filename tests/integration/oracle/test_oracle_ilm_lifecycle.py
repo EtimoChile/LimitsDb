@@ -1940,7 +1940,8 @@ def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
         # Then: stdout holds only the ILM script, the files hold the DDL and grants, nothing was applied
         assert "CREATE TABLE" not in result.stdout.upper() and "GRANT " not in result.stdout.upper()
         (history_file,) = first_dir.glob("history_ddl_*.sql")
-        (source_file,) = first_dir.glob("source_grants_*.sql")
+        # And: with source admin credentials the source grants were applied, so no source grants file exists
+        assert not list(first_dir.glob("source_grants_*.sql"))
         assert "CREATE TABLE" in history_file.read_text(encoding="utf-8").upper()
         cursor = oracle_connection.cursor()
         try:
@@ -1951,7 +1952,6 @@ def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
 
             # When: the DBA runs the files with SQL*Plus
             _run_sql_file_in_oracle_container(container, history_file, admin_login=admin_login)
-            _run_sql_file_in_oracle_container(container, source_file, admin_login=admin_login)
 
             # Then: the history table and the grants exist
             cursor.execute(
