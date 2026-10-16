@@ -534,7 +534,9 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
         prev_rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
         engine.sql_block_run(conn, plsql_code)
         rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-        return (owner, table_name, Status.TABLE_END, prev_rows_processed, rows_processed, None, None)
+        finished = Status.TABLE_PREVIEW_END if config.execution.mode == "PREVIEW" else Status.TABLE_END
+        # The block resets the control counter at TSTART, so rows_processed already counts only this run
+        return (owner, table_name, finished, 0, rows_processed, None, None)
     except Exception as exc:
         sqlcode, message = _exception_details(exc)
         rows_processed = prev_rows_processed
@@ -543,7 +545,7 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
             try:
                 rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
                 engine.save_error_status(
-                    conn, config, owner, table_name, process_date, process_start, message, plsql_code
+                    conn, config, owner, table_name, process_date, process_start, message, plsql_code, rows_processed
                 )
             except Exception:
                 logger.critical("Failed to persist recovery evidence for %s.%s", owner, table_name, exc_info=True)
@@ -804,14 +806,17 @@ def get_next_ready_table(
         if table_cnf["skip"]:
             continue
         cd = tables_config[(owner, table_name)]["conds"][0]
-        if cd["ctl_status"] in [Status.SKIPPED, Status.TABLE_END] or (owner, table_name) in active_tables:
+        if (
+            cd["ctl_status"] in [Status.SKIPPED, Status.TABLE_END, Status.TABLE_PREVIEW_END]
+            or (owner, table_name) in active_tables
+        ):
             continue
         referencing_tables = table_cnf["referencing_tables"]
         all_referencing_tables_ready = True
         if referencing_tables:
             for ref_owner, ref_table in referencing_tables:
                 cdr = tables_config[(ref_owner, ref_table)]["conds"][0]
-                if cdr["ctl_status"] != Status.TABLE_END:
+                if cdr["ctl_status"] not in (Status.TABLE_END, Status.TABLE_PREVIEW_END):
                     all_referencing_tables_ready = False
                     break  # referencing table not TEND status
         if not all_referencing_tables_ready:
@@ -890,7 +895,14 @@ def ldb_exec_ilm(
                     break
             else:
                 break
-    if engine.all_status_tend(connection, tables_config, process_date):
+    if config.execution.mode == "PREVIEW":
+        all_done = all(
+            cnf["skip"] or cnf["conds"][0]["ctl_status"] in (Status.TABLE_END, Status.TABLE_PREVIEW_END)
+            for cnf in tables_config.values()
+        )
+    else:
+        all_done = engine.all_status_tend(connection, tables_config, process_date)
+    if all_done:
         if process_launched:
             logger.info("All tables processed successfully.")
         else:
@@ -942,7 +954,9 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
             key = (ldb_ctl_status_row["ctl_owner"], ldb_ctl_status_row["ctl_table_name"])
             if key in tables_config:
                 for cond in tables_config[key]["conds"]:
-                    cond["ctl_status"] = ldb_ctl_status_row["ctl_status"]
+                    # A PREVIEW leaves TPEND behind; it must not make a later run skip the table
+                    loaded = ldb_ctl_status_row["ctl_status"]
+                    cond["ctl_status"] = None if loaded == Status.TABLE_PREVIEW_END else loaded
     # Collect each table's active conditions along with inherited referencing-table conditions.
     # Track every expression needed to build the WHERE clause for the combined predicate across all contributing conditions.
     # Persist the resulting predicate in cond_expr so later stages can reuse it.

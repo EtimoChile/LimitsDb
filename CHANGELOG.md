@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Breaking:** rerun `ldb-impl` after upgrading. `ldb-run --mode PREVIEW` now ends each table with the new `ldb_ctl` status `TPEND` instead of `TEND`, so a PREVIEW no longer makes an `EXECUTE` of the same day skip the tables ("No tables to process"). The procedures `check_save_status` and `check_referencing_tables` (new optional parameter `p_preview`) must be reinstalled to know the status. The same reinstall fixes failed tables: they now report the rows really moved before the error (no longer doubled or stale) with the executed PL/SQL, and the error is propagated, so the run no longer logs a false "finished with status TEND".
+- The "rows processed" count logged per table no longer subtracts the previous run's counter (the block restarts it at `TSTART`), so it no longer shows 0 when a PREVIEW counted the same rows before.
 - **Breaking:** the `DRY_RUN` mode, a legacy alias of `PREVIEW`, is removed; use `--mode PREVIEW`.
 - Without source admin credentials, `ldb-run` no longer warns on every run that the source grants are not applied; only privileges the runtime user really lacks are reported.
 - `ldb-run --mode PREPARE` no longer writes table grants when the runtime user does not hold the role (they cannot fix it): it reports that the role is not enabled, points to `ldb-impl` (which grants it again) and stops with exit code 1 without checking anything else.

@@ -139,3 +139,58 @@ def test_expression_identifiers_are_rewritten_to_snapshotted_names_with_qualifie
     )
 
     assert rewritten == "A.state_b = 'PURGE' AND A.\"MixedCase_B\" = 1 AND @untouched = 2"
+
+
+def _status_block(mode: str) -> str:
+    config = Config(
+        schema="s",
+        action="SOURCE_ILM",
+        mode=mode,  # type: ignore[arg-type]
+        source_dsn="dsn",
+        source_username="source",
+        source_password="secret",
+    )
+    table_config = {
+        "conds": [
+            {
+                "source_owner": "SOURCE",
+                "history_owner": "HISTORY",
+                "table_name": "ITEMS",
+                "history_hint_expr": None,
+                "hint_expr": "",
+                "has_lob_columns": "N",
+            }
+        ],
+        "other_columns": [],
+        "referencing_tables": [],
+        "query_expr": "from source.items A\nwhere A.created_at < l_process_date",
+        "table_columns": ["ID"],
+        "months_keep_history_max": 3,
+    }
+    return OracleEngine.generate_sql_block(config, table_config, "20261007")
+
+
+def test_preview_block_ends_with_a_distinct_status_that_does_not_block_execute():
+    # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW must not mark the table as processed for the day
+    # Given/When: the blocks of a PREVIEW and an EXECUTE run
+    preview, execute = _status_block("PREVIEW"), _status_block("EXECUTE")
+
+    # Then: PREVIEW ends with TPEND and checks parents allowing TPEND; EXECUTE ends with TEND and requires it
+    assert "'TPEND', l_process_start" in preview and "'TEND', l_process_start" not in preview
+    assert "check_referencing_tables(l_referencing_tables, l_process_date, 1)" in preview
+    assert "'TEND', l_process_start" in execute and "'TPEND'" not in execute
+    assert "check_referencing_tables(l_referencing_tables, l_process_date, 0)" in execute
+
+
+def test_error_handler_reports_failure_without_committing_tstart_early():
+    # Spec: README > Run ILM — a failed table is reported as ERROR with the rows already moved
+    # Given/When: the block of an EXECUTE run
+    block = _status_block("EXECUTE")
+    handler = block.split("exception", 1)[1]
+
+    # Then: ERROR carries the plsql, every error but "already processed" is re-raised,
+    # and the TSTART lock is released only by the existing first commit (no extra commit after TSTART)
+    assert "'ERROR', l_process_start, null, sysdate, sqlerrm, l_record_count, l_plsql" in handler
+    assert "if nvl(l_sqlcode, 0) <> -20003 then" in handler
+    head = block.split("check_referencing_tables", 1)[0]
+    assert "commit" not in head.split("'TSTART'", 1)[1]

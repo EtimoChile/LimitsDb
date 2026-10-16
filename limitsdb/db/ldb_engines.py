@@ -249,6 +249,7 @@ class DatabaseEngine(ABC):
         process_start: datetime,
         message: str,
         plsql_code: str,
+        rows_processed: int = 0,
     ) -> None:
         """Saves an error status entry in the control table.
         Args:
@@ -259,7 +260,8 @@ class DatabaseEngine(ABC):
             process_date: Date in 'YYYYMMDD' format.
             process_start: Start time of the process.
             message: Error message.
-            plsql_code: PL/SQL or SQL block executed."""
+            plsql_code: PL/SQL or SQL block executed.
+            rows_processed: Rows already moved and committed before the failure."""
         pass
 
     @staticmethod

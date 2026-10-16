@@ -63,7 +63,7 @@ BEGIN
              FOR UPDATE NOWAIT;
 
             IF p_status = 'TSTART'
-               AND l_status != 'TEND'
+               AND l_status NOT IN ('TEND', 'TPEND')
                AND (SYSDATE - l_process_start) * 3600 * 24 < 5 THEN
                 p_sqlcode := -20002;
                 p_out_message := 'Table ' || p_table_name || ' is currently in process without lock';
@@ -85,8 +85,11 @@ BEGIN
                    ctl_status         = p_status,
                    ctl_process_start  = NVL(p_process_start, ctl_process_start),
                    ctl_process_end    = p_process_end,
-                   ctl_rows_processed = DECODE(p_status, 'TSTART', 0, ctl_rows_processed) +
-                                         p_rows_processed,
+                   ctl_rows_processed = CASE p_status
+                                            WHEN 'TSTART' THEN TO_NUMBER(p_rows_processed)
+                                            WHEN 'ERROR' THEN TO_NUMBER(p_rows_processed)
+                                            ELSE ctl_rows_processed + TO_NUMBER(p_rows_processed)
+                                        END,
                    ctl_plsql          = NVL(p_plsql, ctl_plsql)
              WHERE ROWID = l_rowid;
         EXCEPTION
@@ -154,7 +157,8 @@ CREATE OR REPLACE TYPE t_referencing_tables AS TABLE OF VARCHAR2(100);
 CHECK_REFERENCING_TABLES_PROC = """
 CREATE OR REPLACE PROCEDURE check_referencing_tables(
     p_referencing_tables IN t_referencing_tables,
-    p_process_date       IN DATE
+    p_process_date       IN DATE,
+    p_preview            IN NUMBER DEFAULT 0
 )
 IS
     l_ref_table      VARCHAR2(100);
@@ -173,7 +177,7 @@ BEGIN
              WHERE ctl_owner = l_ref_owner
                AND ctl_table_name = l_ref_table_name
                AND ctl_process_date = p_process_date
-               AND ctl_status = 'TEND';
+               AND (ctl_status = 'TEND' OR (p_preview = 1 AND ctl_status = 'TPEND'));
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
                 RAISE_APPLICATION_ERROR(
@@ -468,8 +472,8 @@ begin
     check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_START}', l_process_start, null, null, l_message, 0, l_plsql, l_sqlcode, l_out_message);
     if l_sqlcode is not null then raise_application_error(l_sqlcode, l_out_message); end if;"""
         if source_ilm or not execution.use_added_columns:
-            plsql += """
-    check_referencing_tables(l_referencing_tables, l_process_date); commit;"""
+            plsql += f"""
+    check_referencing_tables(l_referencing_tables, l_process_date, {1 if execution.mode == "PREVIEW" else 0}); commit;"""
         if not has_lob_columns or not source_ilm:
             plsql += f"""
     open c_records;
@@ -515,15 +519,16 @@ begin
     select /*+ {hint_expr} */ count(*) into l_record_count
     {indent_lines(query_expr, 4)};"""
         table_end_rows = "l_record_count" if has_lob_columns else "0"
+        table_end_status = Status.TABLE_PREVIEW_END if execution.mode == "PREVIEW" else Status.TABLE_END
         plsql += f"""
-    check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.TABLE_END}', l_process_start, null, sysdate, l_message, {table_end_rows}, null, l_sqlcode, l_out_message);
+    check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{table_end_status}', l_process_start, null, sysdate, l_message, {table_end_rows}, null, l_sqlcode, l_out_message);
     commit;
 exception
     when others then
         rollback;
-        check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.ERROR}', l_process_start, null, sysdate, sqlerrm, l_record_count, null, l_sqlcode, l_out_message);
+        check_save_status(l_source_owner, l_table_name, l_process_date, l_action, '{Status.ERROR}', l_process_start, null, sysdate, sqlerrm, l_record_count, l_plsql, l_sqlcode, l_out_message);
         commit;
-        if l_sqlcode not in (-20003) then
+        if nvl(l_sqlcode, 0) <> -20003 then
             raise;
         end if;
 end;"""
@@ -624,6 +629,7 @@ end;"""
         process_start: datetime,
         message: str,
         plsql_code: str,
+        rows_processed: int = 0,
     ) -> None:
         cursor: oracledb.Cursor | None = None
         try:
@@ -643,7 +649,7 @@ end;"""
                     None,
                     process_end,
                     message,
-                    0,
+                    rows_processed,
                     plsql_code,
                     sqlcode,
                     out_message,

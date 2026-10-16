@@ -1062,6 +1062,7 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
         schema="s",
         db_engine="oracle",
         action="SOURCE_ILM",
+        mode="EXECUTE",
         source_username="user",
         source_password="pw",
         source_dsn="dsn",
@@ -1070,8 +1071,8 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
     # When: process_table runs
     result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
 
-    # Then: TABLE_END with before/after row counts and connection closed
-    assert result == ("OWNER", "TABLE", Status.TABLE_END, 2, 7, None, None)
+    # Then: TABLE_END counting only this run's rows (the counter restarts at TSTART) and connection closed
+    assert result == ("OWNER", "TABLE", Status.TABLE_END, 0, 7, None, None)
     assert calls == {"ran": True, "closed": True}
 
 
@@ -1874,6 +1875,82 @@ def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: py
     assert tables[("A", "PARENT")]["skip"] is True
     assert tables[("A", "CHILD")]["skip"] is True
     assert any("references A.PARENT" in m for m in recorder.messages.get("warning", []))
+
+
+def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW does not mark tables as processed for the day, so a
+    # later run still processes them; a real TEND is kept
+    # Given: ldb_ctl holds TPEND for one table (left by a PREVIEW) and TEND for another
+    class _StatusEngine(_VisibilityEngine):
+        def get_status(self, conn, process_date):
+            return [
+                {"ctl_owner": "A", "ctl_table_name": "PREV", "ctl_status": Status.TABLE_PREVIEW_END},
+                {"ctl_owner": "A", "ctl_table_name": "DONE", "ctl_status": Status.TABLE_END},
+            ]
+
+    rows = [_full_row("PREV"), _full_row("DONE")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    config = _script_config()
+    config.generate_script = False
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), config, _StatusEngine({"PREV", "DONE"}), "20261007")
+
+    # Then: the previewed table is pending again and the executed one stays finished
+    assert tables[("A", "PREV")]["conds"][0]["ctl_status"] is None
+    assert tables[("A", "DONE")]["conds"][0]["ctl_status"] == Status.TABLE_END
+
+
+def test_process_table_reports_the_preview_end_status_in_preview_mode(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode PREVIEW — the worker reports TPEND, not TEND, for a PREVIEW
+    # Given: a worker engine and a PREVIEW config
+    class _Engine:
+        def get_connection(self, config, admin=False, env=None):
+            return object()
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 6)
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            return 5
+
+        def sql_block_run(self, conn, plsql_code):
+            pass
+
+        def close_connection(self, conn):
+            pass
+
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: _Engine())
+    config = Config(
+        schema="s",
+        db_engine="oracle",
+        action="SOURCE_ILM",
+        mode="PREVIEW",
+        source_username="user",
+        source_password="pw",
+        source_dsn="dsn",
+    )
+
+    # When: process_table runs
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+
+    # Then: the status is TPEND
+    assert result[2] == Status.TABLE_PREVIEW_END
+
+
+def test_preview_finished_tables_satisfy_their_children_and_are_not_launched_again():
+    # Spec: README > Run ILM > --mode PREVIEW — within a PREVIEW run a table that ended in TPEND counts as done
+    # Given: a parent finished by the PREVIEW and a child waiting for it
+    tables_config = {
+        ("A", "PARENT"): {"skip": False, "conds": [{"ctl_status": Status.TABLE_PREVIEW_END}], "referencing_tables": []},
+        ("A", "CHILD"): {"skip": False, "conds": [{"ctl_status": None}], "referencing_tables": [("A", "PARENT")]},
+    }
+
+    # When: the next ready table is queried
+    ready = ldb_runner.get_next_ready_table(tables_config, set())
+
+    # Then: the child is launched and the parent is not
+    assert ready is not None and ready[0:2] == ("A", "CHILD")
 
 
 def test_grants_that_go_with_history_ddl_are_applied_over_the_runtime_connection_without_admin(

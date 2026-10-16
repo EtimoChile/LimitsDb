@@ -649,6 +649,18 @@ def test_source_and_history_ilm_archive_and_purge_correct_rows(
         finally:
             source_cursor.close()
 
+        # When: SOURCE_ILM runs in PREVIEW mode first
+        _run_cli(
+            "ldb-run", *common_arguments, "--action", "SOURCE_ILM", "--mode", "PREVIEW", environment=cli_environment
+        )
+
+        # Then: nothing moved and the day is not marked as processed (TPEND, not TEND)
+        assert _fetch_ids(source_connection, "ilm_orders") == [1, 2, 3]
+        assert (
+            _fetch_ctl_status(source_connection, owner=source_user, table_name="ILM_ORDERS", action="SOURCE_ILM")
+            == "TPEND"
+        )
+
         # When: SOURCE_ILM runs in EXECUTE mode
         source_run = _run_cli(
             "ldb-run",

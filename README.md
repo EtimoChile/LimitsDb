@@ -333,6 +333,11 @@ application role, and creating or altering history tables before a `PREVIEW` or
 `EXECUTE` run (`PREVIEW` needs the objects in place to validate and time the
 queries; it skips only the data movement). Both operations are idempotent.
 
+A `PREVIEW` finishes each table with the status `TPEND` in `ldb_ctl`, not `TEND`, so it never marks a
+table as processed for the day: an `EXECUTE` run afterwards (same day) still moves the data. A `TPEND`
+left by a previous `PREVIEW` is ignored by the next run. After upgrading, rerun `ldb-impl` so the
+supporting procedures (`check_save_status`, `check_referencing_tables`) know the new status.
+
 If source admin credentials are absent from `secrets[.<PROFILE>].json`, the
 source privilege grants are not applied. `ldb-run` checks with the runtime
 connection which privileges are missing through the role and logs a warning
