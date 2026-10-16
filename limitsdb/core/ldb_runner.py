@@ -672,14 +672,16 @@ def _check_role_privileges(
         return []
     role = _app_role(config, env)
     emit = logger.error if level >= logging.ERROR else logger.warning
-    if not engine.is_role_enabled(connection, role):
+    role_enabled = engine.is_role_enabled(connection, role)
+    if not role_enabled:
         emit(
-            "%s role %s is not enabled for the runtime user: it is not granted to it or is not a default role.",
+            "%s role %s is not enabled for the runtime user: it is not granted to it or is not a default role. "
+            "Run ldb-impl with admin credentials to grant it.",
             env,
             role,
         )
     missing = engine.get_missing_table_privileges(connection, role, tables, _TABLE_PRIVILEGES)
-    if missing:
+    if missing and role_enabled:
         by_table: dict[tuple[str, str], list[str]] = {}
         for owner, table_name, privilege in missing:
             by_table.setdefault((owner, table_name), []).append(privilege)
@@ -1196,7 +1198,12 @@ def ldb_run(config: Config) -> None:
                 source_tables_for_privileges,
                 logging.ERROR if is_prepare else logging.WARNING,
             )
-            if is_prepare and source_missing and not source_grants_applied:
+            if (
+                is_prepare
+                and source_missing
+                and not source_grants_applied
+                and engine.is_role_enabled(connection, _app_role(config, "SOURCE"))
+            ):
                 _write_source_grants_file(config, engine, source_missing, "ldb-run --mode PREPARE")
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)

@@ -2025,6 +2025,9 @@ def test_prepare_reports_a_role_that_is_not_enabled_for_the_runtime_user(monkeyp
     # Then: the error names the role and PREPARE fails
     assert rc == 1
     assert any("role LDB_SOURCE_ROLE is not enabled" in m for m in recorder.messages["error"])
+    # And: it points to ldb-impl and writes no table grants, which cannot fix a role the user does not hold
+    assert any("ldb-impl" in m for m in recorder.messages["error"])
+    assert "source_grants" not in _script_files(tmp_path / "p")
 
 
 def test_prepare_verifies_the_history_grants_with_the_runtime_history_connection(
