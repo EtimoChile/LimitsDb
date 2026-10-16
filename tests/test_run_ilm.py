@@ -1952,27 +1952,49 @@ def test_prepare_applies_grants_and_history_ddl_without_running_ilm(monkeypatch:
     assert ilm_runs == []
 
 
-def test_prepare_without_source_admin_writes_the_source_grants_file_and_warns(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-):
-    # Spec: README > Run ILM > --mode PREPARE — without source admin credentials the source grants go to a file
-    # for a DBA, and PREPARE says they must be applied.
-    # Given: PREPARE without source admin credentials
+def _run_prepare_without_source_admin(monkeypatch: pytest.MonkeyPatch, tmp_path, *, visible: bool):
+    """Run PREPARE without source admin credentials over one table that the runtime user sees or not."""
     engine = _HistoryDdlEngine()
     _grant_targets(monkeypatch)
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
+    tables = _make_tables_config("T1")
+    tables[("SRC", "T1")]["columns_metadata"] = {"ID": SimpleNamespace(id=1)} if visible else {}
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: tables)
     pending_dir = tmp_path / "pending"
+    config = _history_ddl_config(mode="PREPARE", source_admin=False, ddl_pending_dir=str(pending_dir))
+    with pytest.raises(SystemExit):
+        ldb_runner.ldb_run(config)
+    return engine, recorder, pending_dir
 
+
+def test_prepare_without_source_admin_writes_grants_only_for_tables_it_cannot_see(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode PREPARE — without source admin credentials the source grants of the
+    # tables the runtime user cannot see go to a file for a DBA, and PREPARE says they must be applied.
+    # Given: PREPARE without source admin credentials over a table the runtime user cannot see
     # When: ldb-run executes
-    _run_ldb(
-        monkeypatch, _history_ddl_config(mode="PREPARE", source_admin=False, ddl_pending_dir=str(pending_dir)), engine
-    )
+    engine, recorder, pending_dir = _run_prepare_without_source_admin(monkeypatch, tmp_path, visible=False)
 
     # Then: nothing was granted over a source connection and the file holds the grants
     assert engine.source_granted == []
     assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in _script_files(pending_dir)["source_grants"]
     assert any("a DBA must apply them" in m for m in recorder.messages["warning"])
+
+
+def test_prepare_without_source_admin_writes_no_grants_file_when_every_table_is_visible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode PREPARE — a rerun after the grants were applied leaves no file behind
+    # Given: PREPARE without source admin credentials over a table the runtime user already sees
+    # When: ldb-run executes
+    _, _, pending_dir = _run_prepare_without_source_admin(monkeypatch, tmp_path, visible=True)
+
+    # Then: no source grants file was written
+    assert "source_grants" not in _script_files(pending_dir)
 
 
 def test_prepare_fails_when_the_runtime_user_cannot_see_a_configured_table(monkeypatch: pytest.MonkeyPatch, tmp_path):

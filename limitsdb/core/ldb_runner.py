@@ -637,9 +637,14 @@ def _write_source_grants_file(
     )
 
 
+def _invisible_tables(tables_config: TablesConfig) -> list[tuple[str, str]]:
+    """Return the tables whose columns the runtime user cannot read (missing, or SELECT not granted)."""
+    return sorted(key for key, cnf in tables_config.items() if cnf.get("columns_metadata") == {})
+
+
 def _prepare_result(tables_config: TablesConfig) -> int:
     """Return PREPARE's exit code: 1 when the runtime user still cannot see a configured table (DEC-032)."""
-    invisible = [f"{owner}.{name}" for (owner, name), cnf in tables_config.items() if cnf.get("columns_metadata") == {}]
+    invisible = [f"{owner}.{name}" for owner, name in _invisible_tables(tables_config)]
     if not invisible:
         logger.info("PREPARE completed: grants and history objects are in place.")
         return 0
@@ -1073,9 +1078,8 @@ def ldb_run(config: Config) -> None:
             finally:
                 engine.close_connection(source_admin_priv_conn)
             source_grants_applied = True
-        elif config.execution.mode == "PREPARE" and config.execution.action == "SOURCE_ILM":
-            if source_tables_for_privileges:
-                _write_source_grants_file(config, engine, source_tables_for_privileges, "ldb-run --mode PREPARE")
+        elif config.execution.mode == "PREPARE":
+            pass  # without source admin credentials PREPARE writes grants only for the tables it cannot see, below
         elif config.execution.action == "SOURCE_ILM" and source_tables_for_privileges:
             logger.warning(
                 "Source admin credentials are absent: the source table grants are not applied%s, so tables not yet "
@@ -1084,6 +1088,11 @@ def ldb_run(config: Config) -> None:
             )
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)
+        if config.execution.mode == "PREPARE" and config.execution.action == "SOURCE_ILM" and not source_grants_applied:
+            # Tables already visible are granted, so a rerun leaves them out of the file
+            not_visible = _invisible_tables(tables_config)
+            if not_visible:
+                _write_source_grants_file(config, engine, not_visible, "ldb-run --mode PREPARE")
         if config.execution.generate_script:
             _write_script_ddl_files(
                 config, engine, connection, tables_config, tables_conf_rows, source_grants_applied=source_grants_applied

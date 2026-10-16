@@ -374,7 +374,8 @@ is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
 
 - With source admin credentials (`SOURCE_ILM`) it grants the source tables to
   the source role. Without them it writes `source_grants_<schema>_<ts>.sql` under
-  `ddl_pending_dir` for a DBA and warns.
+  `ddl_pending_dir` for a DBA, only for the tables the runtime user cannot
+  see yet, and warns. Once the grants are in place no file is written.
 - It creates or alters the history tables and grants them to the history role,
   with the same admin or runtime-connection rules as `EXECUTE`: statements that
   fail go to the pending file.
