@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- `ldb-run --mode PREPARE` no longer writes table grants when the runtime user does not hold the role (they cannot fix it): it reports that the role is not enabled and points to `ldb-impl`, which grants it again.
+- `ldb-run --mode PREPARE` no longer writes table grants when the runtime user does not hold the role (they cannot fix it): it reports that the role is not enabled, points to `ldb-impl` (which grants it again) and stops with exit code 1 without checking anything else.
 - **Breaking for custom engines:** `DatabaseEngine` no longer has `generate_table_structure_script`, `execute_ddl_statements`, `generate_table_privilege_script` or `generate_bootstrap_script`. Every `ensure_*` method now takes an optional keyword `ddl_sink`; when given, the engine hands it the DDL instead of executing it (a `None` connection then means nothing is read from the database). `ensure_table_structure` and `ensure_table_privileges` also take `ddl_failures`: with it, statements that fail are collected with their error and the rest still run. `ensure_table_structure` and `ensure_table_privileges` no longer return the generated statements.
 - `ldb-run` and `ldb-impl` deliver their DDL through the `ensure_*` methods; their behavior and generated files are unchanged.
 - The `ldb-impl` bootstrap script asks once for the runtime user's password and reuses it to reconnect for the database link, instead of asking twice.

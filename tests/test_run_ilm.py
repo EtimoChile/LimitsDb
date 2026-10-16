@@ -1779,7 +1779,7 @@ def test_script_run_writes_source_grants_file_and_warns_without_source_admin_cre
     assert rc == 0
     assert engine.source_granted == []
     assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in _script_files(pending_dir)["source_grants"]
-    assert any("Source admin credentials are absent" in m for m in recorder.messages["warning"])
+    assert any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
 
 
 def test_execute_run_without_source_admin_credentials_warns_that_ungranted_tables_are_skipped(
@@ -1799,7 +1799,7 @@ def test_execute_run_without_source_admin_credentials_warns_that_ungranted_table
     # Then: no source grant was applied and the warning was logged
     assert rc == 0
     assert engine.source_granted == []
-    assert any("Source admin credentials are absent" in m for m in recorder.messages["warning"])
+    assert any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
 
 
 def _full_row(table_name: str, **kwargs) -> dict:
@@ -1855,7 +1855,7 @@ def test_table_without_visible_columns_is_skipped_with_a_warning_instead_of_fail
     # Then: the invisible table is skipped with the message and the other one is kept
     assert tables[("A", "INV")]["skip"] is True
     assert not tables[("A", "OK")].get("skip")
-    assert any("A.INV is not visible to the runtime user" in m for m in recorder.messages["warning"])
+    assert any("A.INV is not visible to the runtime user" in m for m in recorder.messages.get("warning", []))
 
 
 def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: pytest.MonkeyPatch):
@@ -1873,7 +1873,7 @@ def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: py
     # Then: both are skipped and the child names the parent
     assert tables[("A", "PARENT")]["skip"] is True
     assert tables[("A", "CHILD")]["skip"] is True
-    assert any("references A.PARENT" in m for m in recorder.messages["warning"])
+    assert any("references A.PARENT" in m for m in recorder.messages.get("warning", []))
 
 
 def test_grants_that_go_with_history_ddl_are_applied_over_the_runtime_connection_without_admin(
@@ -1992,7 +1992,7 @@ def test_prepare_without_source_admin_writes_only_the_grants_that_are_missing(
     assert "GRANT SELECT" not in source_file
     assert engine.source_granted == []
     assert rc == 1
-    assert any("a DBA must apply them" in m for m in recorder.messages["warning"])
+    assert any("a DBA must apply them" in m for m in recorder.messages.get("warning", []))
     assert any("SRC.T1 (DELETE)" in m for m in recorder.messages["error"])
 
 
@@ -2028,6 +2028,9 @@ def test_prepare_reports_a_role_that_is_not_enabled_for_the_runtime_user(monkeyp
     # And: it points to ldb-impl and writes no table grants, which cannot fix a role the user does not hold
     assert any("ldb-impl" in m for m in recorder.messages["error"])
     assert "source_grants" not in _script_files(tmp_path / "p")
+    # And: it stops there, without processing the tables
+    assert not any("not visible" in m for m in recorder.messages.get("warning", []))
+    assert any("PREPARE incomplete: run ldb-impl" in m for m in recorder.messages["error"])
 
 
 def test_prepare_verifies_the_history_grants_with_the_runtime_history_connection(
@@ -2073,7 +2076,7 @@ def test_validate_reports_missing_privileges_without_changing_anything(monkeypat
     # Then: validation fails on the source gap, the history gap is a warning and nothing was granted
     assert ok is False
     assert any("SOURCE runtime user lacks" in m for m in recorder.messages["error"])
-    assert any("HISTORY runtime user lacks" in m for m in recorder.messages["warning"])
+    assert any("HISTORY runtime user lacks" in m for m in recorder.messages.get("warning", []))
     assert engine.source_granted == [] and engine.admin_applied == []
 
 

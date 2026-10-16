@@ -1198,12 +1198,13 @@ def ldb_run(config: Config) -> None:
                 source_tables_for_privileges,
                 logging.ERROR if is_prepare else logging.WARNING,
             )
-            if (
-                is_prepare
-                and source_missing
-                and not source_grants_applied
-                and engine.is_role_enabled(connection, _app_role(config, "SOURCE"))
-            ):
+            if is_prepare and source_missing and not engine.is_role_enabled(connection, _app_role(config, "SOURCE")):
+                # Nothing else can be checked or fixed until the role reaches the runtime user
+                logger.error(
+                    "PREPARE incomplete: run ldb-impl to grant the role to the runtime user and rerun PREPARE."
+                )
+                raise SystemExit(1)
+            if is_prepare and source_missing and not source_grants_applied:
                 _write_source_grants_file(config, engine, source_missing, "ldb-run --mode PREPARE")
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)
