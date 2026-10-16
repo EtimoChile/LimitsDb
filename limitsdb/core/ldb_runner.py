@@ -1179,14 +1179,6 @@ def ldb_run(config: Config) -> None:
             finally:
                 engine.close_connection(source_admin_priv_conn)
             source_grants_applied = True
-        elif config.execution.mode == "PREPARE":
-            pass  # without source admin credentials PREPARE writes the grants that are missing, below
-        elif config.execution.action == "SOURCE_ILM" and source_tables_for_privileges:
-            logger.warning(
-                "Source admin credentials are absent: the source table grants are not applied%s, so tables not yet "
-                "granted to the runtime user are skipped until a DBA applies them.",
-                " (they are only written to the pending file)" if config.execution.generate_script else "",
-            )
         source_missing: list[Privilege] = []
         if config.execution.action == "SOURCE_ILM" and source_tables_for_privileges:
             is_prepare = config.execution.mode == "PREPARE"

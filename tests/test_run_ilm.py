@@ -1775,11 +1775,11 @@ def test_script_run_writes_source_grants_file_and_warns_without_source_admin_cre
         engine,
     )
 
-    # Then: nothing was granted, the grants are in their file and the warning was logged
+    # Then: nothing was granted, the grants are in their file and no generic warning was logged
     assert rc == 0
     assert engine.source_granted == []
     assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in _script_files(pending_dir)["source_grants"]
-    assert any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
+    assert not any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
 
 
 def test_execute_run_without_source_admin_credentials_warns_that_ungranted_tables_are_skipped(
@@ -1796,10 +1796,10 @@ def test_execute_run_without_source_admin_credentials_warns_that_ungranted_table
     # When: ldb-run executes
     rc = _run_ldb(monkeypatch, _history_ddl_config(source_admin=False, ddl_pending_dir=str(tmp_path / "p")), engine)
 
-    # Then: no source grant was applied and the warning was logged
+    # Then: no source grant was applied and no generic warning was logged (only real privilege gaps warn)
     assert rc == 0
     assert engine.source_granted == []
-    assert any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
+    assert not any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
 
 
 def _full_row(table_name: str, **kwargs) -> dict:
