@@ -1117,8 +1117,53 @@ def test_process_table_returns_error_status_and_closes_connection_on_failure(
     result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
 
     # Then: ERROR status returned, error saved, connection closed
-    assert result == ("OWNER", "TABLE", Status.ERROR, 3, 3, None, "worker stopped")
+    assert result == ("OWNER", "TABLE", Status.ERROR, 0, 3, None, "worker stopped")
     assert calls == {"saved": True, "closed": True}
+
+
+def test_process_table_leaves_the_control_row_alone_when_another_run_owns_the_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM — a table in use by another runner is not marked ERROR nor credited with stale rows
+    calls = {"saved": False}
+
+    class _Busy(Exception):
+        def __init__(self):
+            super().__init__(type("E", (), {"code": 20002, "message": "in process"})())
+
+    class DummyEngine:
+        def get_connection(self, config):
+            return object()
+
+        def get_system_date(self, conn):
+            return "start"
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            return 277839
+
+        def sql_block_run(self, conn, plsql_code):
+            raise _Busy()
+
+        def save_error_status(self, *args):
+            calls["saved"] = True
+
+        def close_connection(self, conn):
+            pass
+
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: DummyEngine())
+    config = Config(
+        schema="s",
+        db_engine="oracle",
+        action="SOURCE_ILM",
+        source_username="user",
+        source_password="pw",
+        source_dsn="dsn",
+    )
+
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+
+    assert result == ("OWNER", "TABLE", Status.ERROR, 0, 0, 20002, "in process")
+    assert calls["saved"] is False
 
 
 def test_process_table_returns_error_when_recovery_query_also_fails(

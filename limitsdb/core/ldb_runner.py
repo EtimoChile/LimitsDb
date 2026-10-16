@@ -520,7 +520,6 @@ def _append_unique_name(other_columns: list[_OtherColumn], other_column: _OtherC
 
 def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> WorkerResult:
     logger.info(f"Processing table {owner}.{table_name}...")
-    prev_rows_processed = 0
     engine: DatabaseEngine | None = None
     conn: Any = None
     process_start: Any = None
@@ -531,7 +530,6 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
         logger.info(f"Connected to {dsn} as {user}")
         process_start = engine.get_system_date(conn)
         logger.info(f"Executing ILM for {owner}.{table_name}...")
-        prev_rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
         engine.sql_block_run(conn, plsql_code)
         rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
         finished = Status.TABLE_PREVIEW_END if config.execution.mode == "PREVIEW" else Status.TABLE_END
@@ -539,9 +537,11 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
         return (owner, table_name, finished, 0, rows_processed, None, None)
     except Exception as exc:
         sqlcode, message = _exception_details(exc)
-        rows_processed = prev_rows_processed
+        rows_processed = 0
         logger.error("Worker failed for %s.%s: %s", owner, table_name, message, exc_info=True)
-        if engine is not None and conn is not None and process_start is not None:
+        # Table in use or already processed: the control row belongs to another run and must stay untouched
+        owned_by_other_run = sqlcode in (20001, 20002, 20003)
+        if engine is not None and conn is not None and process_start is not None and not owned_by_other_run:
             try:
                 rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
                 engine.save_error_status(
@@ -549,7 +549,8 @@ def process_table(config: Config, owner: str, table_name: str, plsql_code: str, 
                 )
             except Exception:
                 logger.critical("Failed to persist recovery evidence for %s.%s", owner, table_name, exc_info=True)
-        return (owner, table_name, Status.ERROR, prev_rows_processed, rows_processed, sqlcode, message)
+        # The block resets the counter at TSTART, so the rows are this run's only: no baseline to subtract
+        return (owner, table_name, Status.ERROR, 0, rows_processed, sqlcode, message)
     finally:
         if engine is not None and conn is not None:
             engine.close_connection(conn)
