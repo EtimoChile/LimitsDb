@@ -31,7 +31,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - ILM operations can archive, purge, create objects, and manage privileges.
   They are not executed against a real database without explicit authorization
   and an identified environment.
-- The test suite lives in `tests/`. Local tests are 218 (non-oracle-integration)
+- The test suite lives in `tests/`. Local tests are 222 (non-oracle-integration)
   and 16 E2E (oracle_integration, 3 new ones for DEC-021 not yet run in CI). Ruff validates format and lint, and strict
   `mypy` completes without findings across the 24 package modules. The test
   layout follows `docs/prompts/test-organization.md`: core contracts in `tests/test_*.py`,
@@ -172,6 +172,8 @@ but does not replace the sources defined in `AGENTS.md`.
   `ddl_pending_dir`, the ILM blocks stay on stdout; `history_baseline` (`EMPTY`|`SOURCE`)
   is assumed when history cannot be read. `DEC-031` refines it: `SCRIPT` applies the source grants when
   source admin credentials exist, and a table not visible to the runtime user is skipped with a warning.
+- `DEC-032`: `--mode PREPARE` applies source grants, history DDL and history grants without ILM work and
+  exits 1 if a configured table is not visible to the runtime user.
 - `DEC-025`: history DDL always travels with the matching grants (executed or written to a file).
 - `DEC-026`: one function (`deliver_ddl`, `limitsdb/core/ldb_ddl.py`) decides execute-or-file for every
   DDL helper. `DEC-027`: the engine's `ensure_*` methods take an optional `ddl_sink` (and

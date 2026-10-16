@@ -303,7 +303,7 @@ ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM 
 Common overrides:
 
 ```
---mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
+--mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
@@ -366,6 +366,25 @@ History table management follows the same principle:
   If the file cannot be written (for example the directory is not writable),
   `ldb-run` logs the error with the failed statements and exits with code 1.
 
+### Preparing grants and objects with `--mode PREPARE`
+
+`--mode PREPARE` brings permissions and objects into place without running any
+ILM work, so the problems show up before `SCRIPT`, `PREVIEW` or `EXECUTE`. It
+is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
+
+- With source admin credentials (`SOURCE_ILM`) it grants the source tables to
+  the source role. Without them it writes `source_grants_<schema>_<ts>.sql` under
+  `ddl_pending_dir` for a DBA and warns.
+- It creates or alters the history tables and grants them to the history role,
+  with the same admin or runtime-connection rules as `EXECUTE`: statements that
+  fail go to the pending file.
+- It exits with code 1 if the runtime user still cannot see a configured table
+  (it does not exist or `SELECT` is not granted). Other modes only skip such a
+  table with a warning.
+
+`PREVIEW` and `EXECUTE` keep applying DDL and grants themselves, so a change in
+source reaches history without failing the run.
+
 ### History DDL in `--mode SCRIPT`
 
 `--mode SCRIPT` applies no DDL and no history grants to the databases. The ILM SQL blocks, which
@@ -407,7 +426,7 @@ the same pending file as the failed DDL, so a DBA can run it.
 | Parameter                | Purpose                                                                                                                                                         | Default / values                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history).                                                                         | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
-| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
+| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PREPARE` apply grants and history objects without running ILM, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
 | `chunk_size`             | Rows per chunk when processing large tables.                                                                                                                    | Default `100000`.                                                                    |
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
@@ -494,7 +513,7 @@ Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
 # action: "SOURCE_ILM"  # ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)
-# mode: "PREVIEW"       # VALIDATE | PLAN | PREVIEW | SCRIPT | EXECUTE (PREVIEW mirrors legacy DRY_RUN)
+# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE (PREVIEW mirrors legacy DRY_RUN)
 # chunk_size: 100000    # Rows per chunk when processing large tables
 # use_added_columns: True  # Populate derived columns in history tables
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables

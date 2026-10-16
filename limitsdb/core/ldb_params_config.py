@@ -22,13 +22,13 @@ from limitsdb.core.ldb_utils import resolve_schema_file  # markers for Annotated
 
 logger = get_logger("params_config")
 
-VALID_MODES: tuple[str, ...] = ("VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE")
+VALID_MODES: tuple[str, ...] = ("VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE")
 MODE_ALIASES: dict[str, str] = {"DRY_RUN": "PREVIEW"}
-MODES_REQUIRING_CONNECTIONS: set[str] = {"VALIDATE", "PREVIEW", "SCRIPT", "EXECUTE"}
+MODES_REQUIRING_CONNECTIONS: set[str] = {"VALIDATE", "PREPARE", "PREVIEW", "SCRIPT", "EXECUTE"}
 FILE_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"use_added_columns", "add_ldb_columns"})
 
 IlmAction = Literal["SOURCE_ILM", "HISTORY_ILM"]
-RuntimeMode = Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"]
+RuntimeMode = Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 HistoryBaseline = Literal["EMPTY", "SOURCE"]
 DatabaseEngineName = Literal["oracle"]
@@ -118,9 +118,9 @@ class Config:
         Env("LDB_ACTION"),
     ] = "SOURCE_ILM"
     mode: Annotated[
-        Literal["VALIDATE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"],
+        Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"],
         Help(
-            "Runtime mode: VALIDATE config/credentials, PLAN dependency order, PREVIEW run without moving data (DDL and grants are still applied), SCRIPT generate SQL scripts, EXECUTE apply changes"
+            "Runtime mode: VALIDATE config/credentials, PREPARE apply grants and DDL without running ILM, PLAN dependency order, PREVIEW run without moving data (DDL and grants are still applied), SCRIPT generate SQL scripts, EXECUTE apply changes"
         ),
         Cli("--mode"),
         Env("LDB_MODE"),

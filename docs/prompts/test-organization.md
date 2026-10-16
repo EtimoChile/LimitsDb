@@ -27,7 +27,7 @@ is the specification document that governs it, in order of precedence:
 | Secret encryption and management (`ldb-crypt`) | README § *Secrets & Encryption* | `test_secret_encryption.py` |
 | Configuration loading and overlay | README § *Configuration Resolution* + `docs/configuration-contract.md` | `test_config_overlay.py` |
 | ILM policy semantics (YAML) | README § *ILM Rule Semantics* + `ilm.example.yml` | `test_ilm_policy_loading.py` |
-| Execution modes and ILM execution | README § *Run ILM* (VALIDATE / PLAN / PREVIEW / SCRIPT / EXECUTE) | `test_run_ilm.py` |
+| Execution modes and ILM execution | README § *Run ILM* (VALIDATE / PREPARE / PLAN / PREVIEW / SCRIPT / EXECUTE) | `test_run_ilm.py` |
 | Database engine selection | README § *Configuration parameters* (`db_engine`) | `test_engine_selection.py` |
 | Log level control | README § *Configuration parameters* (`log_level`) | `test_log_level_control.py` |
 | CLI entry points | README § *CLI Commands* (ldb-run, ldb-crypt, ldb-impl, ldb-init) | `test_cli_entry_points.py` |

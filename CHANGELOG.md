@@ -9,6 +9,7 @@
 - **Breaking for runtime usernames in lowercase:** `source_username` and `history_username` are data-dictionary names. A lowercase name (`ldb`) is a quoted user created as `"ldb"`, and the runtime login now quotes it the same way, so it no longer logs in as `LDB`. A regular user stored in uppercase (`LDB`) must now be configured as `LDB`. Admin usernames are used as configured.
 - Fix `ldb-impl` for lowercase users: the quota DDL quotes the user, the quota lookup binds the tablespace as the dictionary stores it, and the bootstrap script looks the user up in `dba_users` under its own name.
 - `ldb-run` no longer fails with `KeyError` when the runtime user cannot see a table: a table with no visible columns, or that references one, is skipped with a warning. `--mode SCRIPT` now applies the source grants when it has source admin credentials (and writes no `source_grants` file), and every mode warns when source admin credentials are absent.
+- Add `ldb-run --mode PREPARE`: it applies the source grants (or writes them to `ddl_pending_dir` without source admin credentials) and the history DDL and grants without running ILM, and exits 1 if the runtime user cannot see a configured table. Run it before `SCRIPT`, `PREVIEW` or `EXECUTE`.
 
 ## [0.6.0] - 2026-10-14
 

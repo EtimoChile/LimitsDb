@@ -1907,3 +1907,90 @@ def test_failed_history_ddl_file_carries_the_table_grants_that_could_not_be_appl
     content = _script_files(pending_dir)["history_ddl"]
     assert f"{grant};" in content and "-- Failed with: ORA-01031" in content
     assert statement not in content
+
+
+# ---------------------------------------------------------------------------
+# --mode PREPARE (DEC-032)
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_mode_requires_connections_like_the_modes_that_apply_ddl():
+    # Spec: README > Run ILM > --mode PREPARE — PREPARE reads and changes the databases, so it needs credentials
+    # Given / When / Then: a PREPARE config without credentials is rejected, with them it is accepted
+    with pytest.raises(ValueError):
+        ldb_params_config.Config(schema="s", mode="PREPARE")
+    assert _history_ddl_config(mode="PREPARE").execution.mode == "PREPARE"
+
+
+def test_prepare_applies_grants_and_history_ddl_without_running_ilm(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — PREPARE applies source grants, history DDL and history grants
+    # and stops before any ILM work.
+    # Given: PREPARE with source and history admin credentials and a pending history delta
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    engine = _HistoryDdlEngine({"T1": [statement]})
+    _grant_targets(monkeypatch)
+    ilm_runs: list[bool] = []
+
+    # When: ldb-run executes
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
+        engine,
+    )
+    monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", lambda *args: ilm_runs.append(True) or 0)
+    rc_again = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
+        _HistoryDdlEngine(),
+    )
+
+    # Then: grants and DDL were applied, the ILM never ran, and a rerun with nothing to change succeeds
+    assert rc == 0 and rc_again == 0
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert statement in engine.admin_applied
+    assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE" in engine.admin_applied
+    assert ilm_runs == []
+
+
+def test_prepare_without_source_admin_writes_the_source_grants_file_and_warns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode PREPARE — without source admin credentials the source grants go to a file
+    # for a DBA, and PREPARE says they must be applied.
+    # Given: PREPARE without source admin credentials
+    engine = _HistoryDdlEngine()
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    pending_dir = tmp_path / "pending"
+
+    # When: ldb-run executes
+    _run_ldb(
+        monkeypatch, _history_ddl_config(mode="PREPARE", source_admin=False, ddl_pending_dir=str(pending_dir)), engine
+    )
+
+    # Then: nothing was granted over a source connection and the file holds the grants
+    assert engine.source_granted == []
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in _script_files(pending_dir)["source_grants"]
+    assert any("a DBA must apply them" in m for m in recorder.messages["warning"])
+
+
+def test_prepare_fails_when_the_runtime_user_cannot_see_a_configured_table(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — a table the runtime user cannot see is an error, not a warning
+    # Given: PREPARE where the table configuration has no visible columns for T1
+    engine = _HistoryDdlEngine()
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
+    invisible = _make_tables_config("T1")
+    invisible[("SRC", "T1")].update(skip=True, columns_metadata={})
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: invisible)
+
+    # When: ldb-run executes
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner.ldb_run(_history_ddl_config(mode="PREPARE", ddl_pending_dir=str(tmp_path / "p")))
+
+    # Then: it exits 1 and names the table
+    assert exc_info.value.code == 1
+    assert any("SRC.T1" in m for m in recorder.messages["error"])
