@@ -120,13 +120,12 @@ class Config:
     mode: Annotated[
         Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "DRY_RUN"],
         Help(
-            "Runtime mode (default PREVIEW). VALIDATE: check config, credentials and privileges, read-only. "
-            "PREPARE: apply grants and history DDL without running ILM. "
-            "PLAN: show the table dependency order, read-only. "
-            "PREVIEW: run ILM without moving data (DDL and grants are still applied). "
-            "SCRIPT: write SQL scripts and apply nothing. "
-            "EXECUTE: run ILM and move data. "
-            "DRY_RUN: alias of PREVIEW"
+            "Runtime mode: VALIDATE config/credentials, "
+            "PREPARE apply grants and DDL without running ILM, "
+            "PLAN dependency order, "
+            "PREVIEW run without moving data (DDL and grants are applied), "
+            "SCRIPT generate SQL scripts (grants are applied and DDL is script-generated), "
+            "EXECUTE run ILM applying changes (DDL and grants are applied)"
         ),
         Cli("--mode"),
         Env("LDB_MODE"),
