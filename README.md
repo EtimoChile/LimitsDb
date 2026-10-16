@@ -303,7 +303,7 @@ ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM 
 Common overrides:
 
 ```
---mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
+--mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup and privileges (read-only), PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
@@ -333,9 +333,11 @@ application role, and creating or altering history tables before a `PREVIEW` or
 `EXECUTE` run (`PREVIEW` needs the objects in place to validate and time the
 queries; it skips only the data movement). Both operations are idempotent.
 
-If admin credentials are absent from `secrets[.<PROFILE>].json`, the privilege
-grants are skipped silently — the assumption is that grants are already in
-place.
+If source admin credentials are absent from `secrets[.<PROFILE>].json`, the
+source privilege grants are not applied. `ldb-run` checks with the runtime
+connection which privileges are missing through the role and logs a warning
+naming them; a table the runtime user cannot see is skipped with a warning.
+Run `--mode PREPARE` to get the missing grants as a file for a DBA.
 
 History table management follows the same principle:
 
@@ -437,7 +439,7 @@ the same pending file as the failed DDL, so a DBA can run it.
 | Parameter                | Purpose                                                                                                                                                         | Default / values                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history).                                                                         | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
-| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PREPARE` apply grants and history objects without running ILM, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
+| `mode`                   | Execution mode: `VALIDATE` config, credentials and role privileges (read-only), `PREPARE` apply grants and history objects without running ILM, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
 | `chunk_size`             | Rows per chunk when processing large tables.                                                                                                                    | Default `100000`.                                                                    |
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
