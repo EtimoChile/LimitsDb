@@ -886,10 +886,8 @@ def ldb_exec_ilm(
                         f"Table {owner}.{table_name} finished with status {status} and {rows_processed - prev_rows_processed} rows processed."
                     )
                     cdr["ctl_status"] = status
-                    if status == Status.ERROR:
-                        logger.error(f"  Error {sqlcode}: {message}")
-                    elif status == Status.SKIPPED:
-                        logger.error(f"  Error {sqlcode}: {message}")
+                    if status in (Status.ERROR, Status.SKIPPED):
+                        logger.error(f"  Error {sqlcode}: {message}" if sqlcode else f"  Error: {message}")
                     active_tables.remove((owner, table_name))
                     processes.remove(completed_future)
                     del process_targets[completed_future]

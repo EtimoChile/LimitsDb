@@ -6,9 +6,9 @@ db_engine: oracle
 
 # Runtime users
 source_dsn: "leon.etimo.cl/alpha"
-source_username: ldb
+source_username: LDB
 history_dsn: "leon.etimo.cl/alpha"
-history_username: ldbhst
+history_username: LDBHST
 
 # Administrative users, only needed to provision users, roles and DB links
 # admin_source_username: ""
