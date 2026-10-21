@@ -654,11 +654,11 @@ def test_source_and_history_ilm_archive_and_purge_correct_rows(
             "ldb-run", *common_arguments, "--action", "SOURCE_ILM", "--mode", "PREVIEW", environment=cli_environment
         )
 
-        # Then: nothing moved and the day is not marked as processed (TPEND, not TEND)
+        # Then: nothing moved and the day is not marked as processed (PTEND, not TEND)
         assert _fetch_ids(source_connection, "ilm_orders") == [1, 2, 3]
         assert (
             _fetch_ctl_status(source_connection, owner=source_user, table_name="ILM_ORDERS", action="SOURCE_ILM")
-            == "TPEND"
+            == "PTEND"
         )
 
         # When: SOURCE_ILM runs in EXECUTE mode

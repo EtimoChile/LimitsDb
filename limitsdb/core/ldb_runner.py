@@ -1,5 +1,8 @@
 import logging
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+import os
+import socket
+import uuid
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from operator import attrgetter
 from typing import Any, Literal, TypedDict, cast
 
@@ -14,6 +17,11 @@ from limitsdb.db.ldb_engine_loader import get_db_engine
 from limitsdb.db.ldb_engines import ColumnDefinition, DatabaseEngine, DdlFailures, DdlSink, TableDefinition
 
 logger = get_logger("runner")
+
+# Seconds between liveness queries on the connection that holds the runner locks
+_LOCK_PING_SECONDS = 30.0
+# ORA-20001/2/3/5/6: the control row belongs to another run (or the rules refused this one) and stays untouched
+_FOREIGN_CONTROL_CODES = (20001, 20002, 20003, 20005, 20006)
 
 
 class _OtherColumn(TypedDict):
@@ -518,39 +526,56 @@ def _append_unique_name(other_columns: list[_OtherColumn], other_column: _OtherC
         other_columns.append(other_column)
 
 
-def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> WorkerResult:
+def process_table(
+    config: Config, owner: str, table_name: str, plsql_code: str, process_date: str, run_id: str
+) -> WorkerResult:
     logger.info(f"Processing table {owner}.{table_name}...")
     engine: DatabaseEngine | None = None
     conn: Any = None
     process_start: Any = None
+    baseline = 0
     try:
         engine = get_db_engine(config.connections.db_engine)
         conn = engine.get_connection(config)
         user, _, dsn = get_effective_credentials(config, admin=False)
         logger.info(f"Connected to {dsn} as {user}")
         process_start = engine.get_system_date(conn)
+        if config.execution.mode != "PREVIEW":
+            # An incomplete EXECUTE of this process date is continued: its rows stay in the control counter
+            baseline = engine.get_resumed_rows(conn, owner, table_name, process_date)
+            if baseline:
+                logger.info(f"Resuming {owner}.{table_name}: {baseline} rows were processed by the interrupted run.")
         logger.info(f"Executing ILM for {owner}.{table_name}...")
-        engine.sql_block_run(conn, plsql_code)
+        engine.sql_block_run(conn, plsql_code, config.execution.mode, run_id)
         rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
         finished = Status.TABLE_PREVIEW_END if config.execution.mode == "PREVIEW" else Status.TABLE_END
-        # The block resets the control counter at TSTART, so rows_processed already counts only this run
-        return (owner, table_name, finished, 0, rows_processed, None, None)
+        return (owner, table_name, finished, baseline, rows_processed, None, None)
     except Exception as exc:
         sqlcode, message = _exception_details(exc)
-        rows_processed = 0
+        rows_processed = baseline
         logger.error("Worker failed for %s.%s: %s", owner, table_name, message, exc_info=True)
-        # Table in use or already processed: the control row belongs to another run and must stay untouched
-        owned_by_other_run = sqlcode in (20001, 20002, 20003)
+        owned_by_other_run = sqlcode in _FOREIGN_CONTROL_CODES
         if engine is not None and conn is not None and process_start is not None and not owned_by_other_run:
             try:
                 rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-                engine.save_error_status(
-                    conn, config, owner, table_name, process_date, process_start, message, plsql_code, rows_processed
-                )
+                # The block already persisted its own failure; only one outside it (compile error, lost
+                # session...) still needs the ERROR row
+                if not engine.error_recorded_since(conn, owner, table_name, process_start):
+                    engine.save_error_status(
+                        conn,
+                        config,
+                        owner,
+                        table_name,
+                        process_date,
+                        process_start,
+                        message,
+                        plsql_code,
+                        max(rows_processed - baseline, 0),
+                        run_id,
+                    )
             except Exception:
                 logger.critical("Failed to persist recovery evidence for %s.%s", owner, table_name, exc_info=True)
-        # The block resets the counter at TSTART, so the rows are this run's only: no baseline to subtract
-        return (owner, table_name, Status.ERROR, 0, rows_processed, sqlcode, message)
+        return (owner, table_name, Status.ERROR, baseline, rows_processed, sqlcode, message)
     finally:
         if engine is not None and conn is not None:
             engine.close_connection(conn)
@@ -767,8 +792,10 @@ whenever oserror exit 1
 whenever sqlerror exit 1
 set echo on ver off trimspool on
 spool ldb_{config.context.schema}.log
-COLUMN process_date NEW_VALUE process_date
-SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
+rem usage: sqlplus user/password@dsn @script EXECUTE|PREVIEW
+DEFINE ldb_mode = "&1"
+COLUMN ldb_process_date NEW_VALUE ldb_process_date
+SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;
     """
     )
     while True:
@@ -834,6 +861,37 @@ def ldb_exec_ilm(
     engine: DatabaseEngine,
     connection: Any,
 ) -> int:
+    """Run the tables under the runner mutex: another runner on any of them stops this one before it starts.
+
+    The locks live on a dedicated connection that never commits; ``connection`` only writes the key rows."""
+    run_id = str(uuid.uuid4())
+    protected = [key for key, table_cnf in tables_config.items() if not table_cnf["skip"]]
+    lock_conn: Any = None
+    try:
+        lock_conn = engine.get_connection(config)
+        engine.acquire_run_locks(
+            lock_conn, connection, protected, run_id, config.execution.mode, socket.gethostname(), os.getpid()
+        )
+        logger.info("Runner %s holds the locks of %d tables.", run_id, len(protected))
+        return _run_table_pool(config, tables_config, process_date, engine, connection, run_id, lock_conn)
+    finally:
+        if lock_conn is not None:
+            try:
+                engine.release_run_locks(lock_conn)
+            except Exception:
+                logger.warning("Could not release the runner locks cleanly.", exc_info=True)
+            engine.close_connection(lock_conn)
+
+
+def _run_table_pool(
+    config: Config,
+    tables_config: TablesConfig,
+    process_date: str,
+    engine: DatabaseEngine,
+    connection: Any,
+    run_id: str,
+    lock_conn: Any,
+) -> int:
     processes: list[Future[WorkerResult]] = []
     process_targets: dict[Future[WorkerResult], tuple[str, str]] = {}
     active_tables: set[tuple[str, str]] = set()
@@ -853,7 +911,7 @@ def ldb_exec_ilm(
                     owner, table_name, table_info = next_ready_table
                     logger.info(f"Launching background process for {owner}.{table_name}...")
                     future = executor.submit(
-                        process_table, config, owner, table_name, table_info["sql_block"], process_date
+                        process_table, config, owner, table_name, table_info["sql_block"], process_date, run_id
                     )
                     processes.append(future)
                     process_targets[future] = (owner, table_name)
@@ -865,8 +923,12 @@ def ldb_exec_ilm(
                     break  # There are no processes to launch, so go to waiting some process to end
             logger.debug(f"Active processes: {len(processes)}")
             if processes:
-                # Wait for some process to finish
-                for completed_future in as_completed(processes):
+                # Wait for some process to finish; while none does, check that the locks are still held
+                done, _ = wait(processes, timeout=_LOCK_PING_SECONDS, return_when=FIRST_COMPLETED)
+                if not done:
+                    engine.check_run_locks(lock_conn)
+                    continue
+                for completed_future in [future for future in processes if future in done]:
                     owner, table_name = process_targets[completed_future]
                     try:
                         owner, table_name, status, prev_rows_processed, rows_processed, sqlcode, message = (

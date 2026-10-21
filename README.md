@@ -333,10 +333,19 @@ application role, and creating or altering history tables before a `PREVIEW` or
 `EXECUTE` run (`PREVIEW` needs the objects in place to validate and time the
 queries; it skips only the data movement). Both operations are idempotent.
 
-A `PREVIEW` finishes each table with the status `TPEND` in `ldb_ctl`, not `TEND`, so it never marks a
-table as processed for the day: an `EXECUTE` run afterwards (same day) still moves the data. A `TPEND`
-left by a previous `PREVIEW` is ignored by the next run. After upgrading, rerun `ldb-impl` so the
-supporting procedures (`check_save_status`, `check_referencing_tables`) know the new status.
+A `PREVIEW` writes its own statuses in `ldb_ctl`, the `EXECUTE` ones prefixed with `P` (`PTSTART`, `PCSTART`,
+`PCEND`, `PLSTART`, `PLEND`, `PTEND`, `PERROR`), and finishes each table with `PTEND`, not `TEND`, so it never marks a
+table as processed for the day: an `EXECUTE` run afterwards (same day) still moves the data. A `PREVIEW` is refused
+(`ORA-20006`) over a table that has an `EXECUTE` status for the same process date. An `EXECUTE` continues an incomplete
+`EXECUTE` of the same process date (finished tables stay finished and the rows already moved are kept); in any other case
+the table starts over and the abandoned run is closed in `ldb_log` as "Incomplete process closed by a later process".
+
+Only one `ldb-run` can work on a table at a time: the runner takes a lock per table in `LDB_RUN_LOCK` and a second runner
+stops with exit code 1 before starting anything. After upgrading, rerun `ldb-impl` so the new table and the supporting
+procedures (`check_save_status`, `check_referencing_tables`) are installed.
+
+The generated `SCRIPT` takes the mode from SQL*Plus and runs without the runner lock:
+`sqlplus user/password@dsn @script EXECUTE` (or `PREVIEW`). Its process date is the `ldb_process_date` variable.
 
 If source admin credentials are absent from `secrets[.<PROFILE>].json`, the
 source privilege grants are not applied. `ldb-run` checks with the runtime

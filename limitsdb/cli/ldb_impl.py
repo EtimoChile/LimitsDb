@@ -63,6 +63,7 @@ def _build_control_tables(owner: str) -> list[TableDefinition]:
                 ColumnDefinition("CTL_PROCESS_END", "date"),
                 ColumnDefinition("CTL_ROWS_PROCESSED", "number", precision=18, scale=0),
                 ColumnDefinition("CTL_PLSQL", "clob"),
+                ColumnDefinition("CTL_RUN_ID", "string", length=36),
             ),
             primary_key=("CTL_OWNER", "CTL_TABLE_NAME"),
         ),
@@ -83,6 +84,22 @@ def _build_control_tables(owner: str) -> list[TableDefinition]:
                 ColumnDefinition("LOG_PLSQL", "clob"),
             ),
             primary_key=("LOG_ID",),
+        ),
+        # Runner mutex: the 'L' row is locked by the live runner; the 'K' row publishes its run_id
+        TableDefinition(
+            owner=owner,
+            name="LDB_RUN_LOCK",
+            columns=(
+                ColumnDefinition("RL_OWNER", "string", length=50, nullable=False),
+                ColumnDefinition("RL_TABLE_NAME", "string", length=50, nullable=False),
+                ColumnDefinition("RL_KIND", "string", length=1, nullable=False),
+                ColumnDefinition("RL_RUN_ID", "string", length=36),
+                ColumnDefinition("RL_MODE", "string", length=10),
+                ColumnDefinition("RL_HOST", "string", length=255),
+                ColumnDefinition("RL_PID", "number", precision=18, scale=0),
+                ColumnDefinition("RL_START", "date"),
+            ),
+            primary_key=("RL_OWNER", "RL_TABLE_NAME", "RL_KIND"),
         ),
     ]
 

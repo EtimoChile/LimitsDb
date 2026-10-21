@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from limitsdb.core import ldb_ddl, ldb_params_config, ldb_runner, ldb_utils
-from limitsdb.core.ldb_errors import ConfigurationError
+from limitsdb.core.ldb_errors import ConfigurationError, ExecutionError, RunnerBusyError
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
 from limitsdb.db.ldb_engines import ColumnDefinition
@@ -868,8 +868,27 @@ class _ImmediateExecutor:
 
 
 class _StatusEngine:
+    def __init__(self):
+        self.events = []
+
     def all_status_tend(self, connection, tables_config, process_date):
         return all(table["conds"][0]["ctl_status"] == Status.TABLE_END for table in tables_config.values())
+
+    def get_connection(self, config, admin=False, env=None):
+        self.events.append("connect")
+        return "lock-connection"
+
+    def acquire_run_locks(self, lock_conn, key_conn, tables, run_id, mode, host, pid):
+        self.events.append(("acquire", lock_conn, key_conn, list(tables), run_id, mode))
+
+    def check_run_locks(self, lock_conn):
+        self.events.append(("ping", lock_conn))
+
+    def release_run_locks(self, lock_conn):
+        self.events.append(("release", lock_conn))
+
+    def close_connection(self, conn):
+        self.events.append(("close", conn))
 
 
 def _table_config(*, references=()):
@@ -904,7 +923,7 @@ def test_tables_with_references_are_processed_after_their_dependencies(
         ("A", "CHILD"): _table_config(references=(("A", "PARENT"),)),
     }
 
-    def successful_worker(config, owner, table_name, plsql_code, process_date):
+    def successful_worker(config, owner, table_name, plsql_code, process_date, run_id):
         launched.append((owner, table_name))
         return owner, table_name, Status.TABLE_END, 0, 1, None, None
 
@@ -929,7 +948,7 @@ def test_cyclic_table_dependencies_prevent_successful_execution(monkeypatch: pyt
     }
     launched = []
 
-    def worker(config, owner, table_name, sql, process_date):
+    def worker(config, owner, table_name, sql, process_date, run_id):
         launched.append((owner, table_name))
         return owner, table_name, Status.TABLE_END, 0, 1, None, None
 
@@ -959,7 +978,7 @@ def test_partial_failure_with_progress_is_retried_on_same_run(monkeypatch: pytes
         ("A", "CHILD"): _table_config(references=(("A", "PARENT"),)),
     }
 
-    def progress_then_success(config, owner, table_name, plsql_code, process_date):
+    def progress_then_success(config, owner, table_name, plsql_code, process_date, run_id):
         nonlocal parent_attempts
         launched.append((owner, table_name))
         if table_name == "PARENT":
@@ -992,7 +1011,7 @@ def test_failed_worker_that_makes_no_progress_is_skipped(monkeypatch: pytest.Mon
         ("A", "CHILD"): _table_config(references=(("A", "PARENT"),)),
     }
 
-    def no_progress_failure(config, owner, table_name, plsql_code, process_date):
+    def no_progress_failure(config, owner, table_name, plsql_code, process_date, run_id):
         launched.append((owner, table_name))
         return owner, table_name, Status.ERROR, 2, 2, 20001, "no progress"
 
@@ -1015,7 +1034,7 @@ def test_unexpected_worker_exception_returns_error_code(monkeypatch: pytest.Monk
     # Given: a worker that raises unexpectedly
     tables_config = {("A", "PARENT"): _table_config()}
 
-    def crashing_worker(config, owner, table_name, plsql_code, process_date):
+    def crashing_worker(config, owner, table_name, plsql_code, process_date, run_id):
         raise RuntimeError("process crashed unexpectedly")
 
     monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
@@ -1026,6 +1045,112 @@ def test_unexpected_worker_exception_returns_error_code(monkeypatch: pytest.Monk
 
     # Then: exit code 1 — unhandled exceptions never silently succeed
     assert result == 1
+
+
+def test_runner_locks_every_active_table_before_launching_and_releases_after():
+    # Spec: docs/concurrency-control.md > Layer 1 — the runner takes one lock per table on a dedicated
+    # connection before any worker starts and frees it when the run ends
+    # Given: two tables and a third one flagged to skip
+    engine = _StatusEngine()
+    tables_config = {
+        ("A", "T2"): _table_config(),
+        ("A", "T1"): _table_config(),
+        ("A", "OFF"): {**_table_config(), "skip": True, "conds": [{"ctl_status": Status.TABLE_END}]},
+    }
+    seen = []
+
+    def worker(config, owner, table_name, plsql_code, process_date, run_id):
+        seen.append((owner, table_name, run_id))
+        return owner, table_name, Status.TABLE_END, 0, 1, None, None
+
+    # When: ILM execution runs
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+        patch.setattr(ldb_runner, "process_table", worker)
+        result = ldb_runner.ldb_exec_ilm(_execution_config(), tables_config, "20261006", engine, "main-connection")
+
+    # Then: the skipped table is not locked, the lock connection differs from the key connection, every worker
+    # carries the run_id that was published, and the lock is released and closed at the end
+    assert result == 0
+    acquire = next(event for event in engine.events if event[0] == "acquire")
+    assert acquire[1:3] == ("lock-connection", "main-connection")
+    assert sorted(acquire[3]) == [("A", "T1"), ("A", "T2")]
+    assert acquire[5] == "EXECUTE"
+    assert {run_id for _, _, run_id in seen} == {acquire[4]}
+    assert engine.events[-2:] == [("release", "lock-connection"), ("close", "lock-connection")]
+
+
+def test_runner_that_finds_another_runner_starts_nothing_and_still_releases(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — a table held by another live runner stops this one before
+    # any worker is launched (RunnerBusyError, exit 1 through the CLI)
+    # Given: an engine whose lock acquisition finds the table busy
+    class _BusyEngine(_StatusEngine):
+        def acquire_run_locks(self, *args):
+            raise RunnerBusyError("Another runner is processing A.T1")
+
+    engine = _BusyEngine()
+    launched = []
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(ldb_runner, "process_table", lambda *args: launched.append(args))
+
+    # When/Then: the run is refused, nothing is launched and the lock connection is closed
+    with pytest.raises(RunnerBusyError):
+        ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
+    assert launched == []
+    assert engine.events[-1] == ("close", "lock-connection")
+
+
+def test_lock_connection_is_pinged_while_no_worker_finishes(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — a trivial query on the lock connection detects an idle or
+    # cut session while the workers run
+    # Given: a worker that is not finished on the first wait, and finished on the second
+    engine = _StatusEngine()
+    real_wait = ldb_runner.wait
+    waits = []
+
+    def slow_then_done(futures, timeout, return_when):
+        waits.append(timeout)
+        if len(waits) == 1:
+            return set(), set(futures)
+        return real_wait(futures, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(ldb_runner, "wait", slow_then_done)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+
+    # When: ILM execution runs
+    result = ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
+
+    # Then: the idle wait pinged the lock connection once and the run completed
+    assert result == 0
+    assert engine.events.count(("ping", "lock-connection")) == 1
+
+
+def test_lost_lock_connection_aborts_the_run(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Failure scenarios — if the lock session is gone the mutex no longer
+    # holds, so the runner stops with the error instead of going on unprotected
+    # Given: a ping that fails while a worker is still running
+    class _LostEngine(_StatusEngine):
+        def check_run_locks(self, lock_conn):
+            raise ExecutionError("The runner lock connection was lost")
+
+    monkeypatch.setattr(ldb_runner, "wait", lambda futures, timeout, return_when: (set(), set(futures)))
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+
+    # When/Then: the failure reaches the caller and the lock connection is still closed
+    engine = _LostEngine()
+    with pytest.raises(ExecutionError):
+        ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
+    assert engine.events[-1] == ("close", "lock-connection")
 
 
 # ---------------------------------------------------------------------------
@@ -1048,10 +1173,13 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
         def get_system_date(self, conn):
             return "start"
 
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
         def get_rows_processed(self, conn, owner, table_name, process_date):
             return 7 if calls["ran"] else 2
 
-        def sql_block_run(self, conn, plsql_code):
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             calls["ran"] = True
 
         def close_connection(self, conn):
@@ -1069,7 +1197,7 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
     )
 
     # When: process_table runs
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
     # Then: TABLE_END counting only this run's rows (the counter restarts at TSTART) and connection closed
     assert result == ("OWNER", "TABLE", Status.TABLE_END, 0, 7, None, None)
@@ -1091,10 +1219,16 @@ def test_process_table_returns_error_status_and_closes_connection_on_failure(
         def get_system_date(self, conn):
             return "start"
 
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
         def get_rows_processed(self, conn, owner, table_name, process_date):
             return 3
 
-        def sql_block_run(self, conn, plsql_code):
+        def error_recorded_since(self, conn, owner, table_name, since):
+            return False
+
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             raise RuntimeError("worker stopped")
 
         def save_error_status(self, *args):
@@ -1114,7 +1248,7 @@ def test_process_table_returns_error_status_and_closes_connection_on_failure(
     )
 
     # When: process_table runs and the SQL block raises
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
     # Then: ERROR status returned, error saved, connection closed
     assert result == ("OWNER", "TABLE", Status.ERROR, 0, 3, None, "worker stopped")
@@ -1138,10 +1272,13 @@ def test_process_table_leaves_the_control_row_alone_when_another_run_owns_the_ta
         def get_system_date(self, conn):
             return "start"
 
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
         def get_rows_processed(self, conn, owner, table_name, process_date):
             return 277839
 
-        def sql_block_run(self, conn, plsql_code):
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             raise _Busy()
 
         def save_error_status(self, *args):
@@ -1160,7 +1297,7 @@ def test_process_table_leaves_the_control_row_alone_when_another_run_owns_the_ta
         source_dsn="dsn",
     )
 
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
     assert result == ("OWNER", "TABLE", Status.ERROR, 0, 0, 20002, "in process")
     assert calls["saved"] is False
@@ -1181,13 +1318,16 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
         def get_system_date(self, conn):
             return "start"
 
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
         def get_rows_processed(self, conn, owner, table_name, process_date):
             call_count[0] += 1
             if call_count[0] == 1:
                 return 0
             raise RuntimeError("recovery DB unavailable")
 
-        def sql_block_run(self, conn, plsql_code):
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             raise RuntimeError("primary failure")
 
         def close_connection(self, conn):
@@ -1203,10 +1343,186 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
     )
 
     # When: process_table runs
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
     # Then: ERROR status — the table run did not succeed
     assert result[2] == Status.ERROR
+
+
+def _worker_engine(monkeypatch: pytest.MonkeyPatch, **overrides):
+    """Install a process_table engine whose calls are recorded in ``log``; ``overrides`` replace its methods."""
+    log: list[tuple[str, tuple]] = []
+
+    class _Engine:
+        def get_connection(self, config, admin=False, env=None):
+            return object()
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 6, 12, 0)
+
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            return 5
+
+        def error_recorded_since(self, conn, owner, table_name, since):
+            log.append(("error_recorded_since", (since,)))
+            return False
+
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
+            log.append(("sql_block_run", (mode, run_id)))
+
+        def save_error_status(self, *args):
+            log.append(("save_error_status", args[8:]))
+
+        def close_connection(self, conn):
+            pass
+
+    for name, function in overrides.items():
+        setattr(_Engine, name, function)
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: _Engine())
+    return log
+
+
+def _worker_config(mode: str = "EXECUTE"):
+    return Config(
+        schema="s",
+        db_engine="oracle",
+        action="SOURCE_ILM",
+        mode=mode,  # type: ignore[arg-type]
+        source_username="user",
+        source_password="pw",
+        source_dsn="dsn",
+    )
+
+
+def test_process_table_hands_mode_and_run_id_to_the_block(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 2 — the block receives the mode and the run_id of its runner
+    # Given: a PREVIEW worker
+    log = _worker_engine(monkeypatch)
+
+    # When: process_table runs
+    ldb_runner.process_table(_worker_config("PREVIEW"), "OWNER", "TABLE", "begin null; end;", "20261006", "run-9")
+
+    # Then: the block is run with PREVIEW and run-9
+    assert ("sql_block_run", ("PREVIEW", "run-9")) in log
+
+
+def test_process_table_reports_only_this_runs_rows_when_it_resumes_an_interrupted_execute(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: docs/concurrency-control.md > Process date — an EXECUTE continues an incomplete EXECUTE of the same
+    # date and keeps its rows; the result carries the baseline so the runner reports this run's rows
+    # Given: an interrupted EXECUTE that had moved 3 rows, and a block that ends with 5 in the counter
+    _worker_engine(monkeypatch, get_resumed_rows=lambda self, conn, owner, table_name, process_date: 3)
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: baseline 3 and total 5 are reported
+    assert result == ("OWNER", "TABLE", Status.TABLE_END, 3, 5, None, None)
+
+
+def test_process_table_never_resumes_a_preview(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Process date — a PREVIEW deletes nothing, so it always starts over
+    # Given: an engine that would report resumed rows
+    _worker_engine(monkeypatch, get_resumed_rows=lambda self, conn, owner, table_name, process_date: 3)
+
+    # When: a PREVIEW worker runs
+    result = ldb_runner.process_table(_worker_config("PREVIEW"), "OWNER", "TABLE", "begin null; end;", "20261006", "r")
+
+    # Then: the baseline is 0
+    assert result[3] == 0
+
+
+def test_failed_resumed_table_without_new_rows_reports_the_baseline_so_it_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM execution — a failure without progress is SKIPPED; a resumed table must be compared
+    # against the rows it already had, not against zero
+    # Given: a resumed table (baseline 4) whose block fails without moving anything
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise RuntimeError("worker stopped")
+
+    _worker_engine(
+        monkeypatch,
+        get_resumed_rows=lambda self, conn, owner, table_name, process_date: 4,
+        get_rows_processed=lambda self, conn, owner, table_name, process_date: 4,
+        sql_block_run=fail,
+    )
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: previous and current rows are equal, which the runner turns into SKIPPED
+    assert result[2:5] == (Status.ERROR, 4, 4)
+
+
+def test_process_table_does_not_write_a_second_error_when_the_block_already_did(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 2 — the block's own handler persists its ERROR; Python writes
+    # one only for failures outside the block (PEND-022)
+    # Given: a failing block whose ERROR is already in ldb_ctl
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise RuntimeError("ORA-20004: parent not processed")
+
+    log = _worker_engine(
+        monkeypatch,
+        sql_block_run=fail,
+        error_recorded_since=lambda self, conn, owner, table_name, since: True,
+    )
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: the failure is reported but no ERROR is written again
+    assert result[2] == Status.ERROR
+    assert not [name for name, _ in log if name == "save_error_status"]
+
+
+def test_process_table_writes_the_error_for_a_failure_outside_the_block(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 2 — a failure the block could not record (compile error, missing
+    # procedure) is still persisted by the worker, with this run's rows and its run_id
+    # Given: a failing block that left no ERROR in ldb_ctl, and a resumed table with 2 previous rows
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise RuntimeError("PLS-00201: identifier must be declared")
+
+    log = _worker_engine(
+        monkeypatch,
+        sql_block_run=fail,
+        get_resumed_rows=lambda self, conn, owner, table_name, process_date: 2,
+    )
+
+    # When: process_table runs
+    ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: the error is saved once, for this run's 3 rows (5 total minus 2), under run-1
+    saved = [args for name, args in log if name == "save_error_status"]
+    assert saved == [(3, "run-1")]
+
+
+@pytest.mark.parametrize("code", [20001, 20002, 20003, 20005, 20006])
+def test_process_table_leaves_the_control_row_alone_for_every_foreign_control_code(
+    monkeypatch: pytest.MonkeyPatch, code: int
+):
+    # Spec: docs/concurrency-control.md > Error codes — in use, guarded, already processed, ownership lost and
+    # PREVIEW refused all mean the control row is not this run's: nothing is written to it
+    # Given: a block that fails with the code
+    class _Foreign(Exception):
+        def __init__(self):
+            super().__init__(type("E", (), {"code": code, "message": "not yours"})())
+
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise _Foreign()
+
+    log = _worker_engine(monkeypatch, sql_block_run=fail)
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: ERROR is reported with the code and the control row is untouched
+    assert result[2] == Status.ERROR and result[5] == code
+    assert not [name for name, _ in log if name in ("save_error_status", "error_recorded_since")]
 
 
 # ---------------------------------------------------------------------------
@@ -1925,7 +2241,7 @@ def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: py
 def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: pytest.MonkeyPatch):
     # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW does not mark tables as processed for the day, so a
     # later run still processes them; a real TEND is kept
-    # Given: ldb_ctl holds TPEND for one table (left by a PREVIEW) and TEND for another
+    # Given: ldb_ctl holds PTEND for one table (left by a PREVIEW) and TEND for another
     class _StatusEngine(_VisibilityEngine):
         def get_status(self, conn, process_date):
             return [
@@ -1947,7 +2263,7 @@ def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: py
 
 
 def test_process_table_reports_the_preview_end_status_in_preview_mode(monkeypatch: pytest.MonkeyPatch):
-    # Spec: README > Run ILM > --mode PREVIEW — the worker reports TPEND, not TEND, for a PREVIEW
+    # Spec: README > Run ILM > --mode PREVIEW — the worker reports PTEND, not TEND, for a PREVIEW
     # Given: a worker engine and a PREVIEW config
     class _Engine:
         def get_connection(self, config, admin=False, env=None):
@@ -1959,7 +2275,7 @@ def test_process_table_reports_the_preview_end_status_in_preview_mode(monkeypatc
         def get_rows_processed(self, conn, owner, table_name, process_date):
             return 5
 
-        def sql_block_run(self, conn, plsql_code):
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             pass
 
         def close_connection(self, conn):
@@ -1977,14 +2293,14 @@ def test_process_table_reports_the_preview_end_status_in_preview_mode(monkeypatc
     )
 
     # When: process_table runs
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
-    # Then: the status is TPEND
+    # Then: the status is PTEND
     assert result[2] == Status.TABLE_PREVIEW_END
 
 
 def test_preview_finished_tables_satisfy_their_children_and_are_not_launched_again():
-    # Spec: README > Run ILM > --mode PREVIEW — within a PREVIEW run a table that ended in TPEND counts as done
+    # Spec: README > Run ILM > --mode PREVIEW — within a PREVIEW run a table that ended in PTEND counts as done
     # Given: a parent finished by the PREVIEW and a child waiting for it
     tables_config = {
         ("A", "PARENT"): {"skip": False, "conds": [{"ctl_status": Status.TABLE_PREVIEW_END}], "referencing_tables": []},
