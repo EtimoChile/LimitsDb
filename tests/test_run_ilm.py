@@ -2515,6 +2515,7 @@ def test_validate_reports_missing_privileges_without_changing_anything(monkeypat
     assert ok is False
     assert any("SOURCE runtime user lacks" in m for m in recorder.messages["error"])
     assert any("HISTORY runtime user lacks" in m for m in recorder.messages.get("warning", []))
+    assert any("--mode PREPARE" in m for m in recorder.messages["error"])
     assert engine.source_granted == [] and engine.admin_applied == []
 
 

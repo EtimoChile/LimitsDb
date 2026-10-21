@@ -291,6 +291,7 @@ def _validate_privileges(
     }
     primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
     ok = True
+    any_missing = False
     for env, conn in runtime_conns.items():
         level = logging.ERROR if env == primary_env else logging.WARNING
         try:
@@ -305,10 +306,12 @@ def _validate_privileges(
         except Exception:
             logger.error("Failed to check the %s privileges of the runtime user.", env, exc_info=True)
             return False
+        if missing:
+            any_missing = True
         if missing and env == primary_env:
             ok = False
-    if ok:
-        logger.info("Privileges checked; run --mode PREPARE to apply any that are missing.")
+    if any_missing:
+        (logger.warning if ok else logger.error)("Run --mode PREPARE to apply the missing privileges.")
     return ok
 
 
