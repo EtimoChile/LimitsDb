@@ -1776,7 +1776,24 @@ end;"""
             cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {OracleEngine._format_identifier(owner)}")
             for statement in (T_REFERENCING_TABLES_TYPE, CHECK_SAVE_STATUS_PROC, CHECK_REFERENCING_TABLES_PROC):
                 OracleEngine._execute_ddl(conn, cursor, statement)
+            # CREATE OR REPLACE succeeds even when the unit does not compile, so the errors are read back
+            cursor.execute(
+                """SELECT name, type, line, position, text FROM all_errors
+                WHERE owner = :1 AND attribute = 'ERROR'
+                AND name IN ('T_REFERENCING_TABLES', 'CHECK_SAVE_STATUS', 'CHECK_REFERENCING_TABLES')
+                ORDER BY name, type, sequence""",
+                [OracleEngine.get_identifier_str(owner)],
+            )
+            compile_errors = [f"{row[0]} ({row[1]}) line {row[2]}: {row[4]}" for row in cursor.fetchall()]
+            if compile_errors:
+                raise ExecutionError(
+                    f"Supporting PL/SQL objects of {owner} are invalid after installing them: "
+                    + "; ".join(compile_errors)
+                )
             return SUPPORTING_OBJECT_LIST
+        except ExecutionError:
+            logger.critical("Supporting PL/SQL objects of %s do not compile.", owner)
+            raise
         except Exception as exc:
             logger.critical("Failed to ensure supporting PL/SQL objects.", exc_info=True)
             raise ExecutionError("Failed to ensure Oracle supporting PL/SQL objects") from exc

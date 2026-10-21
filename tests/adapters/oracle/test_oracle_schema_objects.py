@@ -845,3 +845,53 @@ def test_missing_table_privileges_reports_everything_when_the_role_is_not_enable
     # Then: the privilege counts as missing and the role is reported as not enabled
     assert missing == [("GL", "INV", "SELECT")]
     assert OracleEngine.is_role_enabled(connection, "LDB_ROLE") is False  # type: ignore[arg-type]
+
+
+def _supporting_connection(error_rows):
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.sql: list[str] = []
+
+        def execute(self, sql, params=None) -> None:
+            self.sql.append(" ".join(sql.split()))
+
+        def fetchall(self):
+            return error_rows
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = DummyCursor()
+
+        def cursor(self):
+            return self.cursor_instance
+
+    return DummyConnection()
+
+
+def test_supporting_objects_that_do_not_compile_fail_the_install(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ldb-impl — CREATE OR REPLACE succeeds even when a unit has compile errors, so an object left
+    # invalid must stop ldb-impl instead of being reported as created
+    # Given: the procedure compiles with an error
+    conn = _supporting_connection([("CHECK_SAVE_STATUS", "PROCEDURE", 12, 5, "PLS-00904: invalid identifier")])
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: None)
+
+    # When/Then: the install fails naming the object and the compiler message
+    with pytest.raises(ExecutionError, match=r"CHECK_SAVE_STATUS.*PLS-00904"):
+        OracleEngine.ensure_supporting_objects(conn, "ldb")  # type: ignore[arg-type]
+
+
+def test_supporting_objects_that_compile_are_reported_as_created(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ldb-impl — a clean compilation keeps reporting the three objects
+    # Given: no compile errors
+    conn = _supporting_connection([])
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: None)
+
+    # When
+    created = OracleEngine.ensure_supporting_objects(conn, "ldb")  # type: ignore[arg-type]
+
+    # Then: the errors were read for the schema owner in dictionary form
+    assert created == ["TYPE t_referencing_tables", "PROCEDURE check_save_status", "PROCEDURE check_referencing_tables"]
+    assert "FROM all_errors" in conn.cursor_instance.sql[-1]
