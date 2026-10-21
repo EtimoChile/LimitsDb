@@ -138,16 +138,51 @@ order  by 1 desc, 2;
 
 -- ---------------------------------------------------------
 prompt
-prompt === Total rows per table ===
+prompt === Total rows per table (dates: INV_STS_DATE / DSP_STS_DATE; details use the parent's) ===
 column TABLE_NAME format a12
-select 'SOURCE' as ENV, 'INV_HEAD' as TABLE_NAME, count(*) as ROWS_CNT from &P_SRC_OWNER..INV_HEAD union all
-select 'SOURCE', 'INV_DET',  count(*) from &P_SRC_OWNER..INV_DET  union all
-select 'SOURCE', 'DSP_HEAD', count(*) from &P_SRC_OWNER..DSP_HEAD union all
-select 'SOURCE', 'DSP_DET',  count(*) from &P_SRC_OWNER..DSP_DET  union all
-select 'HISTORY', 'INV_HEAD', count(*) from &P_HIST_OWNER..INV_HEAD@&P_HIST_DBLINK union all
-select 'HISTORY', 'INV_DET',  count(*) from &P_HIST_OWNER..INV_DET@&P_HIST_DBLINK  union all
-select 'HISTORY', 'DSP_HEAD', count(*) from &P_HIST_OWNER..DSP_HEAD@&P_HIST_DBLINK union all
-select 'HISTORY', 'DSP_DET',  count(*) from &P_HIST_OWNER..DSP_DET@&P_HIST_DBLINK;
+select 'SOURCE' as ENV, 'INV_HEAD' as TABLE_NAME, count(*) as ROWS_CNT,
+       to_char(min(t.INV_STS_DATE), 'YYYY-MM-DD') as MIN_DATE,
+       to_char(max(t.INV_STS_DATE), 'YYYY-MM-DD') as MAX_DATE
+from   &P_SRC_OWNER..INV_HEAD t
+union all
+select 'SOURCE', 'INV_DET', count(*),
+       to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD')
+from   &P_SRC_OWNER..INV_DET t
+join   &P_SRC_OWNER..INV_HEAD h on h.INV_ID = t.INV_ID
+union all
+select 'SOURCE', 'DSP_HEAD', count(*),
+       to_char(min(t.DSP_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(t.DSP_STS_DATE), 'YYYY-MM-DD')
+from   &P_SRC_OWNER..DSP_HEAD t
+union all
+select 'SOURCE', 'DSP_DET', count(*),
+       to_char(min(h.DSP_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(h.DSP_STS_DATE), 'YYYY-MM-DD')
+from   &P_SRC_OWNER..DSP_DET t
+join   &P_SRC_OWNER..DSP_HEAD h on h.DSP_ID = t.DSP_ID
+union all
+select 'HISTORY', 'INV_HEAD', count(*),
+       to_char(min(t.INV_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(t.INV_STS_DATE), 'YYYY-MM-DD')
+from   &P_HIST_OWNER..INV_HEAD@&P_HIST_DBLINK t
+union all
+select 'HISTORY', 'INV_DET', count(*),
+       to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD')
+from   &P_HIST_OWNER..INV_DET@&P_HIST_DBLINK t
+join   &P_HIST_OWNER..INV_HEAD@&P_HIST_DBLINK h on h.INV_ID = t.INV_ID
+union all
+select 'HISTORY', 'DSP_HEAD', count(*),
+       to_char(min(t.DSP_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(t.DSP_STS_DATE), 'YYYY-MM-DD')
+from   &P_HIST_OWNER..DSP_HEAD@&P_HIST_DBLINK t
+union all
+select 'HISTORY', 'DSP_DET', count(*),
+       to_char(min(h.DSP_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(h.DSP_STS_DATE), 'YYYY-MM-DD')
+from   &P_HIST_OWNER..DSP_DET@&P_HIST_DBLINK t
+join   &P_HIST_OWNER..DSP_HEAD@&P_HIST_DBLINK h on h.DSP_ID = t.DSP_ID;
 
 prompt
 prompt === Done ===
