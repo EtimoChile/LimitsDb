@@ -138,7 +138,7 @@ order  by 1 desc, 2;
 
 -- ---------------------------------------------------------
 prompt
-prompt === Total rows per table (dates: INV_STS_DATE / DSP_STS_DATE; details use the parent's) ===
+prompt === Total rows per table (dates: INV_STS_DATE / DSP_STS_DATE; details use the parent's, outer join) ===
 column TABLE_NAME format a12
 select 'SOURCE' as ENV, 'INV_HEAD' as TABLE_NAME, count(*) as ROWS_CNT,
        to_char(min(t.INV_STS_DATE), 'YYYY-MM-DD') as MIN_DATE,
@@ -149,7 +149,7 @@ select 'SOURCE', 'INV_DET', count(*),
        to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD'),
        to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD')
 from   &P_SRC_OWNER..INV_DET t
-join   &P_SRC_OWNER..INV_HEAD h on h.INV_ID = t.INV_ID
+left join &P_SRC_OWNER..INV_HEAD h on h.INV_ID = t.INV_ID
 union all
 select 'SOURCE', 'DSP_HEAD', count(*),
        to_char(min(t.DSP_STS_DATE), 'YYYY-MM-DD'),
@@ -160,7 +160,7 @@ select 'SOURCE', 'DSP_DET', count(*),
        to_char(min(h.DSP_STS_DATE), 'YYYY-MM-DD'),
        to_char(max(h.DSP_STS_DATE), 'YYYY-MM-DD')
 from   &P_SRC_OWNER..DSP_DET t
-join   &P_SRC_OWNER..DSP_HEAD h on h.DSP_ID = t.DSP_ID
+left join &P_SRC_OWNER..DSP_HEAD h on h.DSP_ID = t.DSP_ID
 union all
 select 'HISTORY', 'INV_HEAD', count(*),
        to_char(min(t.INV_STS_DATE), 'YYYY-MM-DD'),
@@ -171,7 +171,7 @@ select 'HISTORY', 'INV_DET', count(*),
        to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD'),
        to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD')
 from   &P_HIST_OWNER..INV_DET@&P_HIST_DBLINK t
-join   &P_HIST_OWNER..INV_HEAD@&P_HIST_DBLINK h on h.INV_ID = t.INV_ID
+left join &P_HIST_OWNER..INV_HEAD@&P_HIST_DBLINK h on h.INV_ID = t.INV_ID
 union all
 select 'HISTORY', 'DSP_HEAD', count(*),
        to_char(min(t.DSP_STS_DATE), 'YYYY-MM-DD'),
@@ -182,7 +182,7 @@ select 'HISTORY', 'DSP_DET', count(*),
        to_char(min(h.DSP_STS_DATE), 'YYYY-MM-DD'),
        to_char(max(h.DSP_STS_DATE), 'YYYY-MM-DD')
 from   &P_HIST_OWNER..DSP_DET@&P_HIST_DBLINK t
-join   &P_HIST_OWNER..DSP_HEAD@&P_HIST_DBLINK h on h.DSP_ID = t.DSP_ID;
+left join &P_HIST_OWNER..DSP_HEAD@&P_HIST_DBLINK h on h.DSP_ID = t.DSP_ID;
 
 prompt
 prompt === Done ===
