@@ -1,7 +1,8 @@
 -- =========================================================
--- Pre-run statistics for the GL test model
--- Row counts by status for source (GL) and history (GLHST, through a DB link).
--- Run it before an ILM execution to have a baseline to compare against.
+-- Statistics for the GL test model
+-- Row counts by status, with the min/max status date of each group, for source
+-- (GL) and history (GLHST, through a DB link).
+-- Run it before and after an ILM execution to compare both snapshots.
 --
 -- Run it connected to the SOURCE database as a user that can read GL and use
 -- the history DB link:
@@ -33,7 +34,7 @@ select to_char(sysdate, 'YYYYMMDDHH24MI') as RUN_TS from dual;
 spool gl_stats_&P_RUN_TS..log
 
 prompt =========================================================
-prompt  ILM pre-run statistics
+prompt  ILM statistics
 select ' Run at        : ' || to_char(sysdate, 'YYYY-MM-DD HH24:MI:SS') as info from dual
 union all
 select ' Source owner  : &P_SRC_OWNER'  from dual
@@ -47,7 +48,7 @@ column ROWS_CNT format 999,999,999,990
 column MIN_DATE format a10
 column MAX_DATE format a10
 
--- Note: if a history table does not exist yet (first run), its section
+-- Note: if a history table does not exist yet (e.g. before the first run), its section
 -- reports an ORA- error and the script continues.
 
 -- ---------------------------------------------------------
@@ -67,13 +68,17 @@ group  by INV_STS
 order  by 1 desc, 2;
 
 prompt
-prompt === INV_DET by parent INV_HEAD.INV_STS ===
-select 'SOURCE' as ENV, h.INV_STS as STATUS, count(*) as ROWS_CNT
+prompt === INV_DET by parent INV_HEAD.INV_STS (dates: parent INV_STS_DATE) ===
+select 'SOURCE' as ENV, h.INV_STS as STATUS, count(*) as ROWS_CNT,
+       to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD') as MIN_DATE,
+       to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD') as MAX_DATE
 from   &P_SRC_OWNER..INV_DET d
 join   &P_SRC_OWNER..INV_HEAD h on h.INV_ID = d.INV_ID
 group  by h.INV_STS
 union all
-select 'HISTORY', h.INV_STS, count(*)
+select 'HISTORY', h.INV_STS, count(*),
+       to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD')
 from   &P_HIST_OWNER..INV_DET@&P_HIST_DBLINK d
 join   &P_HIST_OWNER..INV_HEAD@&P_HIST_DBLINK h on h.INV_ID = d.INV_ID
 group  by h.INV_STS
@@ -96,27 +101,35 @@ group  by DSP_STS
 order  by 1 desc, 2;
 
 prompt
-prompt === DSP_DET by parent DSP_HEAD.DSP_STS ===
-select 'SOURCE' as ENV, h.DSP_STS as STATUS, count(*) as ROWS_CNT
+prompt === DSP_DET by parent DSP_HEAD.DSP_STS (dates: parent DSP_STS_DATE) ===
+select 'SOURCE' as ENV, h.DSP_STS as STATUS, count(*) as ROWS_CNT,
+       to_char(min(h.DSP_STS_DATE), 'YYYY-MM-DD') as MIN_DATE,
+       to_char(max(h.DSP_STS_DATE), 'YYYY-MM-DD') as MAX_DATE
 from   &P_SRC_OWNER..DSP_DET d
 join   &P_SRC_OWNER..DSP_HEAD h on h.DSP_ID = d.DSP_ID
 group  by h.DSP_STS
 union all
-select 'HISTORY', h.DSP_STS, count(*)
+select 'HISTORY', h.DSP_STS, count(*),
+       to_char(min(h.DSP_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(h.DSP_STS_DATE), 'YYYY-MM-DD')
 from   &P_HIST_OWNER..DSP_DET@&P_HIST_DBLINK d
 join   &P_HIST_OWNER..DSP_HEAD@&P_HIST_DBLINK h on h.DSP_ID = d.DSP_ID
 group  by h.DSP_STS
 order  by 1 desc, 2;
 
 prompt
-prompt === DSP_DET by related invoice status (DSP_DET -> INV_DET -> INV_HEAD.INV_STS) ===
-select 'SOURCE' as ENV, h.INV_STS as STATUS, count(*) as ROWS_CNT
+prompt === DSP_DET by related invoice status (DSP_DET -> INV_DET -> INV_HEAD.INV_STS; dates: INV_STS_DATE) ===
+select 'SOURCE' as ENV, h.INV_STS as STATUS, count(*) as ROWS_CNT,
+       to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD') as MIN_DATE,
+       to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD') as MAX_DATE
 from   &P_SRC_OWNER..DSP_DET d
 join   &P_SRC_OWNER..INV_DET i on i.IND_ID = d.IND_ID
 join   &P_SRC_OWNER..INV_HEAD h on h.INV_ID = i.INV_ID
 group  by h.INV_STS
 union all
-select 'HISTORY', h.INV_STS, count(*)
+select 'HISTORY', h.INV_STS, count(*),
+       to_char(min(h.INV_STS_DATE), 'YYYY-MM-DD'),
+       to_char(max(h.INV_STS_DATE), 'YYYY-MM-DD')
 from   &P_HIST_OWNER..DSP_DET@&P_HIST_DBLINK d
 join   &P_HIST_OWNER..INV_DET@&P_HIST_DBLINK i on i.IND_ID = d.IND_ID
 join   &P_HIST_OWNER..INV_HEAD@&P_HIST_DBLINK h on h.INV_ID = i.INV_ID
