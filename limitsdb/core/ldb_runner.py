@@ -875,7 +875,11 @@ def ldb_exec_ilm(
         engine.acquire_run_locks(
             lock_conn, connection, protected, run_id, config.execution.mode, socket.gethostname(), os.getpid()
         )
-        logger.info("Runner %s holds the locks of %d tables.", run_id, len(protected))
+        logger.info(
+            "Runner %s locked %d tables for this run; no other runner can process them until it ends.",
+            run_id,
+            len(protected),
+        )
         return _run_table_pool(config, tables_config, process_date, engine, connection, run_id, lock_conn)
     finally:
         if lock_conn is not None:
@@ -970,7 +974,7 @@ def _run_table_pool(
         if process_launched:
             logger.info("All tables processed successfully.")
         else:
-            logger.info("No tables to process.")
+            logger.info("No tables to process. Every table already finished for process date %s.", process_date)
         return 0
     else:
         logger.error("Some tables did not finish successfully.")
