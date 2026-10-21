@@ -880,10 +880,11 @@ end;"""
                     try:
                         key_cursor.execute(
                             """INSERT INTO ldb_run_lock (rl_owner, rl_table_name, rl_kind)
-                            SELECT :1, :2, :3 FROM dual
+                            SELECT :owner, :table_name, :kind FROM dual
                             WHERE NOT EXISTS (SELECT 1 FROM ldb_run_lock
-                                              WHERE rl_owner = :1 AND rl_table_name = :2 AND rl_kind = :3)""",
-                            [owner, table_name, kind],
+                                              WHERE rl_owner = :owner AND rl_table_name = :table_name
+                                              AND rl_kind = :kind)""",
+                            {"owner": owner, "table_name": table_name, "kind": kind},
                         )
                     except oracledb.IntegrityError:
                         key_conn.rollback()  # another runner inserted the same anchor first

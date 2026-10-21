@@ -226,3 +226,24 @@ def test_check_save_status_text_identifies_script_runs_and_uses_the_chunk_end_as
     # an ERROR left by a failed run can be retried at once: it is not an in-progress status
     guard = proc.split("-- The heartbeat", 1)[1].split("THEN", 1)[0]
     assert "'ERROR'" not in guard
+
+
+def test_anchor_insert_binds_each_value_once_by_name():
+    # Spec: docs/concurrency-control.md > Layer 1 — the anchor insert repeats its values in the NOT EXISTS
+    # subquery; positional binds would then need twice the values (DPY-4009 on a real driver)
+    # Given/When: the runner acquires locks for one table
+    log: list = []
+    OracleEngine.acquire_run_locks(
+        _Conn("lock", log=log),  # type: ignore[arg-type]
+        _Conn("key", log=log),  # type: ignore[arg-type]
+        [("A", "T1")],
+        "run-1",
+        "EXECUTE",
+        "host",
+        42,
+    )
+
+    # Then: every anchor insert passes a mapping, never a list
+    inserts = [params for _, sql, params in log if sql.startswith("INSERT INTO ldb_run_lock")]
+    assert len(inserts) == 2
+    assert all(isinstance(params, dict) for params in inserts)
