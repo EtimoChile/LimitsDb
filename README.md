@@ -364,7 +364,7 @@ History table management follows the same principle:
   DBA pre-creates all history objects and admin credentials are not stored.
 - **Admin credentials absent, history schema cannot be inspected** (for example
   the runtime connection or dictionary query fails): `ldb-run` exits with code 1
-  and logs the cause. It does not run ILM against a history schema whose state is
+  and tells the operator to run `ldb-impl` so a DBA completes the configuration. It does not run ILM against a history schema whose state is
   unknown.
 - **Admin credentials absent, DDL changes are required**: `ldb-run` applies the
   DDL directly over the runtime history connection, with no prior privilege
