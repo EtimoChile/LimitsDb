@@ -224,13 +224,20 @@ BEGIN
                                         WHEN p_status IN ('ERROR', 'PERROR') THEN ctl_rows_processed
                                         ELSE ctl_rows_processed + TO_NUMBER(p_rows_processed)
                                     END,
-               ctl_plsql          = NVL(p_plsql, ctl_plsql),
                ctl_run_id         = CASE
                                         WHEN p_status IN ('TSTART', 'PTSTART') THEN p_run_id
                                         ELSE ctl_run_id
                                     END
          WHERE ctl_owner = p_owner
            AND ctl_table_name = p_table_name;
+
+        -- Apart from the main UPDATE: mixing the CLOB column with a VARCHAR2 in NVL fails (ORA-22835) over 4000 chars
+        IF p_plsql IS NOT NULL THEN
+            UPDATE ldb_ctl
+               SET ctl_plsql = p_plsql
+             WHERE ctl_owner = p_owner
+               AND ctl_table_name = p_table_name;
+        END IF;
     END IF;
 
     INSERT INTO ldb_log (

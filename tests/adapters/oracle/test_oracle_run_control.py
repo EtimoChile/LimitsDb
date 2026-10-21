@@ -247,3 +247,11 @@ def test_anchor_insert_binds_each_value_once_by_name():
     inserts = [params for _, sql, params in log if sql.startswith("INSERT INTO ldb_run_lock")]
     assert len(inserts) == 2
     assert all(isinstance(params, dict) for params in inserts)
+
+
+def test_plsql_text_is_never_mixed_with_the_clob_column_in_nvl():
+    # Spec: docs/concurrency-control.md > Layer 2 — ctl_plsql is a CLOB; NVL(varchar2, clob) converts it back to
+    # VARCHAR2 and fails (ORA-22835) once the stored block passes 4000 characters
+    proc = " ".join(CHECK_SAVE_STATUS_PROC.split())
+    assert "NVL(p_plsql, ctl_plsql)" not in proc
+    assert "IF p_plsql IS NOT NULL THEN UPDATE ldb_ctl SET ctl_plsql = p_plsql" in proc
