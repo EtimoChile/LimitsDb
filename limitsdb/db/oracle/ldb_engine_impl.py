@@ -1071,6 +1071,17 @@ end;"""
                     OracleEngine._execute_ddl(conn, cursor, sql)
                     created.append(f"{fmttd_owner}.{fmttd_table_name}")
                     changed = True
+                else:
+                    # A control table from an earlier version gets the columns added since (existing ones stay)
+                    _, existing_columns = OracleEngine.get_table_columns(conn, table.owner, table.name)
+                    for col in table.columns:
+                        if col.name not in existing_columns:
+                            OracleEngine._execute_ddl(
+                                conn,
+                                cursor,
+                                f"ALTER TABLE {fmttd_owner}.{fmttd_table_name} ADD ({OracleEngine._column_sql(col)})",
+                            )
+                            changed = True
                 if table.primary_key:
                     pk_name = f"{table.name}_PK"
                     fmttd_pk_name = OracleEngine._format_identifier(pk_name)
@@ -1701,6 +1712,9 @@ end;"""
             owner, table_name = fmt(table.owner), fmt(table.name)
             columns_sql = ",\n        ".join(OracleEngine._column_sql(col) for col in table.columns)
             sink(block(f"CREATE TABLE {owner}.{table_name} (\n        {columns_sql}\n    )", (-955,)))
+            for col in table.columns:
+                # ORA-01430: the column exists; a table from an earlier version gets the columns added since
+                sink(block(f"ALTER TABLE {owner}.{table_name} ADD ({OracleEngine._column_sql(col)})", (-1430,)))
             if table.primary_key:
                 cols = ", ".join(fmt(col) for col in table.primary_key)
                 pk_sql = (

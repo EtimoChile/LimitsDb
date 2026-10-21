@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- **Breaking:** rerun `ldb-impl` after upgrading: it creates the table `LDB_RUN_LOCK` and reinstalls `check_save_status` (new `p_run_id` parameter) and `check_referencing_tables`.
+- **Breaking:** rerun `ldb-impl` after upgrading: it creates the table `LDB_RUN_LOCK`, adds to an existing control table the columns it lacks (`LDB_CTL.CTL_RUN_ID`) and reinstalls `check_save_status` (new `p_run_id` parameter) and `check_referencing_tables`.
 - `ldb-run --mode PREVIEW` now writes its own `ldb_ctl` statuses, the `EXECUTE` ones prefixed with `P` (`PTSTART`, `PCSTART`, `PCEND`, `PLSTART`, `PLEND`, `PTEND`, `PERROR`), and ends each table with `PTEND`, so a PREVIEW no longer makes an `EXECUTE` of the same day skip the tables. A PREVIEW over a table with an `EXECUTE` status of the same day fails with `ORA-20006`. An `EXECUTE` continues an incomplete `EXECUTE` of the same day keeping its rows; anything else restarts the table and closes the abandoned run in `ldb_log` ("Incomplete process closed by a later process"). These rules live in PL/SQL, so they hold for `SCRIPT` too.
 - A second `ldb-run` over a table already being processed stops with exit code 1 (`RunnerBusyError`) before starting any worker. Workers stop with `ORA-20005` if they lose the table to another runner, and `CSTART`/`CEND` now stop the worker when the control check fails.
 - The LOB path of `SOURCE_ILM` now records `LSTART`/`LEND`. A failed table gets a single `ERROR` row: the one written by the block is not duplicated by the runner; failed tables report the rows really moved with the executed PL/SQL and the error is propagated.

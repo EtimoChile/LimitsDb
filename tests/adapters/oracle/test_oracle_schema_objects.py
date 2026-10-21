@@ -291,6 +291,7 @@ def test_ensure_tables_creates_missing_table_and_commits(monkeypatch: pytest.Mon
     executed = []
     monkeypatch.setattr(OracleEngine, "_table_exists", lambda cursor, owner, table_name: next(exists))
     monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: executed.append(statement))
+    monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, table_name: ([], {"ID": object()}))
     table = TableDefinition(owner="OWNER", name="ITEMS", columns=(ColumnDefinition(name="ID", data_type="integer"),))
 
     first = OracleEngine.ensure_tables(conn, (table,))  # type: ignore[arg-type]
@@ -302,6 +303,60 @@ def test_ensure_tables_creates_missing_table_and_commits(monkeypatch: pytest.Mon
     assert conn.commits == 1
     assert conn.rollbacks == 0
     assert conn.cursor_instance.closed is True
+
+
+def test_ensure_tables_adds_the_columns_an_older_control_table_lacks(monkeypatch: pytest.MonkeyPatch):
+    # Spec: CHANGELOG — rerunning ldb-impl upgrades the control tables: a column added in a later version
+    # (LDB_CTL.CTL_RUN_ID) is added to the existing table, and the columns already there are left alone
+    # Given: an existing table that has ID but not RUN_ID
+    class DummyCursor:
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        commits = 0
+
+        def cursor(self):
+            return DummyCursor()
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    conn = DummyConnection()
+    executed = []
+    monkeypatch.setattr(OracleEngine, "_table_exists", lambda cursor, owner, table_name: True)
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: executed.append(statement))
+    monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, table_name: ([], {"ID": object()}))
+    table = TableDefinition(
+        owner="OWNER",
+        name="ITEMS",
+        columns=(
+            ColumnDefinition(name="ID", data_type="integer"),
+            ColumnDefinition(name="RUN_ID", data_type="string", length=36),
+        ),
+    )
+
+    # When: ensure_tables runs
+    created = OracleEngine.ensure_tables(conn, (table,))  # type: ignore[arg-type]
+
+    # Then: only the missing column is added, and it is committed
+    assert created == []
+    assert len(executed) == 1 and executed[0].startswith("ALTER TABLE owner.items ADD (run_id VARCHAR2(36")
+    assert conn.commits == 1
+
+
+def test_bootstrap_script_adds_missing_columns_tolerating_existing_ones():
+    # Spec: CHANGELOG — the rerunnable bootstrap script upgrades an older control table too: each column is added
+    # inside a block that ignores ORA-01430 (the column exists)
+    # Given/When: the script of one table
+    fragments: list[str] = []
+    table = TableDefinition(owner="OWNER", name="ITEMS", columns=(ColumnDefinition(name="ID", data_type="integer"),))
+    OracleEngine.ensure_tables(None, (table,), ddl_sink=fragments.append)
+
+    # Then: the ADD block follows the CREATE block and tolerates -1430
+    add = next(f for f in fragments if "ADD (id" in f)
+    assert "sqlcode not in (-1430)" in add
+    assert fragments.index(add) == 1
 
 
 def test_ensure_tables_rolls_back_and_chains_ddl_failure(monkeypatch: pytest.MonkeyPatch):
