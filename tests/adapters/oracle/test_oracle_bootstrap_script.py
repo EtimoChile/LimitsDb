@@ -2,6 +2,7 @@ import re
 
 import pytest
 
+from limitsdb.core.ldb_ddl import render_script
 from limitsdb.db.ldb_engines import (
     ColumnDefinition,
     DatabaseLinkDefinition,
@@ -16,9 +17,34 @@ from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
 _SECRET = "S3cretPwd#1"
 
 
+def _bootstrap(
+    *,
+    title: str = "SOURCE database of schema s",
+    roles: list[RoleDefinition],
+    users: list[UserDefinition],
+    tables: list[TableDefinition],
+    sequences: list[SequenceDefinition],
+    supporting_owner: str,
+    links: list[DatabaseLinkDefinition],
+    runtime_username: str,
+    runtime_dsn: str,
+) -> str:
+    """The script ldb-impl writes when admin credentials are absent: the ensure_* fragments, rendered."""
+    fragments: list[str] = []
+    OracleEngine.script_password_prompts(users, links, ddl_sink=fragments.append)
+    OracleEngine.ensure_roles(None, roles, ddl_sink=fragments.append)
+    OracleEngine.ensure_users(None, users, ddl_sink=fragments.append)
+    OracleEngine.ensure_tables(None, tables, ddl_sink=fragments.append)
+    OracleEngine.ensure_sequences(None, sequences, ddl_sink=fragments.append)
+    OracleEngine.ensure_supporting_objects(None, supporting_owner, ddl_sink=fragments.append)
+    OracleEngine.ensure_database_links(
+        None, links, ddl_sink=fragments.append, connect_as=(runtime_username, runtime_dsn)
+    )
+    return render_script(title, fragments)
+
+
 def _script() -> str:
-    return OracleEngine.generate_bootstrap_script(
-        title="SOURCE database of schema s",
+    return _bootstrap(
         roles=[RoleDefinition(name="LDB_ROLE")],
         users=[
             UserDefinition(
@@ -48,7 +74,18 @@ def test_bootstrap_script_never_contains_passwords_and_prompts_for_them_hidden()
 
     assert _SECRET not in script
     prompts = re.findall(r"^accept (\w+) char prompt .* hide$", script, flags=re.MULTILINE)
-    assert len(prompts) == 3  # the user, the runtime user reconnection and the database link
+    assert len(prompts) == 2  # the user (asked once, reused to reconnect as it) and the database link
+    assert "ldb_runtime_pwd" not in script
+
+
+def test_bootstrap_script_asks_for_every_password_before_changing_anything():
+    # Spec: README > ldb-impl without admin credentials — the script asks for all passwords at its start
+    script = _script()
+
+    last_prompt = max(match.start() for match in re.finditer(r"^accept ", script, flags=re.MULTILINE))
+    first_change = min(script.index(marker) for marker in ("begin\n  execute immediate", "GRANT ", "connect "))
+    assert last_prompt < first_change
+    assert script.index("accept ldb_user_pwd_1") < script.index("accept ldb_link_pwd_1")
 
 
 def test_bootstrap_script_follows_the_sqlplus_contract_of_the_pending_ddl_file():
@@ -85,7 +122,7 @@ def test_bootstrap_script_creates_database_link_after_connecting_as_runtime_user
     # Spec: the database link is created connected as the runtime user, never as the admin
     script = _script()
 
-    connect_at = script.index('connect ldb_user/"&ldb_runtime_pwd"@"host/svc"')
+    connect_at = script.index('connect ldb_user/"&ldb_user_pwd_1"@"host/svc"')
     link_at = script.index("CREATE DATABASE LINK")
     assert connect_at < link_at
     assert script.count("CREATE DATABASE LINK") == 1
@@ -104,7 +141,7 @@ def test_bootstrap_script_terminates_plsql_objects_with_slash():
 @pytest.mark.parametrize("quote", ["'"])
 def test_bootstrap_script_escapes_quotes_in_statements(quote: str):
     # Spec: statements are embedded in string literals, so quotes must be doubled
-    script = OracleEngine.generate_bootstrap_script(
+    script = _bootstrap(
         title="t",
         roles=[],
         users=[],
@@ -135,3 +172,36 @@ def test_bootstrap_script_warns_before_creating_a_user_that_already_exists_and_k
     assert "from dba_users where username = 'LDB_USER'" in script
     assert "serveroutput on" in script
     assert _SECRET not in script
+
+
+def test_script_fragments_need_no_database_connection():
+    # Spec: README > ldb-impl without admin credentials — nothing is read from or created in the database
+    fragments: list[str] = []
+
+    with pytest.raises(ValueError):
+        OracleEngine.ensure_roles(object(), [RoleDefinition(name="R")], ddl_sink=fragments.append)  # type: ignore[arg-type]
+
+    assert fragments == []
+
+
+def test_bootstrap_script_warns_before_reconnecting_that_a_rejected_password_means_the_user_already_existed():
+    # Spec: README > ldb-impl without admin credentials — the script says, before it reconnects as the
+    # runtime user, that an ORA-01017 there means the user already existed with another password
+    script = _script()
+
+    hint = script.index("If this fails with ORA-01017")
+    assert hint < script.index('connect ldb_user/"&ldb_user_pwd_1"')
+
+
+def test_bootstrap_script_looks_up_a_lowercase_user_in_the_dictionary_as_it_was_created():
+    # Spec: identifiers are handled in data-dictionary form — a lowercase name is a quoted identifier
+    fragments: list[str] = []
+    user = UserDefinition(name="ldb", password=_SECRET)
+
+    OracleEngine.ensure_users(None, [user], ddl_sink=fragments.append)
+    script = "\n".join(fragments)
+
+    assert 'CREATE USER "ldb"' in script
+    assert "from dba_users where username = 'ldb'" in script
+    assert "User ldb already exists" in script
+    assert "'LDB'" not in script

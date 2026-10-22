@@ -182,6 +182,9 @@ cython_debug/
 structure.txt
 limitsdb.zip
 *.yml
+!examples/**/*.yml
 
 # Output of ldb-impl scripts
 ldb_ddl_pending/
+# Manual tests
+manual-tests/

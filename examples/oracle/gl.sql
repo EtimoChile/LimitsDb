@@ -111,6 +111,24 @@ whenever sqlerror exit failure rollback
   CREATE UNIQUE INDEX "GL"."DSP_DET_PK" ON "GL"."DSP_DET" ("DSD_ID") 
   ;
 --------------------------------------------------------
+--  DDL for Index DSP_DET_I1
+--------------------------------------------------------
+
+  CREATE INDEX "GL"."DSP_DET_I1" ON "GL"."DSP_DET" ("DSP_ID") 
+  ;
+--------------------------------------------------------
+--  DDL for Index DSP_DET_I2
+--------------------------------------------------------
+
+  CREATE INDEX "GL"."DSP_DET_I2" ON "GL"."DSP_DET" ("IND_ID") 
+  ;
+--------------------------------------------------------
+--  DDL for Index INV_DET_I1
+--------------------------------------------------------
+
+  CREATE INDEX "GL"."INV_DET_I1" ON "GL"."INV_DET" ("INV_ID") 
+  ;
+--------------------------------------------------------
 --  DDL for Index CST_MASTER_PK
 --------------------------------------------------------
 
@@ -215,6 +233,31 @@ whenever sqlerror exit failure rollback
 -- =========================================================
 -- Synthetic data loader for schema GL (Oracle 12.1.0.2)
 -- Tables: CST_MASTER, PRO_MASTER, INV_HEAD, INV_DET, DSP_HEAD, DSP_DET
+--
+-- Business rules enforced by the generated data
+--   Statuses
+--     INV_STS: N = new (draft), A = active (confirmed, awaiting delivery),
+--              P = paid, C = cancelled
+--     DSP_STS: N = new (created when the invoice is confirmed),
+--              S = shipped, D = delivered
+--   Invoice <-> dispatch
+--     R1. A dispatch ships lines of one single invoice (all its DSP_DET lines
+--         point to INV_DET lines of that invoice) and takes its customer.
+--     R2. Only confirmed invoices are dispatched: invoices N and C have no
+--         dispatches.
+--     R3. Delivery is made against payment: a dispatch is D if and only if its
+--         invoice is P (every dispatch of a paid invoice is D), and both
+--         close on the same day (DSP_STS_DATE = INV_STS_DATE). While the
+--         invoice is A its dispatches are N or S.
+--   Dates (document dates do not take part in ILM; status dates do)
+--     R4. INV_DATE <= INV_STS_DATE (N: same day; A: up to 7 days later;
+--         C: up to 30 days later; P: 5 to 45 days later).
+--     R5. A dispatch is created on or after INV_DATE; for an A invoice, on or
+--         after INV_STS_DATE (up to 7 days later); for a P invoice, on or
+--         before its closing day.
+--     R6. DSP_DATE <= DSP_STS_DATE (N: same day; S: 1 to 10 days later).
+--     R7. No date is later than today.
+-- Requires P_INV_LINES >= P_INVOICES and an even number of invoices.
 -- =========================================================
 
 -- ---- Parameters (adjust volumes) ----
@@ -226,8 +269,8 @@ define P_DISPATCHES   = 150000
 define P_DSP_LINES    = 300000
 
 -- Date range for INV/DSP
-define P_DATE_FROM = "date '2024-01-01'"
-define P_DATE_TO   = "date '2026-02-01'"
+define P_DATE_FROM = "add_months(trunc(sysdate), -24)"
+define P_DATE_TO   = "trunc(sysdate)"
 
 prompt === Disable FK constraints (GL) ===
 begin
@@ -328,29 +371,46 @@ connect by level <= &P_CUSTOMERS;
 commit;
 
 prompt === Loading INV_HEAD ===
+-- R4/R7: status date derived from the invoice date and the status.
+-- Status by mod(INV_ID,4): 0 = N, 1 = P, 2 = C, 3 = A.
 insert /*+ append */ into GL.INV_HEAD (INV_ID, CST_ID, INV_DATE, INV_STS, INV_STS_DATE)
 select
-  level as INV_ID,
-  trunc(dbms_random.value(1, &P_CUSTOMERS + 1)) as CST_ID,
-  (&P_DATE_FROM) + trunc(dbms_random.value(0, (&P_DATE_TO) - (&P_DATE_FROM) + 1)) as INV_DATE,
-  case mod(level,4)
-    when 0 then 'N'  -- new
-    when 1 then 'P'  -- paid
-    when 2 then 'C'  -- cancelled
-    else 'A'         -- active
-  end as INV_STS,
-  (&P_DATE_FROM) + trunc(dbms_random.value(0, (&P_DATE_TO) - (&P_DATE_FROM) + 1)) as INV_STS_DATE
-from dual
-connect by level <= &P_INVOICES;
+  s.INV_ID,
+  s.CST_ID,
+  s.INV_DATE,
+  s.INV_STS,
+  least(
+    s.INV_DATE + case s.INV_STS
+                   when 'N' then 0
+                   when 'A' then mod(s.RND, 8)
+                   when 'C' then mod(s.RND, 31)
+                   else 5 + mod(s.RND, 41)
+                 end,
+    &P_DATE_TO)
+from (
+  select /*+ no_merge */
+    level as INV_ID,
+    trunc(dbms_random.value(1, &P_CUSTOMERS + 1)) as CST_ID,
+    (&P_DATE_FROM) + trunc(dbms_random.value(0, (&P_DATE_TO) - (&P_DATE_FROM) + 1)) as INV_DATE,
+    case mod(level,4)
+      when 0 then 'N'  -- new
+      when 1 then 'P'  -- paid
+      when 2 then 'C'  -- cancelled
+      else 'A'         -- active
+    end as INV_STS,
+    trunc(dbms_random.value(0, 1000000)) as RND
+  from dual
+  connect by level <= &P_INVOICES
+) s;
 
 commit;
 
 prompt === Loading INV_DET ===
--- IND_ID is PK. We generate lines and attach them to invoices/products.
+-- Lines are spread evenly: line IND_ID belongs to invoice mod(IND_ID-1,P_INVOICES)+1.
 insert /*+ append */ into GL.INV_DET (IND_ID, INV_ID, PRO_ID, IND_AMOUNT, IND_SUBTOTAL)
 select
   level as IND_ID,
-  trunc(dbms_random.value(1, &P_INVOICES + 1)) as INV_ID,
+  mod(level - 1, &P_INVOICES) + 1 as INV_ID,
   trunc(dbms_random.value(1, &P_PRODUCTS + 1)) as PRO_ID,
   trunc(dbms_random.value(1, 20)) as IND_AMOUNT,
   -- subtotal roughly proportional (not enforced by constraints)
@@ -361,32 +421,65 @@ connect by level <= &P_INV_LINES;
 commit;
 
 prompt === Loading DSP_HEAD ===
+-- R1/R2/R3: dispatch k belongs to the odd invoice 2*mod(k-1,n)+1 (n = number of
+-- odd invoices); odd invoices are P (INV_ID mod 4 = 1) or A (mod 4 = 3).
+-- R3/R5/R6: dates and status derived from the invoice.
 insert /*+ append */ into GL.DSP_HEAD (DSP_ID, CST_ID, DSP_DATE, DSP_STS, DSP_STS_DATE)
 select
-  level as DSP_ID,
-  trunc(dbms_random.value(1, &P_CUSTOMERS + 1)) as CST_ID,
-  (&P_DATE_FROM) + trunc(dbms_random.value(0, (&P_DATE_TO) - (&P_DATE_FROM) + 1)) as DSP_DATE,
-  case mod(level,3)
-    when 0 then 'N'
-    when 1 then 'S'
-    else 'D'
-  end as DSP_STS,
-  (&P_DATE_FROM) + trunc(dbms_random.value(0, (&P_DATE_TO) - (&P_DATE_FROM) + 1)) as DSP_STS_DATE
-from dual
-connect by level <= &P_DISPATCHES;
+  v.DSP_ID,
+  v.CST_ID,
+  v.DSP_DATE,
+  v.DSP_STS,
+  case v.DSP_STS
+    when 'D' then v.INV_STS_DATE
+    when 'N' then v.DSP_DATE
+    else least(v.DSP_DATE + 1 + mod(trunc(v.RND / 16), 10), &P_DATE_TO)
+  end as DSP_STS_DATE
+from (
+  select /*+ no_merge */
+    d.DSP_ID,
+    i.CST_ID,
+    i.INV_STS_DATE,
+    d.RND,
+    case i.INV_STS
+      when 'P' then 'D'
+      else case mod(d.RND, 2) when 0 then 'N' else 'S' end
+    end as DSP_STS,
+    case i.INV_STS
+      when 'P' then i.INV_DATE + mod(d.RND, i.INV_STS_DATE - i.INV_DATE + 1)
+      else least(i.INV_STS_DATE + mod(trunc(d.RND / 2), 8), &P_DATE_TO)
+    end as DSP_DATE
+  from (
+    select /*+ no_merge */
+      level as DSP_ID,
+      2 * mod(level - 1, trunc((&P_INVOICES + 1) / 2)) + 1 as INV_ID,
+      trunc(dbms_random.value(0, 1000000)) as RND
+    from dual
+    connect by level <= &P_DISPATCHES
+  ) d
+  join GL.INV_HEAD i on i.INV_ID = d.INV_ID
+) v;
 
 commit;
 
 prompt === Loading DSP_DET ===
--- Must reference DSP_HEAD(DSP_ID) and INV_DET(IND_ID)
+-- R1: every line of dispatch DSP_ID points to a line of that dispatch's invoice
+-- (INV_DET lines of invoice v are v, v + P_INVOICES, v + 2*P_INVOICES, ...).
 insert /*+ append */ into GL.DSP_DET (DSD_ID, DSP_ID, IND_ID, DSD_AMOUNT)
 select
-  level as DSD_ID,
-  trunc(dbms_random.value(1, &P_DISPATCHES + 1)) as DSP_ID,
-  trunc(dbms_random.value(1, &P_INV_LINES + 1)) as IND_ID,
+  l.DSD_ID,
+  l.DSP_ID,
+  l.INV_ID + &P_INVOICES * mod(l.SEQ, trunc((&P_INV_LINES - l.INV_ID) / &P_INVOICES) + 1) as IND_ID,
   round(dbms_random.value(10, 500000), 2) as DSD_AMOUNT
-from dual
-connect by level <= &P_DSP_LINES;
+from (
+  select
+    level as DSD_ID,
+    mod(level - 1, &P_DISPATCHES) + 1 as DSP_ID,
+    trunc((level - 1) / &P_DISPATCHES) as SEQ,
+    2 * mod(mod(level - 1, &P_DISPATCHES), trunc((&P_INVOICES + 1) / 2)) + 1 as INV_ID
+  from dual
+  connect by level <= &P_DSP_LINES
+) l;
 
 commit;
 

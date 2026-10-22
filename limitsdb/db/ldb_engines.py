@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -22,6 +22,12 @@ class ColumnDefinition:
     nullable: bool = True
     default: str | None = None
 
+
+DdlSink = Callable[[str], None]
+"""Receives the DDL an ``ensure_*`` method would otherwise execute."""
+
+DdlFailures = list[tuple[str, str]]
+"""Collects one (statement, error message) pair per statement that failed, instead of raising."""
 
 IndexMap = dict[str, dict[str, Any]]
 ColumnMetadata = dict[str, ColumnDefinition]
@@ -201,11 +207,13 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def sql_block_run(conn: Any, plsql_code: str) -> None:
+    def sql_block_run(conn: Any, plsql_code: str, mode: str, run_id: str) -> None:
         """Executes a PL/SQL or SQL block against the database.
         Args:
             conn: Active database connection.
-            plsql_code: The PL/SQL or SQL block to execute."""
+            plsql_code: The PL/SQL or SQL block to execute.
+            mode: EXECUTE or PREVIEW, handed to the block.
+            run_id: Identifier of the runner that owns the table, handed to the block."""
         pass
 
     @staticmethod
@@ -243,6 +251,8 @@ class DatabaseEngine(ABC):
         process_start: datetime,
         message: str,
         plsql_code: str,
+        rows_processed: int = 0,
+        run_id: str | None = None,
     ) -> None:
         """Saves an error status entry in the control table.
         Args:
@@ -253,7 +263,71 @@ class DatabaseEngine(ABC):
             process_date: Date in 'YYYYMMDD' format.
             process_start: Start time of the process.
             message: Error message.
-            plsql_code: PL/SQL or SQL block executed."""
+            plsql_code: PL/SQL or SQL block executed.
+            rows_processed: Rows already moved and committed before the failure.
+            run_id: Identifier of the runner that owns the table; the error is dropped when it lost the table."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_resumed_rows(conn: Any, owner: str, table_name: str, process_date: str) -> int:
+        """Returns the rows kept when an EXECUTE continues an incomplete EXECUTE of the same process date.
+        Args:
+            conn: Active database connection.
+            owner: Schema owner of the table.
+            table_name: Table name.
+            process_date: Target process date in 'YYYYMMDD'.
+        Returns:
+            Rows already processed by the incomplete run, or 0 when the table starts over."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def error_recorded_since(conn: Any, owner: str, table_name: str, since: datetime) -> bool:
+        """Tells whether the control table already holds an error written at or after ``since``.
+        Args:
+            conn: Active database connection.
+            owner: Schema owner of the table.
+            table_name: Table name.
+            since: Start of the run whose failure is being recorded."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def acquire_run_locks(
+        lock_conn: Any,
+        key_conn: Any,
+        tables: Sequence[tuple[str, str]],
+        run_id: str,
+        mode: str,
+        host: str,
+        pid: int,
+    ) -> None:
+        """Takes the per-table runner mutex and publishes ``run_id`` for each table.
+        Args:
+            lock_conn: Dedicated connection that holds the locks until released; it must not commit.
+            key_conn: Separate connection that writes and commits the anchors and the keys.
+            tables: (owner, table_name) pairs to protect.
+            run_id: Identifier of this run.
+            mode: EXECUTE or PREVIEW.
+            host: Host of the runner.
+            pid: Process id of the runner.
+        Raises:
+            RunnerBusyError: Another runner holds one of the tables; nothing is left locked."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def check_run_locks(lock_conn: Any) -> None:
+        """Verifies that the lock connection is alive.
+        Raises:
+            ExecutionError: The connection was lost, so the mutex cannot be trusted."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def release_run_locks(lock_conn: Any) -> None:
+        """Frees the runner locks held by ``lock_conn``."""
         pass
 
     @staticmethod
@@ -278,90 +352,128 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def ensure_roles(conn: Any, roles: Sequence[RoleDefinition]) -> list[str]:
-        """Ensure that the provided roles exist, returning newly created ones."""
+    def ensure_roles(conn: Any, roles: Sequence[RoleDefinition], *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure that the provided roles exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): nothing is read or executed; the sink receives the
+        script fragments a DBA runs to create the roles, each ready to be written as is, tolerating
+        only "already exists" so the script can be rerun. Returns an empty list."""
         pass
 
     @staticmethod
     @abstractmethod
-    def ensure_users(conn: Any, users: Sequence[UserDefinition]) -> list[str]:
-        """Ensure that the provided users exist, returning newly created ones."""
+    def ensure_users(conn: Any, users: Sequence[UserDefinition], *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure that the provided users exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``. The fragments hold no
+        password: they prompt for it and warn when a user already exists, since its password is kept."""
         pass
 
     @staticmethod
     @abstractmethod
-    def ensure_tables(conn: Any, tables: Sequence[TableDefinition]) -> list[str]:
-        """Ensure that the provided tables exist, returning newly created ones."""
+    def ensure_tables(conn: Any, tables: Sequence[TableDefinition], *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure that the provided tables exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``."""
         pass
 
     @staticmethod
     @abstractmethod
-    def ensure_table_structure(conn: Any, table: TableDefinition, table_cnf: Mapping[str, Any]) -> None:
-        """Ensure that the provided table matches the expected structure."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def generate_table_structure_script(
+    def ensure_table_structure(
         conn: Any,
         table: TableDefinition,
         table_cnf: Mapping[str, Any],
-        reference: tuple[str, str] | None = None,
-    ) -> list[str]:
-        """Return DDL statements to synchronize the table to the definition without executing them.
-        Uses accessible dictionary views and can be called with a non-administrative connection.
-        Returns an empty list when the table already matches the required definition.
-
-        By default the current structure is read from the table itself. ``reference`` gives an
-        (owner, table name) whose structure is taken as the current one instead, and a ``conn`` of
-        None means the table does not exist yet, so every object is created."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def execute_ddl_statements(conn: Any, statements: Sequence[str]) -> list[tuple[str, str]]:
-        """Execute DDL statements in order, continuing after a failed statement.
-        Returns one (statement, error message) pair for each statement that failed;
-        an empty list means every statement was applied."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def ensure_sequences(conn: Any, sequences: Sequence[SequenceDefinition]) -> list[str]:
-        """Ensure that the provided sequences exist, returning newly created ones."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def ensure_database_links(conn: Any, links: Sequence[DatabaseLinkDefinition]) -> list[str]:
-        """Ensure that the provided database links exist, returning newly created ones."""
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def generate_bootstrap_script(
         *,
-        title: str,
-        roles: Sequence[RoleDefinition],
-        users: Sequence[UserDefinition],
-        tables: Sequence[TableDefinition],
-        sequences: Sequence[SequenceDefinition],
-        supporting_owner: str,
+        reference: tuple[str, str] | None = None,
+        ddl_sink: DdlSink | None = None,
+        ddl_failures: DdlFailures | None = None,
+    ) -> None:
+        """Ensure that the provided table matches the expected structure.
+
+        The statements needed are computed from dictionary views readable with a non-administrative
+        connection; nothing is changed when the table already matches.
+
+        - ``ddl_sink``: the statements go to the sink instead of being executed.
+        - ``ddl_failures``: when executing, a statement that fails is recorded here and the next one
+          is attempted; without it the first failure raises.
+        - ``reference``: an (owner, table name) whose structure is taken as the current one instead
+          of the table's own.
+        - ``conn`` None (needs ``ddl_sink``): no table is read and everything is created."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_sequences(
+        conn: Any, sequences: Sequence[SequenceDefinition], *, ddl_sink: DdlSink | None = None
+    ) -> list[str]:
+        """Ensure that the provided sequences exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def script_password_prompts(
+        users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
+    ) -> None:
+        """Hand ``ddl_sink`` the fragments that ask the DBA for every password a script needs, hidden.
+
+        A script calls it first, so all passwords are asked up front. The users' passwords are asked in
+        order, then the links'; the fragments of ``ensure_users`` and ``ensure_database_links`` only use
+        the answers. Nothing is read from the database."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ensure_database_links(
+        conn: Any,
         links: Sequence[DatabaseLinkDefinition],
-        runtime_username: str,
-        runtime_dsn: str,
-    ) -> str:
-        """Return a script a DBA can run to create the bootstrap objects without admin credentials in LimitsDb.
-        It must be safe to rerun, must not contain passwords (it prompts for them) and must create the
-        database links connected as the runtime user."""
+        *,
+        ddl_sink: DdlSink | None = None,
+        connect_as: tuple[str, str] | None = None,
+    ) -> list[str]:
+        """Ensure that the provided database links exist, returning newly created ones.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``, plus ``connect_as``, the
+        (username, dsn) of the runtime user that must own the links: the fragments reconnect as that
+        user with the password already asked by ``script_password_prompts`` for it in the same script (it must be
+        the first user), and use the password of each link asked there."""
         pass
 
     @staticmethod
     @abstractmethod
     def ensure_table_privileges(
-        conn: Any, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+        conn: Any,
+        role: str,
+        tables: Sequence[tuple[str, str]],
+        privileges: Sequence[str],
+        *,
+        ddl_sink: DdlSink | None = None,
+        ddl_failures: DdlFailures | None = None,
     ) -> list[str]:
-        """Ensure the role has the specified privileges on each table, returning new grants."""
+        """Ensure the role has the specified privileges on each table, returning new grants.
+
+        Grants the role already holds are skipped. ``ddl_sink`` and ``ddl_failures`` work as in
+        ``ensure_table_structure``. With ``conn`` None (needs ``ddl_sink``) nothing is read, so every
+        grant is emitted; they are safe to run again."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_missing_table_privileges(
+        conn: Any, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[tuple[str, str, str]]:
+        """Return the ``(owner, table, privilege)`` the role lacks, read with the connection's own user.
+
+        Needs no admin credentials: it reports what the connected user receives through the role, so it
+        also answers what a runtime user can do. A role that is not enabled for the user grants nothing,
+        so every privilege is then reported missing. Nothing is granted or changed."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def is_role_enabled(conn: Any, role: str) -> bool:
+        """Return whether the role is enabled for the connected user (granted to it and active in the session)."""
         pass
 
     @staticmethod
@@ -375,8 +487,10 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def ensure_supporting_objects(conn: Any, owner: str) -> list[str]:
-        """Ensure auxiliary PL/SQL objects required by LimitsDb exist in the schema."""
+    def ensure_supporting_objects(conn: Any, owner: str, *, ddl_sink: DdlSink | None = None) -> list[str]:
+        """Ensure auxiliary PL/SQL objects required by LimitsDb exist in the schema.
+
+        ``ddl_sink`` (``conn`` must be None): as in ``ensure_roles``."""
         pass
 
     @staticmethod

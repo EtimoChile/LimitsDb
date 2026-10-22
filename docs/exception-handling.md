@@ -6,8 +6,13 @@ LimitsDb translates failures at subsystem boundaries into the hierarchy in
 - `ConfigurationError`: configuration input cannot be read or interpreted.
 - `SecretError`: secret files, master keys, or decryption fail.
 - `DatabaseConnectionError`: a database connection cannot be established.
+- `InvalidCredentialsError` (a `DatabaseConnectionError`): the database rejected the
+  credentials (Oracle ORA-01017). It does not say whether the user or the password is
+  wrong, because the database does not; only a caller that knows the user exists, such
+  as `ldb-impl` right after creating or verifying it, can tell.
 - `ValidationError`: configuration or runtime state violates the domain contract.
 - `ExecutionError`: ILM, status persistence, or administrative work fails.
+- `RunnerBusyError` (an `ExecutionError`): another runner holds the lock of a table (`ORA-00054` on `LDB_RUN_LOCK`); nothing is started and the CLI exits 1. Block errors `-20005` (run ownership lost), `-20006` (PREVIEW refused over an EXECUTE status) and `-20007` (invalid `ldb_mode`) leave the control row untouched.
 
 Translated errors use exception chaining so callers can inspect `__cause__`.
 Messages identify the operation and file or table where useful, but never

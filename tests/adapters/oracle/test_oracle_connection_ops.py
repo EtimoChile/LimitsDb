@@ -2,7 +2,7 @@ from datetime import datetime
 
 import pytest
 
-from limitsdb.core.ldb_errors import DatabaseConnectionError, ExecutionError
+from limitsdb.core.ldb_errors import DatabaseConnectionError, ExecutionError, InvalidCredentialsError
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.db.oracle import ldb_engine_impl
 from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
@@ -21,6 +21,29 @@ def test_driver_failure_is_wrapped_as_domain_connection_error(monkeypatch: pytes
 
     assert caught.value.__cause__ is cause
     assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("failure", "is_credentials"),
+    [
+        (RuntimeError("ORA-01017: invalid username/password; logon denied"), True),
+        (RuntimeError("ORA-12541: TNS:no listener"), False),
+    ],
+)
+def test_only_rejected_credentials_are_reported_as_invalid_credentials(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception, is_credentials: bool
+):
+    # Spec: docs/exception-handling.md > InvalidCredentialsError — ORA-01017 is the only failure
+    # reported as rejected credentials; any other connection failure stays a plain
+    # DatabaseConnectionError so that a network problem is never blamed on the password
+    monkeypatch.setattr(ldb_engine_impl.oracledb, "connect", lambda **kwargs: (_ for _ in ()).throw(failure))
+    config = Config(schema="s", action="SOURCE_ILM", source_username="user", source_password="secret", source_dsn="dsn")
+
+    with pytest.raises(DatabaseConnectionError) as caught:
+        OracleEngine.get_connection(config)
+
+    assert isinstance(caught.value, InvalidCredentialsError) is is_credentials
+    assert caught.value.__cause__ is failure
 
 
 def test_row_count_query_failure_is_chained_as_execution_error():
@@ -142,3 +165,61 @@ def test_error_status_persistence_failure_is_chained_as_execution_error(monkeypa
 
     assert caught.value.__cause__ is cause
     assert connection.cursor_instance.closed is True
+
+
+def test_ensure_unlimited_quota_quotes_a_lowercase_user_and_binds_the_dictionary_tablespace(monkeypatch):
+    # Spec: identifiers are handled in data-dictionary form — SQL formats them, dictionary binds do not
+    from unittest.mock import MagicMock
+
+    from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
+
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    executed: list[str] = []
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda conn, cur, sql: executed.append(sql))
+
+    assert OracleEngine._ensure_unlimited_quota(cursor, "ldb", "USERS") is True
+
+    assert executed == ['ALTER USER "ldb" QUOTA UNLIMITED ON users']
+    assert cursor.execute.call_args.kwargs == {"username": "ldb", "tablespace": "USERS"}
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("ldb", '"ldb"'), ("LDB", "ldb")],
+)
+def test_runtime_login_quotes_the_user_the_way_it_was_created(
+    monkeypatch: pytest.MonkeyPatch, configured: str, expected: str
+):
+    # Spec: identifiers are handled in data-dictionary form — a lowercase runtime user was created quoted,
+    # so Oracle would look for its uppercase twin unless the login quotes it as well
+    logins: list[str] = []
+    monkeypatch.setattr(ldb_engine_impl.oracledb, "connect", lambda **kwargs: logins.append(kwargs["user"]))
+    monkeypatch.setattr(OracleEngine, "_register_connection_env", lambda connection, env: None)
+    config = Config(
+        schema="s", action="SOURCE_ILM", source_username=configured, source_password="secret", source_dsn="dsn"
+    )
+
+    OracleEngine.get_connection(config)
+
+    assert logins == [expected]
+
+
+def test_admin_login_uses_the_username_as_configured(monkeypatch: pytest.MonkeyPatch):
+    # Spec: the admin user is an existing login, not one ldb-impl creates, so "system" must stay SYSTEM
+    logins: list[str] = []
+    monkeypatch.setattr(ldb_engine_impl.oracledb, "connect", lambda **kwargs: logins.append(kwargs["user"]))
+    monkeypatch.setattr(OracleEngine, "_register_connection_env", lambda connection, env: None)
+    config = Config(
+        schema="s",
+        action="SOURCE_ILM",
+        source_username="ldb",
+        source_password="secret",
+        source_dsn="dsn",
+        admin_source_username="system",
+        admin_source_password="secret",
+    )
+
+    OracleEngine.get_connection(config, admin=True, env="SOURCE")
+
+    assert logins == ["system"]

@@ -1,0 +1,91 @@
+# ILM contract for the test model created by examples/oracle/gl.sql
+#
+# Relationships inferred from the model's foreign keys:
+#
+#   INV_HEAD (INV_ID)  <-- INV_DET (INV_ID)
+#   DSP_HEAD (DSP_ID)  <-- DSP_DET (DSP_ID)
+#   INV_DET  (IND_ID)  <-- DSP_DET (IND_ID)
+#
+# CST_MASTER and PRO_MASTER are reference tables without a date column, so they
+# are not managed by ILM.
+#
+# Retention is defined on the parent tables only; child tables inherit the
+# conditions of every parent listed in referencing_tables. A child row is
+# purged only when ALL of its parents allow it (AND between parents, OR
+# between the conditions of one parent), and a parent row cannot be purged
+# while a child remains (foreign keys). So the rules of the tables that share
+# children must make the same rows eligible at the same time.
+#
+# Status codes in the generated data:
+#   INV_HEAD.INV_STS: N = new (draft), A = active, P = paid, C = cancelled
+#   DSP_HEAD.DSP_STS: N = new, S = shipped, D = delivered
+#
+# Business rules of the data (see examples/oracle/gl.sql):
+#   - A dispatch ships lines of one invoice; invoices N and C have no dispatches.
+#   - Delivery is against payment: a dispatch is D if and only if its invoice
+#     is P, and both close the same day (equal status dates).
+#   - While the invoice is A its dispatches are N or S.
+#
+# ILM rules compatible with them:
+#   - Only closed documents are purged: invoices P and C, dispatches D, and
+#     abandoned drafts (invoices N, which have no dispatches).
+#   - Invoice P and its dispatches D use the same status date and the same
+#     retention, so both sides become eligible together.
+#   - Open documents (invoice A, dispatches N and S) are never purged.
+
+tables:
+  # --- Invoices ---------------------------------------------------------
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: INV_HEAD
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true # Paid: short in source, long in history
+        retain_months_source: 3
+        retain_months_history: 12
+        purge_date_expr: "@INV_STS_DATE"
+        additional_filter_expr: "@INV_STS='P'"
+      - is_active: true # Cancelled: kept briefly, short history
+        retain_months_source: 1
+        retain_months_history: 6
+        purge_date_expr: "@INV_STS_DATE"
+        additional_filter_expr: "@INV_STS='C'"
+      - is_active: true # New (abandoned drafts, never dispatched): source only
+        retain_months_source: 12
+        retain_months_history: 0
+        purge_date_expr: "@INV_STS_DATE"
+        additional_filter_expr: "@INV_STS='N'"
+
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: INV_DET
+    frecuency: D
+    hint_expr: full(A) full(B) use_hash(A B)
+    history_hint_expr: full(A)
+    referencing_tables: INV_HEAD B
+    join_expr: "@ JOIN GL.INV_HEAD B ON B.INV_ID=A.INV_ID"
+
+  # --- Dispatches -------------------------------------------------------
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: DSP_HEAD
+    frecuency: D
+    hint_expr: full(A)
+    conds:
+      - is_active: true # Delivered (closes with its paid invoice): same retention as P
+        retain_months_source: 3
+        retain_months_history: 12
+        purge_date_expr: "@DSP_STS_DATE"
+        additional_filter_expr: "@DSP_STS='D'"
+
+  # DSP_DET references DSP_HEAD directly and INV_HEAD through INV_DET, so it
+  # inherits the conditions of all three parents.
+  - source_owner: GL
+    history_owner: GLHST
+    table_name: DSP_DET
+    frecuency: D
+    hint_expr: full(A) full(B) full(C) full(D) use_hash(A B C D)
+    history_hint_expr: full(A)
+    referencing_tables: DSP_HEAD B, INV_DET C, INV_HEAD D
+    join_expr: "@ JOIN GL.DSP_HEAD B ON B.DSP_ID=A.DSP_ID @ JOIN GL.INV_DET C ON C.IND_ID=A.IND_ID @ JOIN GL.INV_HEAD D ON D.INV_ID=C.INV_ID"

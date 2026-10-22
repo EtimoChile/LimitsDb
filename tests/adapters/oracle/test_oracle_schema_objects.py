@@ -291,6 +291,7 @@ def test_ensure_tables_creates_missing_table_and_commits(monkeypatch: pytest.Mon
     executed = []
     monkeypatch.setattr(OracleEngine, "_table_exists", lambda cursor, owner, table_name: next(exists))
     monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: executed.append(statement))
+    monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, table_name: ([], {"ID": object()}))
     table = TableDefinition(owner="OWNER", name="ITEMS", columns=(ColumnDefinition(name="ID", data_type="integer"),))
 
     first = OracleEngine.ensure_tables(conn, (table,))  # type: ignore[arg-type]
@@ -302,6 +303,60 @@ def test_ensure_tables_creates_missing_table_and_commits(monkeypatch: pytest.Mon
     assert conn.commits == 1
     assert conn.rollbacks == 0
     assert conn.cursor_instance.closed is True
+
+
+def test_ensure_tables_adds_the_columns_an_older_control_table_lacks(monkeypatch: pytest.MonkeyPatch):
+    # Spec: CHANGELOG — rerunning ldb-impl upgrades the control tables: a column added in a later version
+    # (LDB_CTL.CTL_RUN_ID) is added to the existing table, and the columns already there are left alone
+    # Given: an existing table that has ID but not RUN_ID
+    class DummyCursor:
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        commits = 0
+
+        def cursor(self):
+            return DummyCursor()
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    conn = DummyConnection()
+    executed = []
+    monkeypatch.setattr(OracleEngine, "_table_exists", lambda cursor, owner, table_name: True)
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: executed.append(statement))
+    monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, table_name: ([], {"ID": object()}))
+    table = TableDefinition(
+        owner="OWNER",
+        name="ITEMS",
+        columns=(
+            ColumnDefinition(name="ID", data_type="integer"),
+            ColumnDefinition(name="RUN_ID", data_type="string", length=36),
+        ),
+    )
+
+    # When: ensure_tables runs
+    created = OracleEngine.ensure_tables(conn, (table,))  # type: ignore[arg-type]
+
+    # Then: only the missing column is added, and it is committed
+    assert created == []
+    assert len(executed) == 1 and executed[0].startswith("ALTER TABLE owner.items ADD (run_id VARCHAR2(36")
+    assert conn.commits == 1
+
+
+def test_bootstrap_script_adds_missing_columns_tolerating_existing_ones():
+    # Spec: CHANGELOG — the rerunnable bootstrap script upgrades an older control table too: each column is added
+    # inside a block that ignores ORA-01430 (the column exists)
+    # Given/When: the script of one table
+    fragments: list[str] = []
+    table = TableDefinition(owner="OWNER", name="ITEMS", columns=(ColumnDefinition(name="ID", data_type="integer"),))
+    OracleEngine.ensure_tables(None, (table,), ddl_sink=fragments.append)
+
+    # Then: the ADD block follows the CREATE block and tolerates -1430
+    add = next(f for f in fragments if "ADD (id" in f)
+    assert "sqlcode not in (-1430)" in add
+    assert fragments.index(add) == 1
 
 
 def test_ensure_tables_rolls_back_and_chains_ddl_failure(monkeypatch: pytest.MonkeyPatch):
@@ -386,10 +441,15 @@ def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run():
     executed = []
 
     class DummyCursor:
-        def execute(self, statement: str) -> None:
+        def execute(self, statement: str, params=None) -> None:
+            if statement.lstrip().startswith("SELECT"):
+                return  # the role holds no privilege yet
             executed.append(statement)
-            if "BAD" in statement:
+            if "OWNER.BAD" in statement.upper():
                 raise oracledb.DatabaseError("ORA-01031: insufficient privileges\nHelp: ...")
+
+        def fetchone(self):
+            return None
 
         def close(self) -> None:
             pass
@@ -398,17 +458,63 @@ def test_failed_ddl_statement_is_reported_and_remaining_statements_still_run():
         def cursor(self) -> DummyCursor:
             return DummyCursor()
 
-    # When
-    failures = OracleEngine.execute_ddl_statements(
+        def commit(self) -> None:
+            pass
+
+        def rollback(self) -> None:
+            pass
+
+    # When: three grants are applied and the middle one is rejected
+    failures: list[tuple[str, str]] = []
+    OracleEngine.ensure_table_privileges(
         DummyConnection(),  # type: ignore[arg-type]
-        ["ALTER TABLE A ADD (X NUMBER)", "ALTER TABLE BAD ADD (X NUMBER)", "ALTER TABLE C ADD (X NUMBER)"],
+        "LDB_ROLE",
+        [("OWNER", "A"), ("OWNER", "BAD"), ("OWNER", "C")],
+        ("SELECT",),
+        ddl_failures=failures,
     )
 
     # Then: all three were attempted and only the rejected one is reported
     assert len(executed) == 3
-    assert [statement for statement, _ in failures] == ["ALTER TABLE BAD ADD (X NUMBER)"]
+    assert [statement for statement, _ in failures] == ["GRANT SELECT ON owner.bad TO ldb_role"]
     assert "ORA-01031" in failures[0][1]
     assert "\n" not in failures[0][1]
+
+
+def test_failed_ddl_statement_raises_when_the_caller_does_not_collect_failures():
+    # Spec: README > Bootstrap Database Objects — without a failure collector a rejected statement stops the run
+    class DummyCursor:
+        def execute(self, statement: str, params=None) -> None:
+            if not statement.lstrip().startswith("SELECT"):
+                raise oracledb.DatabaseError("ORA-01031: insufficient privileges")
+
+        def fetchone(self):
+            return None
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> DummyCursor:
+            return DummyCursor()
+
+        def rollback(self) -> None:
+            pass
+
+    with pytest.raises(ExecutionError):
+        OracleEngine.ensure_table_privileges(
+            DummyConnection(),  # type: ignore[arg-type]
+            "LDB_ROLE",
+            [("OWNER", "A")],
+            ("SELECT",),
+        )
+
+
+def _structure_statements(conn, table, reference=None) -> list[str]:
+    """The statements ensure_table_structure sends to a sink instead of executing."""
+    statements: list[str] = []
+    OracleEngine.ensure_table_structure(conn, table, {}, reference=reference, ddl_sink=statements.append)
+    return statements
 
 
 def _history_pk_replacement_script(
@@ -454,7 +560,7 @@ def _history_pk_replacement_script(
     monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, name: (["ID"], {"ID": column}))
     monkeypatch.setattr(OracleEngine, "_column_needs_update", lambda existing, desired: False)
     table = TableDefinition(owner="OWNER", name="ITEMS", columns=(column,), primary_key=desired_pk)
-    return OracleEngine.generate_table_structure_script(DummyConnection(), table, {})  # type: ignore[arg-type]
+    return _structure_statements(DummyConnection(), table)
 
 
 def test_replacing_a_primary_key_in_a_ddl_script_drops_its_index_in_the_same_statement(
@@ -549,6 +655,52 @@ def test_primary_key_metadata_is_read_from_the_view_set_the_connection_can_acces
     assert not any(f"{other}_constraints" in sql or f"{other}_indexes" in sql for sql in executed)
 
 
+@pytest.mark.parametrize(
+    ("admin_connection", "prefix", "owner_column"), [(False, "all", "table_schema"), (True, "dba", "owner")]
+)
+def test_existing_table_privileges_are_read_from_the_view_set_the_connection_can_access(
+    monkeypatch: pytest.MonkeyPatch, admin_connection: bool, prefix: str, owner_column: str
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — without admin credentials the history
+    # grants are applied over the runtime connection, which cannot read dba_* views; admin
+    # connections keep using them.
+    # Given: a runtime or an admin connection and a role without the privilege
+    executed: list[str] = []
+
+    class RecordingCursor:
+        def __init__(self, connection) -> None:
+            self.connection = connection
+
+        def execute(self, sql: str, *args, **kwargs) -> None:
+            executed.append(sql)
+
+        def fetchone(self):
+            return None
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def cursor(self) -> RecordingCursor:
+            return RecordingCursor(self)
+
+        def commit(self) -> None:
+            pass
+
+    connection = DummyConnection()
+    if admin_connection:
+        monkeypatch.setattr(OracleEngine, "_admin_connections", {id(connection)})
+
+    # When: the table privileges are ensured
+    OracleEngine.ensure_table_privileges(connection, "ROLE", [("OWNER", "ITEMS")], ["SELECT"])  # type: ignore[arg-type]
+
+    # Then: the existing grants were read only from the matching view set
+    other = "dba" if prefix == "all" else "all"
+    check = next(sql for sql in executed if f"{prefix}_tab_privs" in sql)
+    assert f"{owner_column} = :owner" in check
+    assert not any(f"{other}_tab_privs" in sql for sql in executed)
+
+
 def test_structure_script_without_a_connection_creates_every_object(monkeypatch: pytest.MonkeyPatch):
     # Spec: README > Run ILM > --mode SCRIPT — with history_baseline EMPTY nothing is read from
     # the database: the script creates the table, its primary key and its indexes.
@@ -557,7 +709,7 @@ def test_structure_script_without_a_connection_creates_every_object(monkeypatch:
     table = TableDefinition(owner="OWNER", name="ITEMS", columns=(column,), primary_key=("ID",))
 
     # When: the structure script is generated without a connection
-    statements = OracleEngine.generate_table_structure_script(None, table, {})
+    statements = _structure_statements(None, table)
 
     # Then: the table and its primary key are created
     assert statements[0].startswith("CREATE TABLE owner.items")
@@ -600,12 +752,7 @@ def test_structure_script_with_a_reference_reads_the_reference_and_emits_ddl_for
     table = TableDefinition(owner="HIST", name="ITEMS", columns=(id_column, date_column), primary_key=None)
 
     # When: the structure script is generated against the reference
-    statements = OracleEngine.generate_table_structure_script(
-        DummyConnection(),  # type: ignore[arg-type]
-        table,
-        {},
-        reference=("SRC", "ITEMS"),
-    )
+    statements = _structure_statements(DummyConnection(), table, reference=("SRC", "ITEMS"))
 
     # Then: every dictionary lookup targeted the reference, and the DDL targets the history table
     assert lookups and all(lookup == ("SRC", "ITEMS") for lookup in lookups)
@@ -616,8 +763,9 @@ def test_table_privilege_script_grants_every_privilege_on_every_table_without_a_
     # Spec: README > Run ILM > --mode SCRIPT — the grants a DBA runs are unconditional GRANT
     # statements, one per table and privilege, safe to run again.
     # When: the privilege script is generated for two tables and two privileges
-    statements = OracleEngine.generate_table_privilege_script(
-        "LDB_ROLE", [("OWNER", "A"), ("OWNER", "B")], ("select", "DELETE")
+    statements: list[str] = []
+    OracleEngine.ensure_table_privileges(
+        None, "LDB_ROLE", [("OWNER", "A"), ("OWNER", "B")], ("select", "DELETE"), ddl_sink=statements.append
     )
 
     # Then: each table gets each privilege for the role
@@ -627,3 +775,123 @@ def test_table_privilege_script_grants_every_privilege_on_every_table_without_a_
         "GRANT SELECT ON owner.b TO ldb_role",
         "GRANT DELETE ON owner.b TO ldb_role",
     ]
+
+
+class _PrivilegeCursor:
+    """Cursor double answering the role and privilege lookups of a runtime user."""
+
+    def __init__(self, *, enabled_roles: set[str], granted: set[tuple[str, str, str]]) -> None:
+        self.enabled_roles = enabled_roles
+        self.granted = granted
+        self.executed: list[str] = []
+        self._row: tuple[int] | None = None
+        self.connection: object | None = None
+
+    def execute(self, sql: str, params=()) -> None:
+        self.executed.append(sql)
+        if "session_roles" in sql:
+            self._row = (1,) if params[0] in self.enabled_roles else None
+        else:
+            _, owner, table_name, privilege = params
+            self._row = (1,) if (owner, table_name, privilege) in self.granted else None
+
+    def fetchone(self):
+        return self._row
+
+    def close(self) -> None:
+        pass
+
+
+class _PrivilegeConnection:
+    def __init__(self, cursor: _PrivilegeCursor) -> None:
+        self._cursor = cursor
+        cursor.connection = self
+
+    def cursor(self) -> _PrivilegeCursor:
+        return self._cursor
+
+
+def test_missing_table_privileges_lists_what_the_role_does_not_give_the_runtime_user(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM > --mode PREPARE — the privileges a runtime user receives through its role are
+    # read with its own connection, so no admin credentials are needed.
+    # Given: a role that gives SELECT but not DELETE on a table whose name is lowercase in the dictionary
+    monkeypatch.setattr(OracleEngine, "_admin_connections", set())  # a runtime connection
+    cursor = _PrivilegeCursor(enabled_roles={"LDB_ROLE"}, granted={("gl", "inv", "SELECT")})
+
+    # When: the missing privileges are requested
+    missing = OracleEngine.get_missing_table_privileges(
+        _PrivilegeConnection(cursor),
+        "LDB_ROLE",
+        [("gl", "inv")],
+        ["select", "delete"],  # type: ignore[arg-type]
+    )
+
+    # Then: only DELETE is missing, and the dictionary names were used as given
+    assert missing == [("gl", "inv", "DELETE")]
+    assert not any("dba_" in sql for sql in cursor.executed)
+
+
+def test_missing_table_privileges_reports_everything_when_the_role_is_not_enabled():
+    # Spec: README > Run ILM > --mode PREPARE — a role granted but not active in the session gives nothing
+    # Given: a role that is not enabled although its grants exist
+    cursor = _PrivilegeCursor(enabled_roles=set(), granted={("GL", "INV", "SELECT")})
+
+    # When: privileges and role state are requested
+    connection = _PrivilegeConnection(cursor)
+    missing = OracleEngine.get_missing_table_privileges(connection, "LDB_ROLE", [("GL", "INV")], ["SELECT"])  # type: ignore[arg-type]
+
+    # Then: the privilege counts as missing and the role is reported as not enabled
+    assert missing == [("GL", "INV", "SELECT")]
+    assert OracleEngine.is_role_enabled(connection, "LDB_ROLE") is False  # type: ignore[arg-type]
+
+
+def _supporting_connection(error_rows):
+    class DummyCursor:
+        def __init__(self) -> None:
+            self.sql: list[str] = []
+
+        def execute(self, sql, params=None) -> None:
+            self.sql.append(" ".join(sql.split()))
+
+        def fetchall(self):
+            return error_rows
+
+        def close(self) -> None:
+            pass
+
+    class DummyConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = DummyCursor()
+
+        def cursor(self):
+            return self.cursor_instance
+
+    return DummyConnection()
+
+
+def test_supporting_objects_that_do_not_compile_fail_the_install(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ldb-impl — CREATE OR REPLACE succeeds even when a unit has compile errors, so an object left
+    # invalid must stop ldb-impl instead of being reported as created
+    # Given: the procedure compiles with an error
+    conn = _supporting_connection([("CHECK_SAVE_STATUS", "PROCEDURE", 12, 5, "PLS-00904: invalid identifier")])
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: None)
+
+    # When/Then: the install fails naming the object and the compiler message
+    with pytest.raises(ExecutionError, match=r"CHECK_SAVE_STATUS.*PLS-00904"):
+        OracleEngine.ensure_supporting_objects(conn, "ldb")  # type: ignore[arg-type]
+
+
+def test_supporting_objects_that_compile_are_reported_as_created(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ldb-impl — a clean compilation keeps reporting the three objects
+    # Given: no compile errors
+    conn = _supporting_connection([])
+    monkeypatch.setattr(OracleEngine, "_execute_ddl", lambda connection, cursor, statement: None)
+
+    # When
+    created = OracleEngine.ensure_supporting_objects(conn, "ldb")  # type: ignore[arg-type]
+
+    # Then: the errors were read for the schema owner in dictionary form
+    assert created == ["TYPE t_referencing_tables", "PROCEDURE check_save_status", "PROCEDURE check_referencing_tables"]
+    assert "FROM all_errors" in conn.cursor_instance.sql[-1]
