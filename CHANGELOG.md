@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- **Behavior fix:** a table with several `referencing_tables` is now purged only when every referenced table allows it. The conditions of one table remain alternatives (`or`) and the tables are combined with `and`; before, all conditions were combined with `or`, so a child moved as soon as any parent condition matched.
 - **Breaking:** rerun `ldb-impl` after upgrading: it creates the table `LDB_RUN_LOCK`, adds to an existing control table the columns it lacks (`LDB_CTL.CTL_RUN_ID`) and reinstalls `check_save_status` (new `p_run_id` parameter) and `check_referencing_tables`.
 - `ldb-run --mode PREVIEW` now writes its own `ldb_ctl` statuses, the `EXECUTE` ones prefixed with `P` (`PTSTART`, `PCSTART`, `PCEND`, `PLSTART`, `PLEND`, `PTEND`, `PERROR`), and ends each table with `PTEND`, so a PREVIEW no longer makes an `EXECUTE` of the same day skip the tables. A PREVIEW over a table with an `EXECUTE` status of the same day fails with `ORA-20006`. An `EXECUTE` continues an incomplete `EXECUTE` of the same day keeping its rows; anything else restarts the table and closes the abandoned run in `ldb_log` ("Incomplete process closed by a later process"). These rules live in PL/SQL, so they hold for `SCRIPT` too.
 - A second `ldb-run` over a table already being processed stops with exit code 1 (`RunnerBusyError`) before starting any worker. Workers stop with `ORA-20005` if they lose the table to another runner, and `CSTART`/`CEND` now stop the worker when the control check fails.

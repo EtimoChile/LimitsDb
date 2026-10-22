@@ -1126,7 +1126,17 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
         # get where expression from cond_expr of all added_conds joined by " or "
         if config.execution.action == "SOURCE_ILM" and not any(cd["cond_expr"] for _, cd in added_conds):
             raise ValueError(f"At least one condition must be specified for SOURCE_ILM on table {key}")
-        predicates = [f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]]
+        predicates_by_alias: dict[str, list[str]] = {}
+        for al, cd in added_conds:
+            if cd["cond_expr"]:
+                predicates_by_alias.setdefault(al, []).append(f"({cd['cond_expr']})")
+        if len(predicates_by_alias) > 1:
+            conds_predicate = "\n   and ".join(
+                "(" + "\n       or ".join(alias_predicates) + ")" for alias_predicates in predicates_by_alias.values()
+            )
+            predicates = [f"({conds_predicate})"]
+        else:
+            predicates = [p for alias_predicates in predicates_by_alias.values() for p in alias_predicates]
         if is_source_mode:
             orphan_predicate = _orphan_predicate(cnd0)
             if orphan_predicate:
