@@ -3,20 +3,30 @@ import os
 import re
 import socket
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from functools import partial
 from operator import attrgetter
+from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 from limitsdb.core.ldb_ddl import deliver_ddl
-from limitsdb.core.ldb_errors import ConfigurationError
+from limitsdb.core.ldb_errors import ConfigurationError, RunnerBusyError
 from limitsdb.core.ldb_ilm_config import IlmRule, load_rows_from_yaml
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
+from limitsdb.core.ldb_status_report import EnvironmentStatus, collect_environment, report_status
 from limitsdb.core.ldb_utils import get_effective_credentials, max_ignore_none, nvl
 from limitsdb.db.ldb_engine_loader import get_db_engine
-from limitsdb.db.ldb_engines import ColumnDefinition, DatabaseEngine, DdlFailures, DdlSink, TableDefinition
+from limitsdb.db.ldb_engines import (
+    ColumnDefinition,
+    DatabaseEngine,
+    DdlFailures,
+    DdlSink,
+    MonitoringAccess,
+    TableDefinition,
+)
 
 logger = get_logger("runner")
 
@@ -85,7 +95,7 @@ def _open_connection(
     try:
         conn = engine.get_connection(config, admin=admin, env=env)
         engine.get_system_date(conn)
-        logger.info("%s: connected to %s as %s", description, dsn, user)
+        logger.info("%s: connected", description)
         return conn
     except Exception:
         logger.error("%s: failed to connect to %s as %s", description, dsn, user, exc_info=True)
@@ -386,6 +396,78 @@ def _validate_privileges(
     return ok
 
 
+def _status_environment(config: Config, engine: DatabaseEngine, env: Literal["SOURCE", "HISTORY"]) -> EnvironmentStatus:
+    """Runtime-user view of one environment's executions; an environment that cannot be reached is reported."""
+    if not _credentials_present(config, admin=False, env=env):
+        return EnvironmentStatus(env=env, unavailable="runtime credentials are not configured")
+    conn = _open_connection(config, engine, admin=False, env=env, description=f"{env} runtime")
+    if conn is None:
+        return EnvironmentStatus(env=env, unavailable="connection failed (see the log)")
+    admin_conn: Any | None = None
+    try:
+        role = _app_role(config, env)
+        access = engine.check_monitoring_access(conn, role)
+        monitor_conn, script = conn, None
+        if access.grants:
+            # The runtime user cannot read every session view: try the admin connection, else leave a script
+            if _credentials_present(config, admin=True, env=env):
+                admin_conn = _open_connection(config, engine, admin=True, env=env, description=f"{env} admin")
+            admin_access = engine.check_monitoring_access(admin_conn, role) if admin_conn is not None else None
+            if admin_conn is not None and admin_access is not None and not admin_access.grants:
+                access, monitor_conn = admin_access, admin_conn
+            else:
+                script = _write_monitoring_grants_file(config, env, access)
+        return collect_environment(
+            engine,
+            conn,
+            env,
+            config.execution.last,
+            access,
+            monitor_conn=monitor_conn,
+            grants_script=str(script) if script is not None else None,
+        )
+    finally:
+        if admin_conn is not None:
+            engine.close_connection(admin_conn)
+        engine.close_connection(conn)
+
+
+def _write_monitoring_grants_file(
+    config: Config, env: Literal["SOURCE", "HISTORY"], access: MonitoringAccess
+) -> Path | None:
+    """Write the grants that open the session views to the runtime role, for a DBA to run (nothing is applied)."""
+
+    def produce(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
+        assert ddl_sink is not None
+        for grant in access.grants:
+            ddl_sink(grant)
+
+    path = deliver_ddl(
+        config,
+        produce,
+        destination="file",
+        env=env,
+        file_stem=f"status_{env.lower()}_monitoring_grants",
+        description=f"grants on the session views read by --mode STATUS ({env.lower()}).",
+    )
+    if path is not None:
+        logger.warning(
+            "%s: STATUS skips the data of the session views it cannot read. Run %s in SQL*Plus as a DBA to enable it.",
+            env,
+            path,
+        )
+    return path
+
+
+def _status_mode(config: Config, engine: DatabaseEngine) -> int:
+    """STATUS (read-only): state and statistics of the last executions in SOURCE and HISTORY."""
+    environments: list[tuple[str, Callable[[], EnvironmentStatus]]] = [
+        ("SOURCE", partial(_status_environment, config, engine, "SOURCE")),
+        ("HISTORY", partial(_status_environment, config, engine, "HISTORY")),
+    ]
+    return report_status(environments, print)
+
+
 def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDefinition:
     return ColumnDefinition(
         name=name,
@@ -606,8 +688,7 @@ def process_table(
     try:
         engine = get_db_engine(config.connections.db_engine)
         conn = engine.get_connection(config)
-        user, _, dsn = get_effective_credentials(config, admin=False)
-        logger.info(f"Connected to {dsn} as {user}")
+        logger.info("Connected")
         process_start = engine.get_system_date(conn)
         if config.execution.mode != "PREVIEW":
             # An incomplete EXECUTE of this process date is continued: its rows stay in the control counter
@@ -940,10 +1021,15 @@ def ldb_exec_ilm(
     lock_conn: Any = None
     try:
         lock_conn = engine.get_connection(config)
+        try:
+            engine.acquire_run_locks(
+                lock_conn, connection, protected, run_id, config.execution.mode, socket.gethostname(), os.getpid()
+            )
+        except RunnerBusyError as exc:
+            # A live runner holds a table (ORA-00054 on Oracle): expected condition, not a crash; nothing was started
+            logger.error("%s. Wait for it to finish, or check it with --mode STATUS.", exc)
+            return 1
         logger.info("Runner id: %s", run_id)
-        engine.acquire_run_locks(
-            lock_conn, connection, protected, run_id, config.execution.mode, socket.gethostname(), os.getpid()
-        )
         logger.info("This runner locked %d tables.", len(protected))
         return _run_table_pool(config, tables_config, process_date, engine, connection, run_id, lock_conn)
     finally:
@@ -1318,6 +1404,8 @@ def ldb_run(config: Config) -> None:
         if config.execution.mode == "VALIDATE":
             rc = _validate_environment(config, engine)
             raise SystemExit(rc)
+        if config.execution.mode == "STATUS":
+            raise SystemExit(_status_mode(config, engine))
         connection = engine.get_connection(config)
         tables_conf_rows = _load_offline_rows(config)
         source_plan = _collect_privilege_plan(tables_conf_rows, "SOURCE", engine)

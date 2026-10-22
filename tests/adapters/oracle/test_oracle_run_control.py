@@ -97,6 +97,27 @@ def test_a_table_held_by_another_runner_raises_runner_busy_and_leaves_nothing_lo
     assert not [entry for entry in log if entry[1].startswith("UPDATE ldb_run_lock")]
 
 
+def test_the_busy_message_names_the_runner_that_holds_the_table():
+    # Spec: docs/concurrency-control.md > Layer 1 — the key row of the table says which runner to wait for
+    # Given: the table is busy and its key row holds the other runner's data
+    holder = ("run-9", "EXECUTE", "otherhost", 77, datetime(2026, 10, 22, 15, 31, 5))
+    key_conn = _Conn("key", row=holder)
+    lock_conn = _Conn("lock", fail_on=lambda sql, params: params == ["A", "T1"], failure=_busy_error())
+
+    # When/Then: the refusal carries its run id, mode, host, pid and start
+    with pytest.raises(RunnerBusyError) as caught:
+        OracleEngine.acquire_run_locks(
+            lock_conn,  # type: ignore[arg-type]
+            key_conn,  # type: ignore[arg-type]
+            [("A", "T1")],
+            "run-1",
+            "EXECUTE",
+            "host",
+            42,
+        )
+    assert "(runner run-9, EXECUTE, host otherhost, pid 77, since 2026-10-22 15:31:05)" in str(caught.value)
+
+
 def test_any_other_lock_failure_is_an_execution_error_not_a_busy_runner():
     # Spec: docs/exception-handling.md — only ORA-00054 means "busy"; a different failure must not be blamed on
     # another runner

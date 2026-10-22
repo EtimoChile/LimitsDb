@@ -187,4 +187,5 @@ but does not replace the sources defined in `AGENTS.md`.
   for that password once; `PEND-020` is resolved.
 - `DEC-030`: generated scripts ask for every password at their start (`script_password_prompts`), before
   changing anything.
+- `DEC-041`: `ldb-run --mode STATUS [--last n]` reports the state (`RUNNING`/`OK`/`ERRORS`/`PARTIAL`), rows and live Oracle session progress of the last executions for SOURCE and HISTORY; PREVIEW runs are excluded; `LDB_CTL` stores the worker session (rerun `ldb-impl`); executions are rebuilt from the `LDB_LOG` timestamps, with no run id in the log.
 - `DEC-039`: `HISTORY_ILM` joins (with `use_added_columns: false`) read the history owner of each referenced table; `extra_select_tables` / `history_extra_select_tables` grant `SELECT` on tables read by filter subqueries.

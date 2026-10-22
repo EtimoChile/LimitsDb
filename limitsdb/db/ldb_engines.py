@@ -23,6 +23,96 @@ class ColumnDefinition:
     default: str | None = None
 
 
+@dataclass(frozen=True)
+class LogEntry:
+    """One row of the execution log."""
+
+    log_id: int  # increases with time
+    owner: str
+    table_name: str
+    action: str
+    process_date: datetime
+    status: str
+    started: datetime
+    ended: datetime | None
+    message: str | None
+    rows: int
+
+
+@dataclass(frozen=True)
+class ControlEntry:
+    """The control row of a table: where its processing stands now."""
+
+    owner: str
+    table_name: str
+    status: str
+    run_id: str | None  # runner that owns the row
+    action: str
+    process_date: datetime
+    started: datetime | None
+    ended: datetime | None
+    rows: int
+    last_activity: datetime | None  # last time the row was written (heartbeat)
+    session: str | None  # engine-specific id of the session that runs the table, when registered
+
+
+@dataclass(frozen=True)
+class TableRunRecord:
+    """What the control and log tables hold about one table within one execution."""
+
+    run_id: str  # runner that owns the control row; empty when there is none
+    owner: str
+    table_name: str
+    action: str
+    process_date: datetime | None
+    started: datetime | None
+    ended: datetime | None
+    last_status: str  # status of the last log row of the table in this run
+    message: str | None  # message of that last row
+    rows: int  # rows moved and committed in this run
+    in_progress: bool  # the control row still belongs to this run in an in-progress status
+    skipped: bool  # the table was refused because it was already processed: neither an error nor work
+    last_activity: datetime | None  # heartbeat of an in-progress table
+    session: str | None  # engine-specific id of the session of an in-progress table, when it was registered
+
+
+@dataclass(frozen=True)
+class MonitoringAccess:
+    """Which session views the runtime user can read, and the statements that would grant the rest."""
+
+    session: bool  # session liveness and current wait
+    progress: bool  # long-operation progress
+    waits: bool  # accumulated waits and CPU of the session
+    grants: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WaitItem:
+    """Time spent in one wait event (or in CPU), in seconds."""
+
+    name: str
+    seconds: float
+
+
+@dataclass(frozen=True)
+class OperationProgress:
+    """Progress of the long operation a session is running."""
+
+    percent: float
+    remaining_seconds: float | None
+    description: str | None
+
+
+@dataclass(frozen=True)
+class SessionActivity:
+    """Live facts of one session. ``alive`` is None when it could not be verified."""
+
+    alive: bool | None
+    current_wait: WaitItem | None  # only when the session has been waiting for a significant time
+    progress: OperationProgress | None
+    waits: tuple[WaitItem, ...]  # every non-idle wait event plus CPU, unsorted
+
+
 DdlSink = Callable[[str], None]
 """Receives the DDL an ``ensure_*`` method would otherwise execute."""
 
@@ -290,6 +380,61 @@ class DatabaseEngine(ABC):
             owner: Schema owner of the table.
             table_name: Table name.
             since: Start of the run whose failure is being recorded."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_log_entries(conn: Any, max_rows: int) -> list[LogEntry]:
+        """Returns the most recent ``max_rows`` rows of the execution log, newest first.
+        Args:
+            conn: Active database connection.
+            max_rows: Number of rows to read at most."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_control_entries(conn: Any) -> list[ControlEntry]:
+        """Returns the control row of every table: the current state of its processing.
+        Args:
+            conn: Active database connection."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def is_run_alive(conn: Any, owner: str, table_name: str, run_id: str) -> bool | None:
+        """Tells whether the runner that owns a table is alive by trying its mutex without waiting.
+        The lock is released at once, so the probe never holds anything.
+        Args:
+            conn: Active database connection (its own connection: it is rolled back).
+            owner: Schema owner of the table.
+            table_name: Table name.
+            run_id: Run recorded for the table.
+        Returns:
+            True when another session holds the table's runner lock, False when nobody does, and None when
+            the run has no runner lock (a generated SCRIPT) or the lock cannot be probed."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def check_monitoring_access(conn: Any, grantee: str) -> MonitoringAccess:
+        """Probes the session-monitoring views with the connection's own privileges.
+        Args:
+            conn: Active database connection.
+            grantee: User or role named in the grant hints."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_session_activity(
+        conn: Any, session: str, access: MonitoringAccess, min_wait_seconds: float
+    ) -> SessionActivity:
+        """Reads the liveness, long-operation progress, current wait and wait profile of a session.
+        Only what ``access`` allows is read; the rest comes back empty (``alive`` None without session access).
+        Args:
+            conn: Active database connection.
+            session: Session registered by the run.
+            access: Result of ``check_monitoring_access``.
+            min_wait_seconds: A current wait shorter than this is not reported."""
         pass
 
     @staticmethod

@@ -303,7 +303,8 @@ ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM 
 Common overrides:
 
 ```
---mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup and privileges (read-only), PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
+--mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE|STATUS   # VALIDATE setup and privileges (read-only), PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run, STATUS progress of the executions (read-only)
+--last <int>                                  # STATUS: how many of the most recent executions to report (default: 1)
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
@@ -323,7 +324,70 @@ ldb-run --schema billing --profile prod --action SOURCE_ILM --mode PREVIEW --log
 
 # Apply quick overrides without editing files
 ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set chunk_size=200000 --set parallel_max=8
+
+# Progress of the current execution, and of the last five
+ldb-run --schema billing --profile prod --mode STATUS
+ldb-run --schema billing --profile prod --mode STATUS --last 5
 ```
+
+### Execution progress with `--mode STATUS`
+
+`--mode STATUS` is read-only: it needs neither `--action` nor admin credentials, and it never runs ILM or
+changes anything. It connects with the SOURCE and the HISTORY runtime users and always reports both
+environments, because each database has its own control and log tables and runs its own workers. An
+environment whose credentials are missing or that cannot be reached is reported as not available; the exit
+code is 1 only when neither can be read. `--last n` reports the `n` most recent executions (default 1, the
+current or the latest one).
+
+An execution is one `ldb-run` invocation, identified in the report by its start time. Runs started with `--mode PREVIEW` are never shown.
+Each execution has one state:
+
+| State | Meaning |
+|---|---|
+| `RUNNING` | A table is being processed and its runner is alive. |
+| `OK` | Every table finished (`TEND`). A table refused because it was already processed for the date is not a failure. |
+| `ERRORS` | No table is running and at least one failed (`ERROR`). |
+| `PARTIAL` | No table is running or failed, but some did not finish: the run was interrupted, for example because its session ended. |
+
+Whether a runner is alive is verified by trying its table lock (`LDB_RUN_LOCK`) with `NOWAIT` and releasing it at
+once: if another session holds it, the run is active; if the lock is free, the run died and the table is
+`INTERRUPTED`. `SCRIPT` runs take no lock, so they are checked through `gv$session` instead.
+
+Every execution shows its rows processed, start and elapsed time, and each table its status and rows. For a
+table being processed, Oracle adds:
+
+- **Progress:** percentage and estimated time left of its long operation (`gv$session_longops`).
+- **Current wait:** the wait event of its session, only when it has been waiting 5 seconds or more.
+- **Time profile:** the wait events and CPU of the session in seconds, sorted from most to least, listed until
+  they cover 95% of the total time (`gv$session_event` and `gv$sess_time_model`).
+
+Each table line reads `OWNER.TABLE  status: TEND  rows processed: 126,038, started: … finished: … elapsed …`, with the
+action and process date from `LDB_CTL` on the next line (a running table has no `finished` and its elapsed time runs
+to the database clock).
+
+Each worker registers its session in `LDB_CTL.CTL_DB_SESSION_ID` (a single column whose format is the engine's; Oracle writes `instance.sid.audsid`, so RAC is covered) when
+it starts the table, so rerun `ldb-impl` after upgrading. The log has no run id: the executions are rebuilt from
+the `LDB_LOG` timestamps (a table's rows are split at each `TSTART`, and tables that start within 5 minutes of the
+previous one's last activity, without repeating a table, belong to the same execution), and the current state of
+each table comes from `LDB_CTL`. Executions that predate the upgrade are therefore reported too.
+
+These details need a user that can read the `gv$` views. `STATUS` first probes them with the runtime user. If
+some are unreadable and admin credentials for that environment are configured, the session details are read
+over the admin connection instead (the control tables are still read with the runtime user). If neither user can
+read them, `STATUS` skips whatever those views would have given (progress, current wait, wait profile), still
+reports states and rows, flags the table as `session not verified` (it then counts as running only if its
+control row was updated within the last 10 minutes), writes the missing grants to
+`status_<env>_monitoring_grants_<schema>_<timestamp>.sql` under `--ddl-pending-dir` (the directory the other
+generated scripts use) and tells you to run it in SQL*Plus as a DBA. The script contains, for example:
+
+```sql
+GRANT SELECT ON sys.gv_$session TO LDB_SOURCE_ROLE;
+GRANT SELECT ON sys.gv_$session_longops TO LDB_SOURCE_ROLE;
+GRANT SELECT ON sys.gv_$session_event TO LDB_SOURCE_ROLE;
+GRANT SELECT ON sys.gv_$sess_time_model TO LDB_SOURCE_ROLE;
+```
+
+`ldb-impl` does not grant these: they are SYS objects, outside the schema it manages.
 
 ### Admin credentials in ldb-run
 
@@ -489,6 +553,7 @@ the same pending file as the failed DDL, so a DBA can run it.
 | ------------------------ | -------------------------- | ---------------------------- | ------------------------------------------------ |
 | `action`                 | `--action`                 | `LDB_ACTION`                 | `config[.<PROFILE>].yml: action`                   |
 | `mode`                   | `--mode`                   | `LDB_MODE`                   | `config[.<PROFILE>].yml: mode`                     |
+| `last`                   | `--last`                   | `LDB_LAST`                   | `config[.<PROFILE>].yml: last`                     |
 | `chunk_size`             | `--chunk-size`             | `LDB_CHUNK_SIZE`             | `config[.<PROFILE>].yml: chunk_size`               |
 | `use_added_columns`      | —                          | —                            | `config[.<PROFILE>].yml: use_added_columns`        |
 | `add_ldb_columns`        | —                          | —                            | `config[.<PROFILE>].yml: add_ldb_columns`          |
@@ -549,7 +614,7 @@ Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
 # action: "SOURCE_ILM"  # ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)
-# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE
+# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE | STATUS
 # chunk_size: 100000    # Rows per chunk when processing large tables
 # use_added_columns: True  # Populate derived columns in history tables
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables
