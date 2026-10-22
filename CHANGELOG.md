@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-22
+
 - **Behavior fix:** a table with several `referencing_tables` is now purged only when every referenced table allows it. The conditions of one table remain alternatives (`or`) and the tables are combined with `and`; before, all conditions were combined with `or`, so a child moved as soon as any parent condition matched.
 - **Breaking:** rerun `ldb-impl` after upgrading: it creates the table `LDB_RUN_LOCK`, adds to an existing control table the columns it lacks (`LDB_CTL.CTL_RUN_ID`) and reinstalls `check_save_status` (new `p_run_id` parameter) and `check_referencing_tables`.
 - `ldb-run --mode PREVIEW` now writes its own `ldb_ctl` statuses, the `EXECUTE` ones prefixed with `P` (`PTSTART`, `PCSTART`, `PCEND`, `PLSTART`, `PLEND`, `PTEND`, `PERROR`), and ends each table with `PTEND`, so a PREVIEW no longer makes an `EXECUTE` of the same day skip the tables. A PREVIEW over a table with an `EXECUTE` status of the same day fails with `ORA-20006`. An `EXECUTE` continues an incomplete `EXECUTE` of the same day keeping its rows; anything else restarts the table and closes the abandoned run in `ldb_log` ("Incomplete process closed by a later process"). These rules live in PL/SQL, so they hold for `SCRIPT` too.
@@ -26,6 +28,7 @@
 - `ldb-run` no longer fails with `KeyError` when the runtime user cannot see a table: a table with no visible columns, or that references one, is skipped with a warning. `--mode SCRIPT` now applies the source grants when it has source admin credentials (and writes no `source_grants` file), and every mode warns when source admin credentials are absent.
 - Add `ldb-run --mode PREPARE`: it applies the source grants (or, without source admin credentials, writes them to `ddl_pending_dir` only for the tables the runtime user cannot see) and the history DDL and grants without running ILM, and exits 1 if the runtime user cannot see a configured table. Run it before `SCRIPT`, `PREVIEW` or `EXECUTE`.
 - `VALIDATE` and `PREPARE` check the table privileges the runtime user receives through its source and history roles (and that the roles are enabled); `PREPARE` writes only the grants that are missing, and the other modes warn about the gaps. **Breaking for custom engines:** `DatabaseEngine` has two new abstract methods, `get_missing_table_privileges` and `is_role_enabled`.
+- `HISTORY_ILM` joins with `use_added_columns: false` now read the history owner of each table in `referencing_tables` instead of the source owner. New rule fields `extra_select_tables` and `history_extra_select_tables` list tables read by filter subqueries; their role gets `SELECT` on them in `ldb-run`, `--mode PREPARE`, `--mode SCRIPT` and the privilege checks. History falls back to `extra_select_tables`. A `TABLE@SRC` read needs the table in `extra_select_tables`.
 
 ## [0.6.0] - 2026-10-14
 
