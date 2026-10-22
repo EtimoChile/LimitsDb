@@ -1,0 +1,19 @@
+# Example connection settings for the GL test model (examples/oracle/gl.sql).
+# Passwords do not go here: they belong in secrets.json next to this file
+# (source_password, history_password and, if used, the admin_* passwords).
+
+db_engine: oracle
+
+# Runtime users
+source_dsn: "leon.etimo.cl/alpha"
+source_username: LDB
+history_dsn: "leon.etimo.cl/alpha"
+history_username: LDBHST
+
+# Administrative users, only needed to provision users, roles and DB links
+# admin_source_username: ""
+# admin_history_username: ""
+
+# Database links (source -> history and history -> source)
+source_to_history_dblink_name: LDB_HIST
+history_to_source_dblink_name: LDB_SRC

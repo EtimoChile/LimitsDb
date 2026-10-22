@@ -39,10 +39,10 @@ def test_argparser_requires_schema_and_rejects_unsupported_engine(monkeypatch: p
     with pytest.raises(SystemExit):
         parser.parse_args([])
 
-    # When: DRY_RUN is passed as --mode
-    parsed = parser.parse_args(["--schema", "s", "--mode", "DRY_RUN"])
-    # Then: it is accepted as a valid choice
-    assert parsed.mode == "DRY_RUN"
+    # When: the removed DRY_RUN is passed as --mode
+    # Then: parser exits
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--schema", "s", "--mode", "DRY_RUN"])
 
     # When: oracle is given as --db-engine
     # Then: it is accepted
@@ -74,14 +74,16 @@ def test_schema_can_be_bootstrapped_from_environment_variable(monkeypatch: pytes
 
 
 def test_ldb_impl_control_tables_have_correct_shape():
-    # Spec: README > ldb-impl — LDB_CTL and LDB_LOG are the two control tables;
+    # Spec: README > ldb-impl — LDB_CTL, LDB_LOG and LDB_RUN_LOCK are the control tables;
     # CTL_ACTION and LOG_ACTION have length 11 to accommodate all action codes
     # Given: an owner name
     # When: control tables are built
     tables = ldb_impl._build_control_tables("OWNER")
 
     # Then: both tables exist with correct names and primary key / column constraints
-    assert {t.name for t in tables} == {"LDB_CTL", "LDB_LOG"}
+    assert {t.name for t in tables} == {"LDB_CTL", "LDB_LOG", "LDB_RUN_LOCK"}
+    run_lock = next(t for t in tables if t.name == "LDB_RUN_LOCK")
+    assert run_lock.primary_key == ("RL_OWNER", "RL_TABLE_NAME", "RL_KIND")
     ctl = next(t for t in tables if t.name == "LDB_CTL")
     log = next(t for t in tables if t.name == "LDB_LOG")
     assert ctl.primary_key == ("CTL_OWNER", "CTL_TABLE_NAME")

@@ -1,4 +1,10 @@
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+import logging
+import os
+import re
+import socket
+import uuid
+from collections.abc import Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from operator import attrgetter
 from typing import Any, Literal, TypedDict, cast
 
@@ -13,6 +19,11 @@ from limitsdb.db.ldb_engine_loader import get_db_engine
 from limitsdb.db.ldb_engines import ColumnDefinition, DatabaseEngine, DdlFailures, DdlSink, TableDefinition
 
 logger = get_logger("runner")
+
+# Seconds between liveness queries on the connection that holds the runner locks
+_LOCK_PING_SECONDS = 30.0
+# ORA-20001/2/3/5/6: the control row belongs to another run (or the rules refused this one) and stays untouched
+_FOREIGN_CONTROL_CODES = (20001, 20002, 20003, 20005, 20006)
 
 
 class _OtherColumn(TypedDict):
@@ -147,16 +158,84 @@ def _collect_privilege_targets(
     return sorted(tables)
 
 
+_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
+_SELECT_PRIVILEGES = ("SELECT",)
+
+# Tables that receive the same privileges: ``(privileges, tables)``
+PrivilegePlan = list[tuple[tuple[str, ...], list[tuple[str, str]]]]
+
+
+def _parse_extra_tables(
+    value: str | None, default_owner: str, engine: DatabaseEngine, field: str, key: tuple[str, str]
+) -> list[tuple[str, str]]:
+    """Parse a comma-separated ``[OWNER.]TABLE`` list; a table without owner belongs to ``default_owner``."""
+    tables: list[tuple[str, str]] = []
+    for entry in (value or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = [part.strip() for part in entry.split(".")]
+        if len(parts) > 2 or not all(parts) or " " in entry:
+            raise ValueError(f"Invalid {field} entry '{entry}' for {key}: expected [OWNER.]TABLE")
+        owner, table_name = (default_owner, parts[0]) if len(parts) == 1 else (parts[0], parts[1])
+        tables.append((engine.get_identifier_str(owner), engine.get_identifier_str(table_name)))
+    return tables
+
+
+def _collect_privilege_plan(
+    tables_conf_rows: list[IlmRule], env: Literal["SOURCE", "HISTORY"], engine: DatabaseEngine
+) -> PrivilegePlan:
+    """Return the privileges the environment's role needs: all of them on the configured tables and SELECT
+    on the extra tables read by the predicates. In history, ``history_extra_select_tables`` falls back to
+    ``extra_select_tables`` just as ``history_addtl_filter_expr`` falls back to ``additional_filter_expr``."""
+    owner_key: Literal["source_owner", "history_owner"] = "source_owner" if env == "SOURCE" else "history_owner"
+    configured = _collect_privilege_targets(tables_conf_rows, owner_key, engine)
+    extra: set[tuple[str, str]] = set()
+    for row in tables_conf_rows:
+        key = (row[owner_key], row["table_name"])
+        field = "extra_select_tables"
+        value = row.get("extra_select_tables")
+        if env == "HISTORY" and row.get("history_extra_select_tables") is not None:
+            field, value = "history_extra_select_tables", row.get("history_extra_select_tables")
+        extra.update(_parse_extra_tables(value, row[owner_key], engine, field, key))
+    plan: PrivilegePlan = []
+    if configured:
+        plan.append((_TABLE_PRIVILEGES, configured))
+    extra_only = sorted(extra - set(configured))
+    if extra_only:
+        plan.append((_SELECT_PRIVILEGES, extra_only))
+    return plan
+
+
 def _runtime_owner(config: Config, rule: IlmRule) -> str:
     """Return the schema whose rows are processed for the selected ILM action."""
     return rule["source_owner"] if config.execution.action == "SOURCE_ILM" else rule["history_owner"]
 
 
-def _runtime_join_expression(config: Config, rule: IlmRule) -> str:
-    """Render source joins, avoiding them when history predicates use stored derived columns."""
+def _to_history_owners(join_expr: str, history_owners: Mapping[tuple[str, str], str]) -> str:
+    """Point each ``<source owner>.<table>`` of the join at the history copy of the referenced table."""
+    for (source_owner, table_name), history_owner in history_owners.items():
+        if source_owner == history_owner:
+            continue
+        flags = 0 if source_owner.startswith('"') or table_name.startswith('"') else re.IGNORECASE
+        pattern = rf"(?<![\w$#.]){re.escape(source_owner)}\s*\.\s*{re.escape(table_name)}(?![\w$#])"
+        replacement = f"{history_owner}.{table_name}"
+        join_expr = re.sub(pattern, lambda _, text=replacement: text, join_expr, flags=flags)
+    return join_expr
+
+
+def _runtime_join_expression(
+    config: Config, rule: IlmRule, history_owners: Mapping[tuple[str, str], str] | None = None
+) -> str:
+    """Render the joins of the runtime environment, avoiding them when history predicates use stored derived columns.
+
+    ``join_expr`` names the referenced tables by their source owner; in ``HISTORY_ILM`` they are read from
+    their history owner (``history_owners`` maps each source table to it)."""
     join_expr = rule["join_expr"]
     if not join_expr or (config.execution.action == "HISTORY_ILM" and config.execution.use_added_columns):
         return ""
+    if config.execution.action == "HISTORY_ILM" and history_owners:
+        join_expr = _to_history_owners(join_expr, history_owners)
     join_type = "left outer" if rule["source_orphan_purge"] == "Y" else "inner"
     return join_expr.replace("@", join_type)
 
@@ -218,6 +297,7 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
     ok = True
     connections: list[Any] = []
     primary_conn: Any | None = None
+    runtime_conns: dict[str, Any] = {}
     required_specs: list[tuple[str, bool, Literal["SOURCE", "HISTORY"] | None]] = []
     optional_specs: list[tuple[str, bool, Literal["SOURCE", "HISTORY"] | None]] = []
     primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
@@ -238,6 +318,8 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
             connections.append(conn)
             if description == f"{primary_env} runtime":
                 primary_conn = conn
+            if not admin:
+                runtime_conns[env or primary_env] = conn
     for description, admin, env in optional_specs:
         if not _credentials_present(config, admin=admin, env=env):
             logger.info("%s: credentials not provided; skipping.", description.upper())
@@ -245,6 +327,8 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
         conn = _open_connection(config, engine, admin=admin, env=env, description=description.upper())
         if conn:
             connections.append(conn)
+            if not admin:
+                runtime_conns[env or primary_env] = conn
     try:
         if primary_conn:
             process_date = engine.get_system_date(primary_conn).strftime("%Y%m%d")
@@ -252,6 +336,7 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
                 tables_config = process_tables_cnf(primary_conn, config, engine, process_date)
                 logger.info("Configuration ready: %d table(s) evaluated.", len(tables_config))
                 _log_where_predicates(tables_config)
+                ok = _validate_privileges(config, engine, runtime_conns, tables_config) and ok
             except Exception:
                 logger.error("Failed to process ILM configuration.", exc_info=True)
                 ok = False
@@ -261,6 +346,44 @@ def _validate_environment(config: Config, engine: DatabaseEngine) -> int:
         for conn in connections:
             engine.close_connection(conn)
     return 0 if ok else 1
+
+
+def _validate_privileges(
+    config: Config, engine: DatabaseEngine, runtime_conns: dict[str, Any], tables_config: TablesConfig
+) -> bool:
+    """Report, read-only, the privileges the runtime users lack through their roles (DEC-033).
+
+    Missing privileges on the action's own environment fail the validation; those on the other one are
+    warnings, since PREPARE creates the history objects. Returns False when the validation must fail."""
+    rules = [cond for cnf in tables_config.values() for cond in cnf["conds"]]
+    targets = {
+        "SOURCE": _collect_privilege_plan(rules, "SOURCE", engine),
+        "HISTORY": _collect_privilege_plan(rules, "HISTORY", engine),
+    }
+    primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
+    ok = True
+    any_missing = False
+    for env, conn in runtime_conns.items():
+        level = logging.ERROR if env == primary_env else logging.WARNING
+        try:
+            missing = _check_role_privileges(
+                config,
+                engine,
+                conn,
+                cast(Literal["SOURCE", "HISTORY"], env),
+                targets[env],
+                level,
+            )
+        except Exception:
+            logger.error("Failed to check the %s privileges of the runtime user.", env, exc_info=True)
+            return False
+        if missing:
+            any_missing = True
+        if missing and env == primary_env:
+            ok = False
+    if any_missing:
+        (logger.warning if ok else logger.error)("Run --mode PREPARE to apply the missing privileges.")
+    return ok
 
 
 def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDefinition:
@@ -302,9 +425,6 @@ def _build_history_table_definition(
     )
 
 
-_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
-
-
 def _app_role(config: Config, env: Literal["SOURCE", "HISTORY"]) -> str:
     """Application role that the environment's tables are granted to."""
     return config.administration.source_role_name if env == "SOURCE" else config.administration.history_role_name
@@ -319,11 +439,11 @@ def _ensure_history_tables(
     """Ensure history tables match their required definitions.
 
     Behaviour by credential state:
-    - Reached only in PREVIEW and EXECUTE: both apply DDL, since a run needs the objects in place (DEC-023).
+    - Reached only in PREPARE, PREVIEW and EXECUTE: all apply DDL, since a run needs the objects in place (DEC-023, DEC-032).
     - Admin HISTORY credentials present, tables up to date: skip admin connection (DEC-020).
     - Admin HISTORY credentials present, delta detected: open admin connection and execute DDL.
     - Admin HISTORY credentials absent, tables up to date: proceed without connecting.
-    - Admin HISTORY credentials absent, schema cannot be inspected: exit 1 with the cause.
+    - Admin HISTORY credentials absent, schema cannot be inspected: exit 1 pointing to ldb-impl.
     - Admin HISTORY credentials absent, delta detected: execute the DDL with the runtime
       HISTORY connection (it succeeds when that user owns the objects or holds the privileges).
       Every statement that fails is written to a file under ``ddl_pending_dir`` and the run
@@ -344,19 +464,17 @@ def _ensure_history_tables(
     inspect_conn: Any | None = None
     delta_statements: list[str] = []
     inspection_failed = False
-    inspection_error = "no runtime HISTORY credentials are configured"
     if _credentials_present(config, admin=False, env="HISTORY"):
         try:
             inspect_conn = engine.get_connection(config, admin=False, env="HISTORY")
             for table_def, table_cnf in table_defs_and_cnf:
                 engine.ensure_table_structure(inspect_conn, table_def, table_cnf, ddl_sink=delta_statements.append)
-        except Exception as exc:
+        except Exception:
             logger.debug(
                 "Could not inspect history schema with runtime credentials; will use admin path.",
                 exc_info=True,
             )
             inspection_failed = True
-            inspection_error = " ".join(str(exc.__cause__ or exc).split())
         finally:
             if inspect_conn:
                 engine.close_connection(inspect_conn)
@@ -367,23 +485,22 @@ def _ensure_history_tables(
     if not admin_present:
         if inspection_failed:
             logger.error(
-                "History admin credentials are absent and the history schema could not be inspected: %s. "
-                "Fix the runtime HISTORY connection or privileges, then rerun.",
-                inspection_error,
+                "The history configuration is incomplete and the runtime HISTORY user cannot complete it. "
+                "Run ldb-impl so a DBA can complete it, then rerun."
             )
             raise SystemExit(1)
         if not delta_statements:
-            logger.info("History tables are up to date; no admin credentials needed.")
+            logger.info("History tables are up to date; no changes needed.")
             return
-        history_tables = [
-            (engine.get_identifier_str(td.owner), engine.get_identifier_str(td.name)) for td, _ in table_defs_and_cnf
-        ]
-        _apply_history_delta_without_admin(config, engine, table_defs_and_cnf, history_tables, len(delta_statements))
+        history_plan = _collect_privilege_plan(
+            [cond for _, table_cnf in table_defs_and_cnf for cond in table_cnf["conds"]], "HISTORY", engine
+        )
+        _apply_history_delta_without_admin(config, engine, table_defs_and_cnf, history_plan, len(delta_statements))
         return
 
     # Admin credentials present.
     if not inspection_failed and not delta_statements:
-        logger.info("History tables are up to date; admin connection not needed.")
+        logger.info("History tables are up to date; no changes needed.")
         return
 
     history_admin_connection: Any | None = None
@@ -415,7 +532,7 @@ def _apply_history_delta_without_admin(
     config: Config,
     engine: DatabaseEngine,
     table_defs_and_cnf: list[tuple[Any, ProcessedTableConfig]],
-    history_tables: list[tuple[str, str]],
+    history_plan: PrivilegePlan,
     delta_size: int,
 ) -> None:
     """Run the history DDL delta and its grants with runtime credentials; failures go to a pending file, exit 1."""
@@ -427,14 +544,15 @@ def _apply_history_delta_without_admin(
             engine.ensure_table_structure(
                 runtime_conn, table_def, table_cnf, ddl_sink=ddl_sink, ddl_failures=ddl_failures
             )
-        engine.ensure_table_privileges(
-            runtime_conn,
-            _app_role(config, "HISTORY"),
-            history_tables,
-            _TABLE_PRIVILEGES,
-            ddl_sink=ddl_sink,
-            ddl_failures=ddl_failures,
-        )
+        for privileges, tables in history_plan:
+            engine.ensure_table_privileges(
+                runtime_conn,
+                _app_role(config, "HISTORY"),
+                tables,
+                privileges,
+                ddl_sink=ddl_sink,
+                ddl_failures=ddl_failures,
+            )
 
     try:
         deliver_ddl(
@@ -477,36 +595,56 @@ def _append_unique_name(other_columns: list[_OtherColumn], other_column: _OtherC
         other_columns.append(other_column)
 
 
-def process_table(config: Config, owner: str, table_name: str, plsql_code: str, process_date: str) -> WorkerResult:
+def process_table(
+    config: Config, owner: str, table_name: str, plsql_code: str, process_date: str, run_id: str
+) -> WorkerResult:
     logger.info(f"Processing table {owner}.{table_name}...")
-    prev_rows_processed = 0
     engine: DatabaseEngine | None = None
     conn: Any = None
     process_start: Any = None
+    baseline = 0
     try:
         engine = get_db_engine(config.connections.db_engine)
         conn = engine.get_connection(config)
         user, _, dsn = get_effective_credentials(config, admin=False)
         logger.info(f"Connected to {dsn} as {user}")
         process_start = engine.get_system_date(conn)
+        if config.execution.mode != "PREVIEW":
+            # An incomplete EXECUTE of this process date is continued: its rows stay in the control counter
+            baseline = engine.get_resumed_rows(conn, owner, table_name, process_date)
+            if baseline:
+                logger.info(f"Resuming {owner}.{table_name}: {baseline} rows were processed by the interrupted run.")
         logger.info(f"Executing ILM for {owner}.{table_name}...")
-        prev_rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-        engine.sql_block_run(conn, plsql_code)
+        engine.sql_block_run(conn, plsql_code, config.execution.mode, run_id)
         rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-        return (owner, table_name, Status.TABLE_END, prev_rows_processed, rows_processed, None, None)
+        finished = Status.TABLE_PREVIEW_END if config.execution.mode == "PREVIEW" else Status.TABLE_END
+        return (owner, table_name, finished, baseline, rows_processed, None, None)
     except Exception as exc:
         sqlcode, message = _exception_details(exc)
-        rows_processed = prev_rows_processed
+        rows_processed = baseline
         logger.error("Worker failed for %s.%s: %s", owner, table_name, message, exc_info=True)
-        if engine is not None and conn is not None and process_start is not None:
+        owned_by_other_run = sqlcode in _FOREIGN_CONTROL_CODES
+        if engine is not None and conn is not None and process_start is not None and not owned_by_other_run:
             try:
                 rows_processed = engine.get_rows_processed(conn, owner, table_name, process_date)
-                engine.save_error_status(
-                    conn, config, owner, table_name, process_date, process_start, message, plsql_code
-                )
+                # The block already persisted its own failure; only one outside it (compile error, lost
+                # session...) still needs the ERROR row
+                if not engine.error_recorded_since(conn, owner, table_name, process_start):
+                    engine.save_error_status(
+                        conn,
+                        config,
+                        owner,
+                        table_name,
+                        process_date,
+                        process_start,
+                        message,
+                        plsql_code,
+                        max(rows_processed - baseline, 0),
+                        run_id,
+                    )
             except Exception:
                 logger.critical("Failed to persist recovery evidence for %s.%s", owner, table_name, exc_info=True)
-        return (owner, table_name, Status.ERROR, prev_rows_processed, rows_processed, sqlcode, message)
+        return (owner, table_name, Status.ERROR, baseline, rows_processed, sqlcode, message)
     finally:
         if engine is not None and conn is not None:
             engine.close_connection(conn)
@@ -567,6 +705,8 @@ def _write_script_ddl_files(
     source_connection: Any,
     tables_config: TablesConfig,
     tables_conf_rows: list[IlmRule],
+    *,
+    source_grants_applied: bool = False,
 ) -> None:
     """Write the one-time DDL and grants of a SCRIPT run to files under ``ddl_pending_dir`` (DEC-025).
 
@@ -574,14 +714,13 @@ def _write_script_ddl_files(
     file holds the source grants, since the two databases are run by different users. The ILM
     script, which runs many times, goes to stdout and stays free of them.
     """
-    history_tables = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
+    history_plan = _collect_privilege_plan(tables_conf_rows, "HISTORY", engine)
 
     def script_history(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
         assert ddl_sink is not None
         _script_history_ddl(config, engine, source_connection, tables_config, ddl_sink)
-        engine.ensure_table_privileges(
-            None, _app_role(config, "HISTORY"), history_tables, _TABLE_PRIVILEGES, ddl_sink=ddl_sink
-        )
+        for privileges, tables in history_plan:
+            engine.ensure_table_privileges(None, _app_role(config, "HISTORY"), tables, privileges, ddl_sink=ddl_sink)
 
     deliver_ddl(
         config,
@@ -591,14 +730,13 @@ def _write_script_ddl_files(
         file_stem="history_ddl",
         description="history table DDL and grants generated by ldb-run --mode SCRIPT.",
     )
-    if config.execution.action == "SOURCE_ILM":
-        source_tables = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
+    if config.execution.action == "SOURCE_ILM" and not source_grants_applied:
+        source_plan = _collect_privilege_plan(tables_conf_rows, "SOURCE", engine)
 
         def script_source_grants(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
             assert ddl_sink is not None
-            engine.ensure_table_privileges(
-                None, _app_role(config, "SOURCE"), source_tables, _TABLE_PRIVILEGES, ddl_sink=ddl_sink
-            )
+            for privileges, tables in source_plan:
+                engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, privileges, ddl_sink=ddl_sink)
 
         deliver_ddl(
             config,
@@ -610,6 +748,114 @@ def _write_script_ddl_files(
         )
 
 
+Privilege = tuple[str, str, str]
+
+
+def _check_role_privileges(
+    config: Config,
+    engine: DatabaseEngine,
+    connection: Any,
+    env: Literal["SOURCE", "HISTORY"],
+    plan: PrivilegePlan,
+    level: int,
+) -> list[Privilege]:
+    """Return the table privileges the runtime user does not receive through the environment's role.
+
+    Reads only with the runtime connection, so it needs no admin credentials (DEC-033). A role that is not
+    enabled for the user gives nothing; both findings are logged at ``level``."""
+    if not plan:
+        return []
+    role = _app_role(config, env)
+    emit = logger.error if level >= logging.ERROR else logger.warning
+    role_enabled = engine.is_role_enabled(connection, role)
+    if not role_enabled:
+        emit(
+            "%s role %s is not enabled for the runtime user: it is not granted to it or is not a default role. "
+            "Run ldb-impl with admin credentials to grant it.",
+            env,
+            role,
+        )
+    missing = [
+        privilege
+        for privileges, tables in plan
+        for privilege in engine.get_missing_table_privileges(connection, role, tables, privileges)
+    ]
+    if missing and role_enabled:
+        by_table: dict[tuple[str, str], list[str]] = {}
+        for owner, table_name, privilege in missing:
+            by_table.setdefault((owner, table_name), []).append(privilege)
+        emit(
+            "%s runtime user lacks privileges through role %s: %s.",
+            env,
+            role,
+            "; ".join(f"{owner}.{name} ({', '.join(privs)})" for (owner, name), privs in by_table.items()),
+        )
+    return missing
+
+
+def _verify_history_privileges(
+    config: Config, engine: DatabaseEngine, plan: PrivilegePlan, level: int = logging.ERROR
+) -> list[Privilege]:
+    """Check the history grants over the runtime HISTORY connection, once the objects and grants should exist."""
+    if not plan or not _credentials_present(config, admin=False, env="HISTORY"):
+        return []
+    history_connection = engine.get_connection(config, admin=False, env="HISTORY")
+    try:
+        return _check_role_privileges(config, engine, history_connection, "HISTORY", plan, level)
+    finally:
+        engine.close_connection(history_connection)
+
+
+def _write_source_grants_file(config: Config, engine: DatabaseEngine, missing: list[Privilege], origin: str) -> None:
+    """Write the missing source table grants to ``ddl_pending_dir`` for a DBA (no source admin credentials)."""
+    by_privilege: dict[str, list[tuple[str, str]]] = {}
+    for owner, table_name, privilege in missing:
+        by_privilege.setdefault(privilege, []).append((owner, table_name))
+
+    def produce(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
+        assert ddl_sink is not None
+        for privilege, tables in by_privilege.items():
+            engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, (privilege,), ddl_sink=ddl_sink)
+
+    deliver_ddl(
+        config,
+        produce,
+        destination="file",
+        env="SOURCE",
+        file_stem="source_grants",
+        description=f"missing source table grants found by {origin}.",
+    )
+    logger.warning(
+        "Source admin credentials are absent: the missing source table grants were written to the pending file; "
+        "a DBA must apply them and PREPARE must be rerun."
+    )
+
+
+def _invisible_tables(tables_config: TablesConfig) -> list[tuple[str, str]]:
+    """Return the tables whose columns the runtime user cannot read (missing, or SELECT not granted)."""
+    return sorted(key for key, cnf in tables_config.items() if cnf.get("columns_metadata") == {})
+
+
+def _prepare_result(tables_config: TablesConfig, missing: list[Privilege]) -> int:
+    """Return PREPARE's exit code: 1 when a configured table or privilege is still out of the runtime user's reach."""
+    invisible = [f"{owner}.{name}" for owner, name in _invisible_tables(tables_config)]
+    if not invisible and not missing:
+        logger.info("PREPARE completed: grants and history objects are in place.")
+        return 0
+    if invisible:
+        logger.error(
+            "PREPARE incomplete: the runtime user cannot see %s (the table does not exist or SELECT is not "
+            "granted). Apply the pending grants and rerun PREPARE.",
+            ", ".join(invisible),
+        )
+    if missing:
+        logger.error(
+            "PREPARE incomplete: %d table privilege(s) are still missing. Rerun PREPARE after they are applied.",
+            len(missing),
+        )
+    return 1
+
+
 def generate_script_output(config: Config, tables_config: TablesConfig) -> int:
     print(
         f"""
@@ -617,8 +863,10 @@ whenever oserror exit 1
 whenever sqlerror exit 1
 set echo on ver off trimspool on
 spool ldb_{config.context.schema}.log
-COLUMN process_date NEW_VALUE process_date
-SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') process_date FROM DUAL;
+rem usage: sqlplus user/password@dsn @script EXECUTE|PREVIEW
+DEFINE ldb_mode = "&1"
+COLUMN ldb_process_date NEW_VALUE ldb_process_date
+SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;
     """
     )
     while True:
@@ -657,14 +905,17 @@ def get_next_ready_table(
         if table_cnf["skip"]:
             continue
         cd = tables_config[(owner, table_name)]["conds"][0]
-        if cd["ctl_status"] in [Status.SKIPPED, Status.TABLE_END] or (owner, table_name) in active_tables:
+        if (
+            cd["ctl_status"] in [Status.SKIPPED, Status.TABLE_END, Status.TABLE_PREVIEW_END]
+            or (owner, table_name) in active_tables
+        ):
             continue
         referencing_tables = table_cnf["referencing_tables"]
         all_referencing_tables_ready = True
         if referencing_tables:
             for ref_owner, ref_table in referencing_tables:
                 cdr = tables_config[(ref_owner, ref_table)]["conds"][0]
-                if cdr["ctl_status"] != Status.TABLE_END:
+                if cdr["ctl_status"] not in (Status.TABLE_END, Status.TABLE_PREVIEW_END):
                     all_referencing_tables_ready = False
                     break  # referencing table not TEND status
         if not all_referencing_tables_ready:
@@ -680,6 +931,38 @@ def ldb_exec_ilm(
     process_date: str,
     engine: DatabaseEngine,
     connection: Any,
+) -> int:
+    """Run the tables under the runner mutex: another runner on any of them stops this one before it starts.
+
+    The locks live on a dedicated connection that never commits; ``connection`` only writes the key rows."""
+    run_id = str(uuid.uuid4())
+    protected = [key for key, table_cnf in tables_config.items() if not table_cnf["skip"]]
+    lock_conn: Any = None
+    try:
+        lock_conn = engine.get_connection(config)
+        logger.info("Runner id: %s", run_id)
+        engine.acquire_run_locks(
+            lock_conn, connection, protected, run_id, config.execution.mode, socket.gethostname(), os.getpid()
+        )
+        logger.info("This runner locked %d tables.", len(protected))
+        return _run_table_pool(config, tables_config, process_date, engine, connection, run_id, lock_conn)
+    finally:
+        if lock_conn is not None:
+            try:
+                engine.release_run_locks(lock_conn)
+            except Exception:
+                logger.warning("Could not release the runner locks cleanly.", exc_info=True)
+            engine.close_connection(lock_conn)
+
+
+def _run_table_pool(
+    config: Config,
+    tables_config: TablesConfig,
+    process_date: str,
+    engine: DatabaseEngine,
+    connection: Any,
+    run_id: str,
+    lock_conn: Any,
 ) -> int:
     processes: list[Future[WorkerResult]] = []
     process_targets: dict[Future[WorkerResult], tuple[str, str]] = {}
@@ -700,7 +983,7 @@ def ldb_exec_ilm(
                     owner, table_name, table_info = next_ready_table
                     logger.info(f"Launching background process for {owner}.{table_name}...")
                     future = executor.submit(
-                        process_table, config, owner, table_name, table_info["sql_block"], process_date
+                        process_table, config, owner, table_name, table_info["sql_block"], process_date, run_id
                     )
                     processes.append(future)
                     process_targets[future] = (owner, table_name)
@@ -712,8 +995,12 @@ def ldb_exec_ilm(
                     break  # There are no processes to launch, so go to waiting some process to end
             logger.debug(f"Active processes: {len(processes)}")
             if processes:
-                # Wait for some process to finish
-                for completed_future in as_completed(processes):
+                # Wait for some process to finish; while none does, check that the locks are still held
+                done, _ = wait(processes, timeout=_LOCK_PING_SECONDS, return_when=FIRST_COMPLETED)
+                if not done:
+                    engine.check_run_locks(lock_conn)
+                    continue
+                for completed_future in [future for future in processes if future in done]:
                     owner, table_name = process_targets[completed_future]
                     try:
                         owner, table_name, status, prev_rows_processed, rows_processed, sqlcode, message = (
@@ -733,21 +1020,26 @@ def ldb_exec_ilm(
                         f"Table {owner}.{table_name} finished with status {status} and {rows_processed - prev_rows_processed} rows processed."
                     )
                     cdr["ctl_status"] = status
-                    if status == Status.ERROR:
-                        logger.error(f"  Error {sqlcode}: {message}")
-                    elif status == Status.SKIPPED:
-                        logger.error(f"  Error {sqlcode}: {message}")
+                    if status in (Status.ERROR, Status.SKIPPED):
+                        logger.error(f"  Error {sqlcode}: {message}" if sqlcode else f"  Error: {message}")
                     active_tables.remove((owner, table_name))
                     processes.remove(completed_future)
                     del process_targets[completed_future]
                     break
             else:
                 break
-    if engine.all_status_tend(connection, tables_config, process_date):
+    if config.execution.mode == "PREVIEW":
+        all_done = all(
+            cnf["skip"] or cnf["conds"][0]["ctl_status"] in (Status.TABLE_END, Status.TABLE_PREVIEW_END)
+            for cnf in tables_config.values()
+        )
+    else:
+        all_done = engine.all_status_tend(connection, tables_config, process_date)
+    if all_done:
         if process_launched:
             logger.info("All tables processed successfully.")
         else:
-            logger.info("No tables to process.")
+            logger.info("No tables to process. Every table already finished for process date %s.", process_date)
         return 0
     else:
         logger.error("Some tables did not finish successfully.")
@@ -795,7 +1087,9 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
             key = (ldb_ctl_status_row["ctl_owner"], ldb_ctl_status_row["ctl_table_name"])
             if key in tables_config:
                 for cond in tables_config[key]["conds"]:
-                    cond["ctl_status"] = ldb_ctl_status_row["ctl_status"]
+                    # A PREVIEW leaves TPEND behind; it must not make a later run skip the table
+                    loaded = ldb_ctl_status_row["ctl_status"]
+                    cond["ctl_status"] = None if loaded == Status.TABLE_PREVIEW_END else loaded
     # Collect each table's active conditions along with inherited referencing-table conditions.
     # Track every expression needed to build the WHERE clause for the combined predicate across all contributing conditions.
     # Persist the resulting predicate in cond_expr so later stages can reuse it.
@@ -809,20 +1103,43 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
         table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(
             connection, runtime_owner, cnd0["table_name"]
         )
+        if not table_cnf["columns_metadata"]:
+            logger.warning(
+                "%s.%s is not visible to the runtime user: the table does not exist or SELECT is not granted "
+                "(have the grants been applied?). The table is skipped.",
+                runtime_owner,
+                cnd0["table_name"],
+            )
+            table_cnf["skip"] = True
+            continue
+        history_owners: dict[tuple[str, str], str] = {}
         if inherited_references:
             for ref_table in inherited_references.split(","):
                 ref_table = ref_table.strip()
                 if "." in ref_table:
                     ref_owner, ref_table_name = ref_table.split(".")
                 else:
-                    ref_owner, ref_table_name = ldb_cnf_row["source_owner"], ref_table
+                    ref_owner, ref_table_name = cnd0["source_owner"], ref_table
                 ref_table_name, alias = ref_table_name.split(" ")
                 ref_owner = engine.get_identifier_str(ref_owner)
                 ref_table_name = engine.get_identifier_str(ref_table_name)
                 if (ref_owner, ref_table_name) not in tables_config:
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in ldb_conf_rows")
+                if tables_config[(ref_owner, ref_table_name)].get("columns_metadata") == {}:
+                    logger.warning(
+                        "%s.%s references %s.%s, which is not visible to the runtime user. The table is skipped.",
+                        runtime_owner,
+                        cnd0["table_name"],
+                        ref_owner,
+                        ref_table_name,
+                    )
+                    table_cnf["skip"] = True
+                    break
                 ref_conds = tables_config[(ref_owner, ref_table_name)]["conds"]
+                history_owners[(ref_owner, ref_table_name)] = ref_conds[0]["history_owner"]
                 added_conds.extend([(alias, cond) for cond in ref_conds])
+            if table_cnf.get("skip"):
+                continue
         # Build the combined WHERE expression from all contributing conditions.
         for al, cd in added_conds:
             cond_list: list[str] = []
@@ -879,10 +1196,21 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
             table_cnf["skip"] = True
             continue
         table_cnf["skip"] = False
-        # get where expression from cond_expr of all added_conds joined by " or "
+        # Conditions of the same table are alternatives (or); the table and each of its referencing tables must
+        # all be satisfied (and), so a child row is purged only when every parent allows it.
         if config.execution.action == "SOURCE_ILM" and not any(cd["cond_expr"] for _, cd in added_conds):
             raise ValueError(f"At least one condition must be specified for SOURCE_ILM on table {key}")
-        predicates = [f"({cd['cond_expr']})" for _, cd in added_conds if cd["cond_expr"]]
+        predicates_by_alias: dict[str, list[str]] = {}
+        for al, cd in added_conds:
+            if cd["cond_expr"]:
+                predicates_by_alias.setdefault(al, []).append(f"({cd['cond_expr']})")
+        if len(predicates_by_alias) > 1:
+            conds_predicate = "\n   and ".join(
+                "(" + "\n       or ".join(alias_predicates) + ")" for alias_predicates in predicates_by_alias.values()
+            )
+            predicates = [f"({conds_predicate})"]
+        else:
+            predicates = [p for alias_predicates in predicates_by_alias.values() for p in alias_predicates]
         if is_source_mode:
             orphan_predicate = _orphan_predicate(cnd0)
             if orphan_predicate:
@@ -960,7 +1288,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 }
             )
         _, cnf_table_name = key
-        join_expr = _runtime_join_expression(config, cnd0)
+        join_expr = _runtime_join_expression(config, cnd0, history_owners)
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
         base_from = f"from {runtime_owner.lower()}.{cnf_table_name.lower()} A"
         join_clause = f"\n   {join_expr}" if join_expr else ""
@@ -992,46 +1320,71 @@ def ldb_run(config: Config) -> None:
             raise SystemExit(rc)
         connection = engine.get_connection(config)
         tables_conf_rows = _load_offline_rows(config)
-        source_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
+        source_plan = _collect_privilege_plan(tables_conf_rows, "SOURCE", engine)
+        # The runtime user reads column metadata through these grants, so SCRIPT applies them too when it can
+        source_grants_applied = False
         if (
-            not config.execution.generate_script
-            and config.execution.action == "SOURCE_ILM"
-            and source_tables_for_privileges
+            config.execution.action == "SOURCE_ILM"
+            and source_plan
             and _credentials_present(config, admin=True, env="SOURCE")
         ):
             source_admin_priv_conn = engine.get_connection(config, admin=True, env="SOURCE")
             try:
-                engine.ensure_table_privileges(
-                    source_admin_priv_conn,
-                    config.administration.source_role_name,
-                    source_tables_for_privileges,
-                    _TABLE_PRIVILEGES,
-                )
+                for privileges, tables in source_plan:
+                    engine.ensure_table_privileges(
+                        source_admin_priv_conn, config.administration.source_role_name, tables, privileges
+                    )
             finally:
                 engine.close_connection(source_admin_priv_conn)
+            source_grants_applied = True
+        source_missing: list[Privilege] = []
+        if config.execution.action == "SOURCE_ILM" and source_plan:
+            is_prepare = config.execution.mode == "PREPARE"
+            source_missing = _check_role_privileges(
+                config,
+                engine,
+                connection,
+                "SOURCE",
+                source_plan,
+                logging.ERROR if is_prepare else logging.WARNING,
+            )
+            if is_prepare and source_missing and not engine.is_role_enabled(connection, _app_role(config, "SOURCE")):
+                # Nothing else can be checked or fixed until the role reaches the runtime user
+                logger.error(
+                    "PREPARE incomplete: run ldb-impl to grant the role to the runtime user and rerun PREPARE."
+                )
+                raise SystemExit(1)
+            if is_prepare and source_missing and not source_grants_applied:
+                _write_source_grants_file(config, engine, source_missing, "ldb-run --mode PREPARE")
         process_date = engine.get_system_date(connection).strftime("%Y%m%d")
         tables_config = process_tables_cnf(connection, config, engine, process_date)
         if config.execution.generate_script:
-            _write_script_ddl_files(config, engine, connection, tables_config, tables_conf_rows)
+            _write_script_ddl_files(
+                config, engine, connection, tables_config, tables_conf_rows, source_grants_applied=source_grants_applied
+            )
             rc = generate_script_output(config, tables_config)
         else:
             if _credentials_present(config, admin=True, env=None):
                 admin_connection = engine.get_connection(config, admin=True)
             # Without admin credentials the primary-key metadata is read over the runtime connection.
             _ensure_history_tables(config, engine, admin_connection or connection, tables_config)
-            history_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
-            if history_tables_for_privileges and _credentials_present(config, admin=True, env="HISTORY"):
+            history_plan = _collect_privilege_plan(tables_conf_rows, "HISTORY", engine)
+            if history_plan and _credentials_present(config, admin=True, env="HISTORY"):
                 history_admin_priv_conn = engine.get_connection(config, admin=True, env="HISTORY")
                 try:
-                    engine.ensure_table_privileges(
-                        history_admin_priv_conn,
-                        config.administration.history_role_name,
-                        history_tables_for_privileges,
-                        _TABLE_PRIVILEGES,
-                    )
+                    for privileges, tables in history_plan:
+                        engine.ensure_table_privileges(
+                            history_admin_priv_conn, config.administration.history_role_name, tables, privileges
+                        )
                 finally:
                     engine.close_connection(history_admin_priv_conn)
-            rc = ldb_exec_ilm(config, tables_config, process_date, engine, connection)
+            if config.execution.mode == "PREPARE":
+                rc = _prepare_result(
+                    tables_config,
+                    source_missing + _verify_history_privileges(config, engine, history_plan),
+                )
+            else:
+                rc = ldb_exec_ilm(config, tables_config, process_date, engine, connection)
         raise SystemExit(rc)
     finally:
         if engine and connection:

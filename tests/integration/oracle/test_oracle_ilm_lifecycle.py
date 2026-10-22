@@ -32,7 +32,8 @@ def _oracle_config() -> Config:
     return Config(
         schema="oracle-integration",
         source_dsn=values["dsn"],
-        source_username=values["username"],
+        # Runtime logins quote the configured name, so SYSTEM is given in its dictionary (uppercase) form
+        source_username=values["username"].upper(),
         source_password=values["password"],
     )
 
@@ -395,6 +396,35 @@ def test_partial_ddl_failure_leaves_completed_tables_intact(oracle_connection: o
             _drop_table_if_present(oracle_connection, table_name)
 
 
+def test_runtime_login_works_for_a_lowercase_user_created_quoted(oracle_connection: oracledb.Connection):
+    # Spec: identifiers are handled in data-dictionary form — a lowercase user is created quoted, and
+    # get_connection must log in as that same quoted user instead of its uppercase twin
+    user_name = "ldbt_lower_user"
+    password = f"LdbCI_{secrets.token_hex(11)}"
+    _execute_cleanup_ddl(oracle_connection, f'DROP USER "{user_name}" CASCADE', missing_error_code=1918)
+    user = UserDefinition(name=user_name, password=password, system_privileges=("CREATE SESSION",))
+
+    try:
+        assert OracleEngine.ensure_users(oracle_connection, (user,)) == [f'"{user_name}"']
+
+        config = Config(
+            schema="oracle-integration",
+            source_dsn=os.environ["LDB_ORACLE_TEST_DSN"],
+            source_username=user_name,
+            source_password=password,
+        )
+        connection = OracleEngine.get_connection(config)
+        try:
+            cursor = connection.cursor()
+            cursor.execute("SELECT user FROM dual")
+            row = cursor.fetchone()
+            assert row is not None and row[0] == user_name
+        finally:
+            OracleEngine.close_connection(connection)
+    finally:
+        _execute_cleanup_ddl(oracle_connection, f'DROP USER "{user_name}" CASCADE', missing_error_code=1918)
+
+
 def test_bootstrap_roles_users_and_privileges_are_idempotent(oracle_connection: oracledb.Connection):
     # Spec: README § Bootstrap Database Objects — ensure_roles, ensure_users, and
     # ensure_table_privileges each return the names of created objects on the first
@@ -618,6 +648,18 @@ def test_source_and_history_ilm_archive_and_purge_correct_rows(
             source_connection.commit()
         finally:
             source_cursor.close()
+
+        # When: SOURCE_ILM runs in PREVIEW mode first
+        _run_cli(
+            "ldb-run", *common_arguments, "--action", "SOURCE_ILM", "--mode", "PREVIEW", environment=cli_environment
+        )
+
+        # Then: nothing moved and the day is not marked as processed (PTEND, not TEND)
+        assert _fetch_ids(source_connection, "ilm_orders") == [1, 2, 3]
+        assert (
+            _fetch_ctl_status(source_connection, owner=source_user, table_name="ILM_ORDERS", action="SOURCE_ILM")
+            == "PTEND"
+        )
 
         # When: SOURCE_ILM runs in EXECUTE mode
         source_run = _run_cli(
@@ -1910,7 +1952,8 @@ def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
         # Then: stdout holds only the ILM script, the files hold the DDL and grants, nothing was applied
         assert "CREATE TABLE" not in result.stdout.upper() and "GRANT " not in result.stdout.upper()
         (history_file,) = first_dir.glob("history_ddl_*.sql")
-        (source_file,) = first_dir.glob("source_grants_*.sql")
+        # And: with source admin credentials the source grants were applied, so no source grants file exists
+        assert not list(first_dir.glob("source_grants_*.sql"))
         assert "CREATE TABLE" in history_file.read_text(encoding="utf-8").upper()
         cursor = oracle_connection.cursor()
         try:
@@ -1921,7 +1964,6 @@ def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
 
             # When: the DBA runs the files with SQL*Plus
             _run_sql_file_in_oracle_container(container, history_file, admin_login=admin_login)
-            _run_sql_file_in_oracle_container(container, source_file, admin_login=admin_login)
 
             # Then: the history table and the grants exist
             cursor.execute(

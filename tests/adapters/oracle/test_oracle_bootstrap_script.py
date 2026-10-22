@@ -191,3 +191,17 @@ def test_bootstrap_script_warns_before_reconnecting_that_a_rejected_password_mea
 
     hint = script.index("If this fails with ORA-01017")
     assert hint < script.index('connect ldb_user/"&ldb_user_pwd_1"')
+
+
+def test_bootstrap_script_looks_up_a_lowercase_user_in_the_dictionary_as_it_was_created():
+    # Spec: identifiers are handled in data-dictionary form — a lowercase name is a quoted identifier
+    fragments: list[str] = []
+    user = UserDefinition(name="ldb", password=_SECRET)
+
+    OracleEngine.ensure_users(None, [user], ddl_sink=fragments.append)
+    script = "\n".join(fragments)
+
+    assert 'CREATE USER "ldb"' in script
+    assert "from dba_users where username = 'ldb'" in script
+    assert "User ldb already exists" in script
+    assert "'LDB'" not in script

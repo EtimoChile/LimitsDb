@@ -207,11 +207,13 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
-    def sql_block_run(conn: Any, plsql_code: str) -> None:
+    def sql_block_run(conn: Any, plsql_code: str, mode: str, run_id: str) -> None:
         """Executes a PL/SQL or SQL block against the database.
         Args:
             conn: Active database connection.
-            plsql_code: The PL/SQL or SQL block to execute."""
+            plsql_code: The PL/SQL or SQL block to execute.
+            mode: EXECUTE or PREVIEW, handed to the block.
+            run_id: Identifier of the runner that owns the table, handed to the block."""
         pass
 
     @staticmethod
@@ -249,6 +251,8 @@ class DatabaseEngine(ABC):
         process_start: datetime,
         message: str,
         plsql_code: str,
+        rows_processed: int = 0,
+        run_id: str | None = None,
     ) -> None:
         """Saves an error status entry in the control table.
         Args:
@@ -259,7 +263,71 @@ class DatabaseEngine(ABC):
             process_date: Date in 'YYYYMMDD' format.
             process_start: Start time of the process.
             message: Error message.
-            plsql_code: PL/SQL or SQL block executed."""
+            plsql_code: PL/SQL or SQL block executed.
+            rows_processed: Rows already moved and committed before the failure.
+            run_id: Identifier of the runner that owns the table; the error is dropped when it lost the table."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_resumed_rows(conn: Any, owner: str, table_name: str, process_date: str) -> int:
+        """Returns the rows kept when an EXECUTE continues an incomplete EXECUTE of the same process date.
+        Args:
+            conn: Active database connection.
+            owner: Schema owner of the table.
+            table_name: Table name.
+            process_date: Target process date in 'YYYYMMDD'.
+        Returns:
+            Rows already processed by the incomplete run, or 0 when the table starts over."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def error_recorded_since(conn: Any, owner: str, table_name: str, since: datetime) -> bool:
+        """Tells whether the control table already holds an error written at or after ``since``.
+        Args:
+            conn: Active database connection.
+            owner: Schema owner of the table.
+            table_name: Table name.
+            since: Start of the run whose failure is being recorded."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def acquire_run_locks(
+        lock_conn: Any,
+        key_conn: Any,
+        tables: Sequence[tuple[str, str]],
+        run_id: str,
+        mode: str,
+        host: str,
+        pid: int,
+    ) -> None:
+        """Takes the per-table runner mutex and publishes ``run_id`` for each table.
+        Args:
+            lock_conn: Dedicated connection that holds the locks until released; it must not commit.
+            key_conn: Separate connection that writes and commits the anchors and the keys.
+            tables: (owner, table_name) pairs to protect.
+            run_id: Identifier of this run.
+            mode: EXECUTE or PREVIEW.
+            host: Host of the runner.
+            pid: Process id of the runner.
+        Raises:
+            RunnerBusyError: Another runner holds one of the tables; nothing is left locked."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def check_run_locks(lock_conn: Any) -> None:
+        """Verifies that the lock connection is alive.
+        Raises:
+            ExecutionError: The connection was lost, so the mutex cannot be trusted."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def release_run_locks(lock_conn: Any) -> None:
+        """Frees the runner locks held by ``lock_conn``."""
         pass
 
     @staticmethod
@@ -388,6 +456,24 @@ class DatabaseEngine(ABC):
         Grants the role already holds are skipped. ``ddl_sink`` and ``ddl_failures`` work as in
         ``ensure_table_structure``. With ``conn`` None (needs ``ddl_sink``) nothing is read, so every
         grant is emitted; they are safe to run again."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_missing_table_privileges(
+        conn: Any, role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
+    ) -> list[tuple[str, str, str]]:
+        """Return the ``(owner, table, privilege)`` the role lacks, read with the connection's own user.
+
+        Needs no admin credentials: it reports what the connected user receives through the role, so it
+        also answers what a runtime user can do. A role that is not enabled for the user grants nothing,
+        so every privilege is then reported missing. Nothing is granted or changed."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def is_role_enabled(conn: Any, role: str) -> bool:
+        """Return whether the role is enabled for the connected user (granted to it and active in the session)."""
         pass
 
     @staticmethod

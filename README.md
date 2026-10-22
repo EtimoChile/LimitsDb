@@ -303,7 +303,7 @@ ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM 
 Common overrides:
 
 ```
---mode VALIDATE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
+--mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup and privileges (read-only), PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
@@ -333,9 +333,25 @@ application role, and creating or altering history tables before a `PREVIEW` or
 `EXECUTE` run (`PREVIEW` needs the objects in place to validate and time the
 queries; it skips only the data movement). Both operations are idempotent.
 
-If admin credentials are absent from `secrets[.<PROFILE>].json`, the privilege
-grants are skipped silently — the assumption is that grants are already in
-place.
+A `PREVIEW` writes its own statuses in `ldb_ctl`, the `EXECUTE` ones prefixed with `P` (`PTSTART`, `PCSTART`,
+`PCEND`, `PLSTART`, `PLEND`, `PTEND`, `PERROR`), and finishes each table with `PTEND`, not `TEND`, so it never marks a
+table as processed for the day: an `EXECUTE` run afterwards (same day) still moves the data. A `PREVIEW` is refused
+(`ORA-20006`) over a table that has an `EXECUTE` status for the same process date. An `EXECUTE` continues an incomplete
+`EXECUTE` of the same process date (finished tables stay finished and the rows already moved are kept); in any other case
+the table starts over and the abandoned run is closed in `ldb_log` as "Incomplete process closed by a later process".
+
+Only one `ldb-run` can work on a table at a time: the runner takes a lock per table in `LDB_RUN_LOCK` and a second runner
+stops with exit code 1 before starting anything. After upgrading, rerun `ldb-impl` so the new table and the supporting
+procedures (`check_save_status`, `check_referencing_tables`) are installed.
+
+The generated `SCRIPT` takes the mode from SQL*Plus and runs without the runner lock:
+`sqlplus user/password@dsn @script EXECUTE` (or `PREVIEW`). Its process date is the `ldb_process_date` variable.
+
+If source admin credentials are absent from `secrets[.<PROFILE>].json`, the
+source privilege grants are not applied. `ldb-run` checks with the runtime
+connection which privileges are missing through the role and logs a warning
+naming them; a table the runtime user cannot see is skipped with a warning.
+Run `--mode PREPARE` to get the missing grants as a file for a DBA.
 
 History table management follows the same principle:
 
@@ -348,7 +364,7 @@ History table management follows the same principle:
   DBA pre-creates all history objects and admin credentials are not stored.
 - **Admin credentials absent, history schema cannot be inspected** (for example
   the runtime connection or dictionary query fails): `ldb-run` exits with code 1
-  and logs the cause. It does not run ILM against a history schema whose state is
+  and tells the operator to run `ldb-impl` so a DBA completes the configuration. It does not run ILM against a history schema whose state is
   unknown.
 - **Admin credentials absent, DDL changes are required**: `ldb-run` applies the
   DDL directly over the runtime history connection, with no prior privilege
@@ -366,9 +382,46 @@ History table management follows the same principle:
   If the file cannot be written (for example the directory is not writable),
   `ldb-run` logs the error with the failed statements and exits with code 1.
 
+### Preparing grants and objects with `--mode PREPARE`
+
+`--mode PREPARE` brings permissions and objects into place without running any
+ILM work, so the problems show up before `SCRIPT`, `PREVIEW` or `EXECUTE`. It
+is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
+
+- With source admin credentials (`SOURCE_ILM`) it grants the source tables to
+  the source role. Without them it writes `source_grants_<schema>_<ts>.sql` under
+  `ddl_pending_dir` for a DBA, with only the privileges the runtime user does not
+  receive yet through the role, and warns. Once the grants are in place no file
+  is written.
+- It checks, with the runtime connections alone, that the source and history
+  roles are enabled for the runtime users and give them `SELECT`, `INSERT`,
+  `UPDATE` and `DELETE` on every configured table. A role that is granted but
+  not a default role gives nothing.
+  The role must stay a default role of the runtime user (`ldb-run` warns
+  when it is not); `GRANT role` makes it default unless the user was altered.
+- The default role names are `LDB_SOURCE_ROLE` and `LDB_HISTORY_ROLE`. When
+  several schemas (configuration sets) share the same SOURCE or HISTORY
+  database, those names collide; set `source_role_name` / `history_role_name`
+  per schema to keep the roles apart. Reusing one role across schemas also
+  works and is rarely a problem.
+- It creates or alters the history tables and grants them to the history role,
+  with the same admin or runtime-connection rules as `EXECUTE`: statements that
+  fail go to the pending file.
+- It exits with code 1 if the runtime user still cannot see a configured table
+  (it does not exist or `SELECT` is not granted). Other modes only skip such a
+  table with a warning.
+
+`VALIDATE` runs the same privilege check without changing anything: a gap on
+the action's own environment fails it, a gap on the other environment is a
+warning, since `PREPARE` creates the history objects. `SCRIPT`, `PREVIEW` and
+`EXECUTE` warn about the gaps they find.
+
+`PREVIEW` and `EXECUTE` keep applying DDL and grants themselves, so a change in
+source reaches history without failing the run.
+
 ### History DDL in `--mode SCRIPT`
 
-`--mode SCRIPT` applies nothing to the databases. The ILM SQL blocks, which
+`--mode SCRIPT` applies no DDL and no history grants to the databases. The ILM SQL blocks, which
 run many times, go to stdout. The one-time statements go to files under
 `ddl_pending_dir`, so they stay out of the script that is rerun:
 
@@ -378,7 +431,14 @@ run many times, go to stdout. The one-time statements go to files under
 - `source_grants_<schema>_<YYYYMMDD_HHMMSS>.sql` (`SOURCE_ILM` only): the grants
   on the source tables for the source role. Run it against the source database.
 
-Both are plain SQL for SQL*Plus that stop at the first failing statement; the
+The runtime user reads the column metadata of the source tables through their
+grants, so when source admin credentials exist `SCRIPT` applies the source
+grants itself and writes no `source_grants` file. Without them the file is
+written and `ldb-run` logs a warning. In every mode, a table the runtime user
+cannot see (it does not exist, or `SELECT` is not granted) is skipped with a
+warning instead of failing the run, and so is a table that references it.
+
+Both files are plain SQL for SQL*Plus that stop at the first failing statement; the
 grants are unconditional and safe to run again. The history DDL is always
 emitted, computed like this:
 
@@ -400,7 +460,7 @@ the same pending file as the failed DDL, so a DBA can run it.
 | Parameter                | Purpose                                                                                                                                                         | Default / values                                                                     |
 | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | `action`                 | ILM target (`SOURCE_ILM` moves/purges source, `HISTORY_ILM` cleans downstream history).                                                                         | Default `SOURCE_ILM`; choices `SOURCE_ILM`, `HISTORY_ILM`.                           |
-| `mode`                   | Execution mode: `VALIDATE` config/credentials, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
+| `mode`                   | Execution mode: `VALIDATE` config, credentials and role privileges (read-only), `PREPARE` apply grants and history objects without running ILM, `PLAN` dependency order, `PREVIEW` run the real queries and apply DDL and grants but do not insert or delete data (a.k.a. legacy `DRY_RUN`), `SCRIPT` emit the history DDL and the ILM SQL without applying anything, `EXECUTE` run changes. | Default `PREVIEW`; choices `VALIDATE`, `PLAN`, `PREVIEW`, `SCRIPT`, `EXECUTE`.       |
 | `chunk_size`             | Rows per chunk when processing large tables.                                                                                                                    | Default `100000`.                                                                    |
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
@@ -413,10 +473,10 @@ the same pending file as the failed DDL, so a DBA can run it.
 | `profile`                | Environment name (e.g., `dev`, `prod`). Differentiates configuration files for different environments within the same configuration set. | Optional; default `null`. |
 | `ilm_config_file`        | YAML file with tables (bypass DB discovery).                                                                                                                    | Optional; default `null`.                                                            |
 | `source_dsn`             | Source DSN / connection descriptor.                                                                                                                             | Default empty string.                                                                |
-| `source_username`        | Source username.                                                                                                                                                | Default empty string.                                                                |
+| `source_username`        | Source username, as named in the data dictionary: lowercase (`ldb`) is a quoted user created as `"ldb"`, uppercase (`LDB`) a regular one.                    |  | Default empty string.                                                                |
 | `source_password`        | Source password stored in secrets.                                                                                                                              | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
 | `history_dsn`            | History DSN / connection descriptor.                                                                                                                            | Default empty string.                                                                |
-| `history_username`       | History username.                                                                                                                                               | Default empty string.                                                                |
+| `history_username`       | History username, with the same case rules as `source_username`.                                                                                                || Default empty string.                                                                |
 | `history_password`       | History password stored in secrets.                                                                                                                             | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
 | `admin_source_username`  | Admin source username.                                                                                                                                          | Default empty string.                                                                |
 | `admin_source_password`  | Admin source password stored in secrets.                                                                                                                        | Default empty string; encrypted in `secrets.<PROFILE>.json`.                         |
@@ -461,7 +521,9 @@ Each entry in `ilm[.<PROFILE>].yml` merges table-level attributes with one or mo
 - **Retention windows:** `retain_months_source` is required whenever `purge_date_expr` is present. `retain_months_history` extends the history window but also depends on defining the source retention. During `HISTORY_ILM` runs, the engine sums source and history months to determine the cut-off date.
 - **Date expressions:** `purge_date_expr` identifies the date column (or expression) that anchors retention. Prefix column references with `@` (for example, `"@DSP_DATE"`); the runner swaps the prefix for the proper table alias at execution time.
 - **Additional filters:** Add optional filters through `additional_filter_expr` (source runs) and `history_addtl_filter_expr` (history runs). Both accept the same `@column` syntax, and the history expression falls back to the source expression when omitted.
-- **Referencing tables:** Use `referencing_tables` to pull parent conditions into child tables. List entries as `<TABLE> <ALIAS>` (optionally `<OWNER>.<TABLE> <ALIAS>`) and supply matching `join_expr` fragments. The runner inherits active conditions from each referenced table and rewrites the join fragments—`@` becomes `inner` joins by default or `left outer` joins when `source_orphan_purge: true` to find orphans.
+- **Referencing tables:** Use `referencing_tables` to pull parent conditions into child tables. List entries as `<TABLE> <ALIAS>` (optionally `<OWNER>.<TABLE> <ALIAS>`) and supply matching `join_expr` fragments. The runner inherits the active conditions of each referenced table: the conditions of one table are alternatives (`or`), and a child row is purged only when its own conditions and those of every referenced table are met (`and` between tables). It rewrites the join fragments—`@` becomes `inner` joins by default or `left outer` joins when `source_orphan_purge: true` to find orphans.
+- **Join owners in history:** `join_expr` names each referenced table by its source owner. In `HISTORY_ILM` runs with `use_added_columns: false` the runner joins the history copy instead, replacing `<source_owner>.<table>` with `<history_owner>.<table>` for every table listed in `referencing_tables`. With `use_added_columns: true` history runs do not join.
+- **Extra tables:** Filters may contain subqueries over tables that ILM does not manage. List them in `extra_select_tables` (read by `additional_filter_expr`, so source runs) and `history_extra_select_tables` (read by `history_addtl_filter_expr`) as comma-separated `[OWNER.]TABLE` entries; an entry without owner belongs to the environment's own owner. The environment's role gets `SELECT` on them wherever it gets the other table grants (`ldb-run`, `--mode PREPARE`, `--mode SCRIPT`) and the privilege checks include them. In history, `history_extra_select_tables` falls back to `extra_select_tables`, just as `history_addtl_filter_expr` falls back to `additional_filter_expr`. A table also managed by ILM keeps its full privileges. For tables that are not in the history database write the access in `history_addtl_filter_expr` yourself (for example `TABLE@SRC`, or `TABLE UNION ALL TABLE@SRC` in a subquery); LimitsDb does not rewrite subqueries. `SRC` is only the default name of the history-to-source database link; it can be overridden with `history_to_source_dblink_name` (and `source_to_history_dblink_name`, default `HIST`, for the other direction). The link connects as the source runtime user and uses the grants of its source role, so a table read as `TABLE@SRC` must also be listed in `extra_select_tables`.
 - **Historical predicate snapshot:** With `use_added_columns` enabled, every archived row preserves the values needed to reevaluate all its predicates in history, including values sourced from related tables. Distinct cut-off dates are stored in helper columns such as `ldb_date_<suffix>`. Predicates that share a date reuse the same helper column while retaining their own filters and retention windows. Other values sourced from related tables are materialized as `<column>_<table_alias>`.
 - **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to archive source rows whose referenced parent is absent. The source query uses `left outer` joins and treats the row as an orphan when any comma-separated check column is `NULL`. `referencing_tables`, `join_expr`, `orphan_check_column`, `use_added_columns: true`, and a positive historical retention are required. Orphans follow the table's normal source-to-history flow rather than being deleted directly. LimitsDb snapshots this state in `LDB_IS_ORPHAN` and stores a fallback date so `HISTORY_ILM` can apply the configured retention without accessing the missing parent.
 
@@ -487,7 +549,7 @@ Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
 # action: "SOURCE_ILM"  # ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)
-# mode: "PREVIEW"       # VALIDATE | PLAN | PREVIEW | SCRIPT | EXECUTE (PREVIEW mirrors legacy DRY_RUN)
+# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE
 # chunk_size: 100000    # Rows per chunk when processing large tables
 # use_added_columns: True  # Populate derived columns in history tables
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables

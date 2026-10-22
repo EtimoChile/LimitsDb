@@ -32,3 +32,7 @@ class ValidationError(LimitsDbError, ValueError):
 
 class ExecutionError(LimitsDbError, RuntimeError):
     """An ILM or administrative operation failed."""
+
+
+class RunnerBusyError(ExecutionError):
+    """Another runner holds the lock of a table this run needs; nothing was started."""

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from limitsdb.core import ldb_ddl, ldb_params_config, ldb_runner, ldb_utils
-from limitsdb.core.ldb_errors import ConfigurationError
+from limitsdb.core.ldb_errors import ConfigurationError, ExecutionError, RunnerBusyError
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
 from limitsdb.db.ldb_engines import ColumnDefinition
@@ -773,6 +773,136 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest
     assert "SOURCE.PARENT" not in history_query
 
 
+class _JoinEngine:
+    """Engine double for process_tables_cnf: two tables whose queries are returned as the SQL block."""
+
+    get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+    get_date_condition = staticmethod(OracleEngine.get_date_condition)
+    get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
+    rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
+    get_fallback_expression = staticmethod(OracleEngine.get_fallback_expression)
+
+    @staticmethod
+    def get_ldb_columns_expressions():
+        return "l_process_date", "sysdate"
+
+    @staticmethod
+    def get_table_columns(connection, owner, table_name):
+        names = ["ID", "PARENT_ID", "CREATED_AT"]
+        return names, {
+            name: ColumnDefinition(name=name, data_type="varchar2", id=index, length=20)
+            for index, name in enumerate(names, start=1)
+        }
+
+    @staticmethod
+    def generate_sql_block(config, table_cnf, process_date):
+        return table_cnf["query_expr"]
+
+
+def _join_rules(join_expr: str) -> list[dict]:
+    common = {
+        "source_owner": "GL",
+        "history_owner": "GLH",
+        "retain_months_source": 2,
+        "retain_months_history": 3,
+        "exec_day": None,
+        "frecuency": "D",
+        "is_active": "Y",
+        "purge_date_expr": "@CREATED_AT",
+        "additional_filter_expr": None,
+        "history_addtl_filter_expr": None,
+        "extra_select_tables": None,
+        "history_extra_select_tables": None,
+        "history_hint_expr": None,
+        "source_orphan_purge": "N",
+        "orphan_check_column": None,
+        "has_lob_columns": "N",
+        "referencing_tables": None,
+        "join_expr": None,
+        "hint_expr": None,
+        "long_columns": None,
+        "ctl_status": None,
+    }
+    return [
+        {**common, "id": 1, "table_name": "PARENT"},
+        {
+            **common,
+            "id": 2,
+            "table_name": "CHILD",
+            "referencing_tables": "GL.PARENT B",
+            "join_expr": join_expr,
+        },
+    ]
+
+
+def _join_query(monkeypatch: pytest.MonkeyPatch, action: str, join_expr: str, **config_kwargs) -> str:
+    """Return the query of the CHILD table as planned for the action."""
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: _join_rules(join_expr))
+    config = Config(
+        schema="s",
+        action=action,
+        mode="SCRIPT",
+        source_dsn="dsn",
+        source_username="user",
+        source_password="password",
+        history_dsn="dsn",
+        history_username="user",
+        history_password="password",
+        **config_kwargs,
+    )
+    tables = ldb_runner.process_tables_cnf(object(), config, _JoinEngine(), "20261007")
+    return tables[("GL", "CHILD")]["query_expr"]
+
+
+def test_history_join_reads_the_history_copy_of_the_referenced_table(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > Referencing tables — join_expr names the referenced table by its source
+    # owner; a HISTORY_ILM run without derived columns joins the history copy, which lives in its history_owner.
+    # Given: a child joined to GL.PARENT whose history copy is GLH.PARENT, history run without added columns
+    # When: the history query is planned
+    query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID", use_added_columns=False)
+
+    # Then: the join reads GLH.PARENT, and the source owner does not appear
+    assert "inner JOIN GLH.PARENT B" in query
+    assert "GL.PARENT" not in query.replace("GLH.PARENT", "")
+
+
+def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_referenced_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > ILM Rule Semantics > Referencing tables — only the referenced table moves to its history
+    # owner; other text of the join (columns, aliases, longer names) must remain as written.
+    # Given: lower-case and spaced owner qualification, and a longer name sharing the table's prefix
+    join_expr = "@ JOIN gl . parent B ON B.ID=A.PARENT_ID AND A.X=GL.PARENT_X.Y"
+
+    # When: the history query is planned without added columns
+    query = _join_query(monkeypatch, "HISTORY_ILM", join_expr, use_added_columns=False)
+
+    # Then: the referenced table is rewritten and the longer name is untouched
+    assert "JOIN GLH.PARENT B" in query
+    assert "GL.PARENT_X.Y" in query
+
+
+def test_source_join_keeps_the_source_owner(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > Referencing tables — SOURCE_ILM reads the referenced tables from source.
+    # Given: the same child and join as the history case
+    # When: the source query is planned
+    query = _join_query(monkeypatch, "SOURCE_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
+
+    # Then: the join is not redirected to the history owner
+    assert "inner JOIN GL.PARENT B" in query
+    assert "JOIN GLH" not in query
+
+
+def test_history_join_with_added_columns_has_no_join(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > Historical predicate snapshot — with use_added_columns the history
+    # run uses the stored values and does not join.
+    # Given / When: a history run with the default added columns
+    query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
+
+    # Then: the query has no join
+    assert "JOIN" not in query.upper()
+
+
 # ---------------------------------------------------------------------------
 # generate_script_output — public interface
 # ---------------------------------------------------------------------------
@@ -868,8 +998,27 @@ class _ImmediateExecutor:
 
 
 class _StatusEngine:
+    def __init__(self):
+        self.events = []
+
     def all_status_tend(self, connection, tables_config, process_date):
         return all(table["conds"][0]["ctl_status"] == Status.TABLE_END for table in tables_config.values())
+
+    def get_connection(self, config, admin=False, env=None):
+        self.events.append("connect")
+        return "lock-connection"
+
+    def acquire_run_locks(self, lock_conn, key_conn, tables, run_id, mode, host, pid):
+        self.events.append(("acquire", lock_conn, key_conn, list(tables), run_id, mode))
+
+    def check_run_locks(self, lock_conn):
+        self.events.append(("ping", lock_conn))
+
+    def release_run_locks(self, lock_conn):
+        self.events.append(("release", lock_conn))
+
+    def close_connection(self, conn):
+        self.events.append(("close", conn))
 
 
 def _table_config(*, references=()):
@@ -904,7 +1053,7 @@ def test_tables_with_references_are_processed_after_their_dependencies(
         ("A", "CHILD"): _table_config(references=(("A", "PARENT"),)),
     }
 
-    def successful_worker(config, owner, table_name, plsql_code, process_date):
+    def successful_worker(config, owner, table_name, plsql_code, process_date, run_id):
         launched.append((owner, table_name))
         return owner, table_name, Status.TABLE_END, 0, 1, None, None
 
@@ -929,7 +1078,7 @@ def test_cyclic_table_dependencies_prevent_successful_execution(monkeypatch: pyt
     }
     launched = []
 
-    def worker(config, owner, table_name, sql, process_date):
+    def worker(config, owner, table_name, sql, process_date, run_id):
         launched.append((owner, table_name))
         return owner, table_name, Status.TABLE_END, 0, 1, None, None
 
@@ -959,7 +1108,7 @@ def test_partial_failure_with_progress_is_retried_on_same_run(monkeypatch: pytes
         ("A", "CHILD"): _table_config(references=(("A", "PARENT"),)),
     }
 
-    def progress_then_success(config, owner, table_name, plsql_code, process_date):
+    def progress_then_success(config, owner, table_name, plsql_code, process_date, run_id):
         nonlocal parent_attempts
         launched.append((owner, table_name))
         if table_name == "PARENT":
@@ -992,7 +1141,7 @@ def test_failed_worker_that_makes_no_progress_is_skipped(monkeypatch: pytest.Mon
         ("A", "CHILD"): _table_config(references=(("A", "PARENT"),)),
     }
 
-    def no_progress_failure(config, owner, table_name, plsql_code, process_date):
+    def no_progress_failure(config, owner, table_name, plsql_code, process_date, run_id):
         launched.append((owner, table_name))
         return owner, table_name, Status.ERROR, 2, 2, 20001, "no progress"
 
@@ -1015,7 +1164,7 @@ def test_unexpected_worker_exception_returns_error_code(monkeypatch: pytest.Monk
     # Given: a worker that raises unexpectedly
     tables_config = {("A", "PARENT"): _table_config()}
 
-    def crashing_worker(config, owner, table_name, plsql_code, process_date):
+    def crashing_worker(config, owner, table_name, plsql_code, process_date, run_id):
         raise RuntimeError("process crashed unexpectedly")
 
     monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
@@ -1026,6 +1175,112 @@ def test_unexpected_worker_exception_returns_error_code(monkeypatch: pytest.Monk
 
     # Then: exit code 1 — unhandled exceptions never silently succeed
     assert result == 1
+
+
+def test_runner_locks_every_active_table_before_launching_and_releases_after():
+    # Spec: docs/concurrency-control.md > Layer 1 — the runner takes one lock per table on a dedicated
+    # connection before any worker starts and frees it when the run ends
+    # Given: two tables and a third one flagged to skip
+    engine = _StatusEngine()
+    tables_config = {
+        ("A", "T2"): _table_config(),
+        ("A", "T1"): _table_config(),
+        ("A", "OFF"): {**_table_config(), "skip": True, "conds": [{"ctl_status": Status.TABLE_END}]},
+    }
+    seen = []
+
+    def worker(config, owner, table_name, plsql_code, process_date, run_id):
+        seen.append((owner, table_name, run_id))
+        return owner, table_name, Status.TABLE_END, 0, 1, None, None
+
+    # When: ILM execution runs
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+        patch.setattr(ldb_runner, "process_table", worker)
+        result = ldb_runner.ldb_exec_ilm(_execution_config(), tables_config, "20261006", engine, "main-connection")
+
+    # Then: the skipped table is not locked, the lock connection differs from the key connection, every worker
+    # carries the run_id that was published, and the lock is released and closed at the end
+    assert result == 0
+    acquire = next(event for event in engine.events if event[0] == "acquire")
+    assert acquire[1:3] == ("lock-connection", "main-connection")
+    assert sorted(acquire[3]) == [("A", "T1"), ("A", "T2")]
+    assert acquire[5] == "EXECUTE"
+    assert {run_id for _, _, run_id in seen} == {acquire[4]}
+    assert engine.events[-2:] == [("release", "lock-connection"), ("close", "lock-connection")]
+
+
+def test_runner_that_finds_another_runner_starts_nothing_and_still_releases(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — a table held by another live runner stops this one before
+    # any worker is launched (RunnerBusyError, exit 1 through the CLI)
+    # Given: an engine whose lock acquisition finds the table busy
+    class _BusyEngine(_StatusEngine):
+        def acquire_run_locks(self, *args):
+            raise RunnerBusyError("Another runner is processing A.T1")
+
+    engine = _BusyEngine()
+    launched = []
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(ldb_runner, "process_table", lambda *args: launched.append(args))
+
+    # When/Then: the run is refused, nothing is launched and the lock connection is closed
+    with pytest.raises(RunnerBusyError):
+        ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
+    assert launched == []
+    assert engine.events[-1] == ("close", "lock-connection")
+
+
+def test_lock_connection_is_pinged_while_no_worker_finishes(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — a trivial query on the lock connection detects an idle or
+    # cut session while the workers run
+    # Given: a worker that is not finished on the first wait, and finished on the second
+    engine = _StatusEngine()
+    real_wait = ldb_runner.wait
+    waits = []
+
+    def slow_then_done(futures, timeout, return_when):
+        waits.append(timeout)
+        if len(waits) == 1:
+            return set(), set(futures)
+        return real_wait(futures, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(ldb_runner, "wait", slow_then_done)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+
+    # When: ILM execution runs
+    result = ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
+
+    # Then: the idle wait pinged the lock connection once and the run completed
+    assert result == 0
+    assert engine.events.count(("ping", "lock-connection")) == 1
+
+
+def test_lost_lock_connection_aborts_the_run(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Failure scenarios — if the lock session is gone the mutex no longer
+    # holds, so the runner stops with the error instead of going on unprotected
+    # Given: a ping that fails while a worker is still running
+    class _LostEngine(_StatusEngine):
+        def check_run_locks(self, lock_conn):
+            raise ExecutionError("The runner lock connection was lost")
+
+    monkeypatch.setattr(ldb_runner, "wait", lambda futures, timeout, return_when: (set(), set(futures)))
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+
+    # When/Then: the failure reaches the caller and the lock connection is still closed
+    engine = _LostEngine()
+    with pytest.raises(ExecutionError):
+        ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
+    assert engine.events[-1] == ("close", "lock-connection")
 
 
 # ---------------------------------------------------------------------------
@@ -1048,10 +1303,13 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
         def get_system_date(self, conn):
             return "start"
 
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
         def get_rows_processed(self, conn, owner, table_name, process_date):
             return 7 if calls["ran"] else 2
 
-        def sql_block_run(self, conn, plsql_code):
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             calls["ran"] = True
 
         def close_connection(self, conn):
@@ -1062,16 +1320,17 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
         schema="s",
         db_engine="oracle",
         action="SOURCE_ILM",
+        mode="EXECUTE",
         source_username="user",
         source_password="pw",
         source_dsn="dsn",
     )
 
     # When: process_table runs
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
-    # Then: TABLE_END with before/after row counts and connection closed
-    assert result == ("OWNER", "TABLE", Status.TABLE_END, 2, 7, None, None)
+    # Then: TABLE_END counting only this run's rows (the counter restarts at TSTART) and connection closed
+    assert result == ("OWNER", "TABLE", Status.TABLE_END, 0, 7, None, None)
     assert calls == {"ran": True, "closed": True}
 
 
@@ -1090,10 +1349,16 @@ def test_process_table_returns_error_status_and_closes_connection_on_failure(
         def get_system_date(self, conn):
             return "start"
 
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
         def get_rows_processed(self, conn, owner, table_name, process_date):
             return 3
 
-        def sql_block_run(self, conn, plsql_code):
+        def error_recorded_since(self, conn, owner, table_name, since):
+            return False
+
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             raise RuntimeError("worker stopped")
 
         def save_error_status(self, *args):
@@ -1113,11 +1378,59 @@ def test_process_table_returns_error_status_and_closes_connection_on_failure(
     )
 
     # When: process_table runs and the SQL block raises
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
     # Then: ERROR status returned, error saved, connection closed
-    assert result == ("OWNER", "TABLE", Status.ERROR, 3, 3, None, "worker stopped")
+    assert result == ("OWNER", "TABLE", Status.ERROR, 0, 3, None, "worker stopped")
     assert calls == {"saved": True, "closed": True}
+
+
+def test_process_table_leaves_the_control_row_alone_when_another_run_owns_the_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM — a table in use by another runner is not marked ERROR nor credited with stale rows
+    calls = {"saved": False}
+
+    class _Busy(Exception):
+        def __init__(self):
+            super().__init__(type("E", (), {"code": 20002, "message": "in process"})())
+
+    class DummyEngine:
+        def get_connection(self, config):
+            return object()
+
+        def get_system_date(self, conn):
+            return "start"
+
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            return 277839
+
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
+            raise _Busy()
+
+        def save_error_status(self, *args):
+            calls["saved"] = True
+
+        def close_connection(self, conn):
+            pass
+
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: DummyEngine())
+    config = Config(
+        schema="s",
+        db_engine="oracle",
+        action="SOURCE_ILM",
+        source_username="user",
+        source_password="pw",
+        source_dsn="dsn",
+    )
+
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    assert result == ("OWNER", "TABLE", Status.ERROR, 0, 0, 20002, "in process")
+    assert calls["saved"] is False
 
 
 def test_process_table_returns_error_when_recovery_query_also_fails(
@@ -1135,13 +1448,16 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
         def get_system_date(self, conn):
             return "start"
 
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
         def get_rows_processed(self, conn, owner, table_name, process_date):
             call_count[0] += 1
             if call_count[0] == 1:
                 return 0
             raise RuntimeError("recovery DB unavailable")
 
-        def sql_block_run(self, conn, plsql_code):
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
             raise RuntimeError("primary failure")
 
         def close_connection(self, conn):
@@ -1157,10 +1473,186 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
     )
 
     # When: process_table runs
-    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006")
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
 
     # Then: ERROR status — the table run did not succeed
     assert result[2] == Status.ERROR
+
+
+def _worker_engine(monkeypatch: pytest.MonkeyPatch, **overrides):
+    """Install a process_table engine whose calls are recorded in ``log``; ``overrides`` replace its methods."""
+    log: list[tuple[str, tuple]] = []
+
+    class _Engine:
+        def get_connection(self, config, admin=False, env=None):
+            return object()
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 6, 12, 0)
+
+        def get_resumed_rows(self, conn, owner, table_name, process_date):
+            return 0
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            return 5
+
+        def error_recorded_since(self, conn, owner, table_name, since):
+            log.append(("error_recorded_since", (since,)))
+            return False
+
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
+            log.append(("sql_block_run", (mode, run_id)))
+
+        def save_error_status(self, *args):
+            log.append(("save_error_status", args[8:]))
+
+        def close_connection(self, conn):
+            pass
+
+    for name, function in overrides.items():
+        setattr(_Engine, name, function)
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: _Engine())
+    return log
+
+
+def _worker_config(mode: str = "EXECUTE"):
+    return Config(
+        schema="s",
+        db_engine="oracle",
+        action="SOURCE_ILM",
+        mode=mode,  # type: ignore[arg-type]
+        source_username="user",
+        source_password="pw",
+        source_dsn="dsn",
+    )
+
+
+def test_process_table_hands_mode_and_run_id_to_the_block(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 2 — the block receives the mode and the run_id of its runner
+    # Given: a PREVIEW worker
+    log = _worker_engine(monkeypatch)
+
+    # When: process_table runs
+    ldb_runner.process_table(_worker_config("PREVIEW"), "OWNER", "TABLE", "begin null; end;", "20261006", "run-9")
+
+    # Then: the block is run with PREVIEW and run-9
+    assert ("sql_block_run", ("PREVIEW", "run-9")) in log
+
+
+def test_process_table_reports_only_this_runs_rows_when_it_resumes_an_interrupted_execute(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: docs/concurrency-control.md > Process date — an EXECUTE continues an incomplete EXECUTE of the same
+    # date and keeps its rows; the result carries the baseline so the runner reports this run's rows
+    # Given: an interrupted EXECUTE that had moved 3 rows, and a block that ends with 5 in the counter
+    _worker_engine(monkeypatch, get_resumed_rows=lambda self, conn, owner, table_name, process_date: 3)
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: baseline 3 and total 5 are reported
+    assert result == ("OWNER", "TABLE", Status.TABLE_END, 3, 5, None, None)
+
+
+def test_process_table_never_resumes_a_preview(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Process date — a PREVIEW deletes nothing, so it always starts over
+    # Given: an engine that would report resumed rows
+    _worker_engine(monkeypatch, get_resumed_rows=lambda self, conn, owner, table_name, process_date: 3)
+
+    # When: a PREVIEW worker runs
+    result = ldb_runner.process_table(_worker_config("PREVIEW"), "OWNER", "TABLE", "begin null; end;", "20261006", "r")
+
+    # Then: the baseline is 0
+    assert result[3] == 0
+
+
+def test_failed_resumed_table_without_new_rows_reports_the_baseline_so_it_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM execution — a failure without progress is SKIPPED; a resumed table must be compared
+    # against the rows it already had, not against zero
+    # Given: a resumed table (baseline 4) whose block fails without moving anything
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise RuntimeError("worker stopped")
+
+    _worker_engine(
+        monkeypatch,
+        get_resumed_rows=lambda self, conn, owner, table_name, process_date: 4,
+        get_rows_processed=lambda self, conn, owner, table_name, process_date: 4,
+        sql_block_run=fail,
+    )
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: previous and current rows are equal, which the runner turns into SKIPPED
+    assert result[2:5] == (Status.ERROR, 4, 4)
+
+
+def test_process_table_does_not_write_a_second_error_when_the_block_already_did(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 2 — the block's own handler persists its ERROR; Python writes
+    # one only for failures outside the block (PEND-022)
+    # Given: a failing block whose ERROR is already in ldb_ctl
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise RuntimeError("ORA-20004: parent not processed")
+
+    log = _worker_engine(
+        monkeypatch,
+        sql_block_run=fail,
+        error_recorded_since=lambda self, conn, owner, table_name, since: True,
+    )
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: the failure is reported but no ERROR is written again
+    assert result[2] == Status.ERROR
+    assert not [name for name, _ in log if name == "save_error_status"]
+
+
+def test_process_table_writes_the_error_for_a_failure_outside_the_block(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 2 — a failure the block could not record (compile error, missing
+    # procedure) is still persisted by the worker, with this run's rows and its run_id
+    # Given: a failing block that left no ERROR in ldb_ctl, and a resumed table with 2 previous rows
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise RuntimeError("PLS-00201: identifier must be declared")
+
+    log = _worker_engine(
+        monkeypatch,
+        sql_block_run=fail,
+        get_resumed_rows=lambda self, conn, owner, table_name, process_date: 2,
+    )
+
+    # When: process_table runs
+    ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: the error is saved once, for this run's 3 rows (5 total minus 2), under run-1
+    saved = [args for name, args in log if name == "save_error_status"]
+    assert saved == [(3, "run-1")]
+
+
+@pytest.mark.parametrize("code", [20001, 20002, 20003, 20005, 20006])
+def test_process_table_leaves_the_control_row_alone_for_every_foreign_control_code(
+    monkeypatch: pytest.MonkeyPatch, code: int
+):
+    # Spec: docs/concurrency-control.md > Error codes — in use, guarded, already processed, ownership lost and
+    # PREVIEW refused all mean the control row is not this run's: nothing is written to it
+    # Given: a block that fails with the code
+    class _Foreign(Exception):
+        def __init__(self):
+            super().__init__(type("E", (), {"code": code, "message": "not yours"})())
+
+    def fail(self, conn, plsql_code, mode, run_id):
+        raise _Foreign()
+
+    log = _worker_engine(monkeypatch, sql_block_run=fail)
+
+    # When: process_table runs
+    result = ldb_runner.process_table(_worker_config(), "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: ERROR is reported with the code and the control row is untouched
+    assert result[2] == Status.ERROR and result[5] == code
+    assert not [name for name, _ in log if name in ("save_error_status", "error_recorded_since")]
 
 
 # ---------------------------------------------------------------------------
@@ -1252,6 +1744,9 @@ class _HistoryDdlEngine:
         self.attempted: list[str] = []
         self.admin_applied: list[str] = []
         self.grants_attempted: list[str] = []
+        self.source_granted: list[str] = []
+        self.missing_privileges: dict[str, list[tuple[str, str, str]]] = {}
+        self.enabled_roles: set[str] | None = None  # None: every role is enabled
         self.structure_reads: list[tuple[str | None, str | None]] = []
 
     def get_connection(self, config, *, admin=False, env=None):
@@ -1292,11 +1787,21 @@ class _HistoryDdlEngine:
     def get_table_columns(self, conn, owner, table_name):
         return [], {}
 
+    def is_role_enabled(self, conn, role):
+        return self.enabled_roles is None or role in self.enabled_roles
+
+    def get_missing_table_privileges(self, conn, role, tables, privileges):
+        return list(self.missing_privileges.get(role, []))
+
     def _emit(self, conn, statements, ddl_sink, ddl_failures):
         """Send the statements to the sink, or apply them like a real engine would over ``conn``."""
         for statement in statements:
             if ddl_sink is not None:
                 ddl_sink(statement)
+                continue
+            if conn.admin and conn.env == "SOURCE":
+                assert statement.startswith("GRANT "), "only grants are applied over the source admin connection"
+                self.source_granted.append(statement)
                 continue
             if conn.admin:
                 assert conn.env == "HISTORY", "history DDL is applied over a history connection"
@@ -1329,11 +1834,13 @@ class _RecordingLogger:
         return record
 
 
-def _run_ldb(monkeypatch: pytest.MonkeyPatch, config: Config, engine: _HistoryDdlEngine, *tables: str) -> int:
+def _run_ldb(
+    monkeypatch: pytest.MonkeyPatch, config: Config, engine: _HistoryDdlEngine, *tables: str, rows: list | None = None
+) -> int:
     """Run ldb_run with the engine double and one history table per name (T1 by default); return the exit code."""
     tables_config = _make_tables_config(*(tables or ("T1",)))
     monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: rows or [])
     monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: tables_config)
     monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", lambda *args: 0)
     with pytest.raises(SystemExit) as exc_info:
@@ -1629,7 +2136,9 @@ def test_script_run_writes_the_history_delta_read_over_the_runtime_history_conne
     # When: ldb-run generates the script
     rc = _run_ldb(
         monkeypatch,
-        _history_ddl_config(mode="SCRIPT", history_baseline="SOURCE", ddl_pending_dir=str(pending_dir)),
+        _history_ddl_config(
+            mode="SCRIPT", history_baseline="SOURCE", source_admin=False, ddl_pending_dir=str(pending_dir)
+        ),
         engine,
     )
 
@@ -1707,25 +2216,105 @@ def test_script_run_aligns_history_with_source_when_history_is_unreadable_and_ba
     assert engine.attempted == [] and engine.admin_applied == []
 
 
-def test_script_run_emits_grants_in_files_instead_of_applying_them(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    # Spec: README > Run ILM > --mode SCRIPT — SCRIPT applies nothing to the target databases, so the
-    # table grants go to files: history grants with the history DDL, source grants in their own file.
-    # Given: SCRIPT mode with admin credentials, where a normal run would apply the grants
-    granted: list[str] = []
-    engine = _HistoryDdlEngine()
-    emit_grants = engine.ensure_table_privileges
-
-    def ensure_table_privileges(conn, *args, ddl_sink=None, **kwargs):
-        if ddl_sink is None:
-            granted.append("granted")  # applied to a database instead of sent to a file
-        return emit_grants(conn, *args, ddl_sink=ddl_sink, **kwargs)
-
-    engine.ensure_table_privileges = ensure_table_privileges  # type: ignore[method-assign]
+def _grant_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         ldb_runner,
         "_collect_privilege_targets",
         lambda rows, key, engine: [("SRC" if key == "source_owner" else "HIST", "T1")],
     )
+
+
+def _extra_rows(**extra) -> list[dict]:
+    """One configured table SRC.T1 / HIST.T1 whose predicates read other tables."""
+    return [{"source_owner": "SRC", "history_owner": "HIST", "table_name": "T1", **extra}]
+
+
+def _script_with_extra_tables(monkeypatch: pytest.MonkeyPatch, tmp_path, **extra):
+    engine = _HistoryDdlEngine()
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(tmp_path / "pending")),
+        engine,
+        rows=_extra_rows(**extra),
+    )
+    return rc, engine, _script_files(tmp_path / "pending")
+
+
+def test_extra_select_tables_are_granted_select_only_in_source_and_history(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ILM Rule Semantics > Extra tables — tables read by filter subqueries receive SELECT only,
+    # and history falls back to extra_select_tables when history_extra_select_tables is omitted.
+    # Given: a table whose filter reads SRC.LOOKUP (owner given) and OTHER.RATES
+    # When: ldb-run generates the script with the grants
+    rc, engine, files = _script_with_extra_tables(
+        monkeypatch, tmp_path, extra_select_tables="SRC.LOOKUP, OTHER.RATES", history_extra_select_tables=None
+    )
+
+    # Then: both environments grant SELECT on both tables and nothing else on them
+    assert rc == 0
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert "GRANT SELECT ON OTHER.RATES TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert not [grant for grant in engine.source_granted if "LOOKUP" in grant and "SELECT" not in grant]
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_HISTORY_ROLE;" in files["history_ddl"]
+    assert "GRANT SELECT ON OTHER.RATES TO LDB_HISTORY_ROLE;" in files["history_ddl"]
+    assert "GRANT DELETE ON OTHER.RATES" not in files["history_ddl"]
+
+
+def test_history_extra_select_tables_replace_the_source_list_in_history(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ILM Rule Semantics > Extra tables — history_extra_select_tables takes precedence over
+    # extra_select_tables in history, as history_addtl_filter_expr does over additional_filter_expr; an entry
+    # without owner belongs to the owner of the environment.
+    # Given: a source list and a different history list with an unqualified table
+    rc, engine, files = _script_with_extra_tables(
+        monkeypatch, tmp_path, extra_select_tables="SRC.LOOKUP", history_extra_select_tables="RATES_COPY"
+    )
+
+    # Then: source grants the source list; history grants only its own list, in the history owner
+    assert rc == 0
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert "GRANT SELECT ON HIST.RATES_COPY TO LDB_HISTORY_ROLE;" in files["history_ddl"]
+    assert "LOOKUP" not in files["history_ddl"]
+
+
+def test_extra_select_table_that_is_also_configured_keeps_all_its_privileges(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ILM Rule Semantics > Extra tables — a table already managed by ILM keeps the full
+    # privileges; the extra list never narrows them nor repeats the grant.
+    # Given: the extra list names the configured table itself
+    rc, engine, _files = _script_with_extra_tables(monkeypatch, tmp_path, extra_select_tables="SRC.T1")
+
+    # Then: SRC.T1 has its four privileges, each granted once
+    assert rc == 0
+    assert sorted(g for g in engine.source_granted if "SRC.T1" in g) == sorted(
+        f"GRANT {privilege} ON SRC.T1 TO LDB_SOURCE_ROLE" for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+    )
+
+
+@pytest.mark.parametrize("entry", ["A.B.C", "A. ", "TWO WORDS", "SRC."])
+def test_malformed_extra_select_table_is_rejected_before_any_grant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, entry: str
+):
+    # Spec: README > ILM Rule Semantics > Extra tables — entries are [OWNER.]TABLE separated by commas.
+    # Given: an entry that is not an optionally qualified table name
+    engine = _HistoryDdlEngine()
+
+    # When / Then: the run is refused with a ValueError and no grant was applied
+    with pytest.raises(ValueError, match="extra_select_tables"):
+        _run_ldb(
+            monkeypatch,
+            _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(tmp_path / "pending")),
+            engine,
+            rows=_extra_rows(extra_select_tables=entry),
+        )
+    assert engine.source_granted == [] and engine.admin_applied == []
+
+
+def test_script_run_applies_source_grants_when_source_admin_credentials_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode SCRIPT — the runtime user reads column metadata through the source
+    # grants, so SCRIPT applies them when source admin credentials exist; history grants stay in the file.
+    # Given: SCRIPT mode with source and history admin credentials
+    engine = _HistoryDdlEngine()
+    _grant_targets(monkeypatch)
     pending_dir = tmp_path / "pending"
 
     # When: ldb-run generates the script
@@ -1735,13 +2324,209 @@ def test_script_run_emits_grants_in_files_instead_of_applying_them(monkeypatch: 
         engine,
     )
 
-    # Then: nothing was granted, and each database has its own file with its grants
+    # Then: the source grants were applied and have no file; the history grants are in the history file
     assert rc == 0
-    assert granted == []
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE" in engine.source_granted
     files = _script_files(pending_dir)
+    assert "source_grants" not in files
     assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE;" in files["history_ddl"]
-    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in files["source_grants"]
-    assert "LDB_SOURCE_ROLE" not in files["history_ddl"]
+    assert engine.admin_applied == []
+
+
+def test_script_run_writes_source_grants_file_and_warns_without_source_admin_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode SCRIPT — without source admin credentials the source grants go to a
+    # file and a warning says tables not yet granted are skipped.
+    # Given: SCRIPT mode without source admin credentials
+    engine = _HistoryDdlEngine()
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    pending_dir = tmp_path / "pending"
+
+    # When: ldb-run generates the script
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", source_admin=False, ddl_pending_dir=str(pending_dir)),
+        engine,
+    )
+
+    # Then: nothing was granted, the grants are in their file and no generic warning was logged
+    assert rc == 0
+    assert engine.source_granted == []
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in _script_files(pending_dir)["source_grants"]
+    assert not any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
+
+
+def test_execute_run_without_source_admin_credentials_warns_that_ungranted_tables_are_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — every mode that applies grants needs source
+    # admin credentials; without them tables the runtime user cannot see are skipped, with a warning.
+    # Given: EXECUTE mode without source admin credentials
+    engine = _HistoryDdlEngine()
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+
+    # When: ldb-run executes
+    rc = _run_ldb(monkeypatch, _history_ddl_config(source_admin=False, ddl_pending_dir=str(tmp_path / "p")), engine)
+
+    # Then: no source grant was applied and no generic warning was logged (only real privilege gaps warn)
+    assert rc == 0
+    assert engine.source_granted == []
+    assert not any("Source admin credentials are absent" in m for m in recorder.messages.get("warning", []))
+
+
+def _full_row(table_name: str, **kwargs) -> dict:
+    """A configuration row complete enough for a table whose columns are visible to be fully processed."""
+    return {
+        **_minimal_row(table_name, **kwargs),
+        "ctl_status": None,
+        "cond_expr": "",
+        "retain_months_source": 3,
+        "retain_months_history": None,
+        "purge_date_expr": "@created",
+        "additional_filter_expr": None,
+        "history_addtl_filter_expr": None,
+        "has_lob_columns": "N",
+        "long_columns": None,
+    }
+
+
+class _VisibilityEngine(_MinimalEngine):
+    """Engine stub where only the listed tables have columns visible to the runtime user."""
+
+    def __init__(self, visible: set[str]) -> None:
+        self.visible = visible
+
+    @staticmethod
+    def generate_sql_block(config, table_cnf, process_date):
+        return "select 1 from dual"
+
+    @staticmethod
+    def get_date_condition(expr, months):
+        return f"{expr} < add_months(sysdate, -{months})"
+
+    def get_table_columns(self, conn, owner, table_name):
+        if table_name in self.visible:
+            return ["id"], {"ID": SimpleNamespace(id=1)}
+        return [], {}
+
+
+def test_table_without_visible_columns_is_skipped_with_a_warning_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > Run ILM — a table the runtime user cannot see (missing, or SELECT not granted) is
+    # skipped with a warning; it does not abort the run.
+    # Given: one visible table and one with no visible columns
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    rows = [_full_row("OK"), _full_row("INV")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"OK"}), "20261007")
+
+    # Then: the invisible table is skipped with the message and the other one is kept
+    assert tables[("A", "INV")]["skip"] is True
+    assert not tables[("A", "OK")].get("skip")
+    assert any("A.INV is not visible to the runtime user" in m for m in recorder.messages.get("warning", []))
+
+
+def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM — a child inherits its parent's conditions, so it is skipped when the
+    # parent is not visible.
+    # Given: a child whose parent has no visible columns
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    rows = [_full_row("PARENT"), _full_row("CHILD", referencing_tables="A.PARENT p")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"CHILD"}), "20261007")
+
+    # Then: both are skipped and the child names the parent
+    assert tables[("A", "PARENT")]["skip"] is True
+    assert tables[("A", "CHILD")]["skip"] is True
+    assert any("references A.PARENT" in m for m in recorder.messages.get("warning", []))
+
+
+def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW does not mark tables as processed for the day, so a
+    # later run still processes them; a real TEND is kept
+    # Given: ldb_ctl holds PTEND for one table (left by a PREVIEW) and TEND for another
+    class _StatusEngine(_VisibilityEngine):
+        def get_status(self, conn, process_date):
+            return [
+                {"ctl_owner": "A", "ctl_table_name": "PREV", "ctl_status": Status.TABLE_PREVIEW_END},
+                {"ctl_owner": "A", "ctl_table_name": "DONE", "ctl_status": Status.TABLE_END},
+            ]
+
+    rows = [_full_row("PREV"), _full_row("DONE")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    config = _script_config()
+    config.generate_script = False
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), config, _StatusEngine({"PREV", "DONE"}), "20261007")
+
+    # Then: the previewed table is pending again and the executed one stays finished
+    assert tables[("A", "PREV")]["conds"][0]["ctl_status"] is None
+    assert tables[("A", "DONE")]["conds"][0]["ctl_status"] == Status.TABLE_END
+
+
+def test_process_table_reports_the_preview_end_status_in_preview_mode(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode PREVIEW — the worker reports PTEND, not TEND, for a PREVIEW
+    # Given: a worker engine and a PREVIEW config
+    class _Engine:
+        def get_connection(self, config, admin=False, env=None):
+            return object()
+
+        def get_system_date(self, conn):
+            return datetime(2026, 10, 6)
+
+        def get_rows_processed(self, conn, owner, table_name, process_date):
+            return 5
+
+        def sql_block_run(self, conn, plsql_code, mode, run_id):
+            pass
+
+        def close_connection(self, conn):
+            pass
+
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: _Engine())
+    config = Config(
+        schema="s",
+        db_engine="oracle",
+        action="SOURCE_ILM",
+        mode="PREVIEW",
+        source_username="user",
+        source_password="pw",
+        source_dsn="dsn",
+    )
+
+    # When: process_table runs
+    result = ldb_runner.process_table(config, "OWNER", "TABLE", "begin null; end;", "20261006", "run-1")
+
+    # Then: the status is PTEND
+    assert result[2] == Status.TABLE_PREVIEW_END
+
+
+def test_preview_finished_tables_satisfy_their_children_and_are_not_launched_again():
+    # Spec: README > Run ILM > --mode PREVIEW — within a PREVIEW run a table that ended in PTEND counts as done
+    # Given: a parent finished by the PREVIEW and a child waiting for it
+    tables_config = {
+        ("A", "PARENT"): {"skip": False, "conds": [{"ctl_status": Status.TABLE_PREVIEW_END}], "referencing_tables": []},
+        ("A", "CHILD"): {"skip": False, "conds": [{"ctl_status": None}], "referencing_tables": [("A", "PARENT")]},
+    }
+
+    # When: the next ready table is queried
+    ready = ldb_runner.get_next_ready_table(tables_config, set())
+
+    # Then: the child is launched and the parent is not
+    assert ready is not None and ready[0:2] == ("A", "CHILD")
 
 
 def test_grants_that_go_with_history_ddl_are_applied_over_the_runtime_connection_without_admin(
@@ -1783,3 +2568,188 @@ def test_failed_history_ddl_file_carries_the_table_grants_that_could_not_be_appl
     content = _script_files(pending_dir)["history_ddl"]
     assert f"{grant};" in content and "-- Failed with: ORA-01031" in content
     assert statement not in content
+
+
+# ---------------------------------------------------------------------------
+# --mode PREPARE (DEC-032)
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_mode_requires_connections_like_the_modes_that_apply_ddl():
+    # Spec: README > Run ILM > --mode PREPARE — PREPARE reads and changes the databases, so it needs credentials
+    # Given / When / Then: a PREPARE config without credentials is rejected, with them it is accepted
+    with pytest.raises(ValueError):
+        ldb_params_config.Config(schema="s", mode="PREPARE")
+    assert _history_ddl_config(mode="PREPARE").execution.mode == "PREPARE"
+
+
+def test_prepare_applies_grants_and_history_ddl_without_running_ilm(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — PREPARE applies source grants, history DDL and history grants
+    # and stops before any ILM work.
+    # Given: PREPARE with source and history admin credentials and a pending history delta
+    statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
+    engine = _HistoryDdlEngine({"T1": [statement]})
+    _grant_targets(monkeypatch)
+    ilm_runs: list[bool] = []
+
+    # When: ldb-run executes
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
+        engine,
+    )
+    monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", lambda *args: ilm_runs.append(True) or 0)
+    rc_again = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
+        _HistoryDdlEngine(),
+    )
+
+    # Then: grants and DDL were applied, the ILM never ran, and a rerun with nothing to change succeeds
+    assert rc == 0 and rc_again == 0
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert statement in engine.admin_applied
+    assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE" in engine.admin_applied
+    assert ilm_runs == []
+
+
+def _run_prepare_without_source_admin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, *, missing: list[tuple[str, str, str]]
+):
+    """Run PREPARE without source admin credentials where the runtime user lacks the given privileges."""
+    engine = _HistoryDdlEngine()
+    engine.missing_privileges["LDB_SOURCE_ROLE"] = missing
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    pending_dir = tmp_path / "pending"
+    config = _history_ddl_config(mode="PREPARE", source_admin=False, ddl_pending_dir=str(pending_dir))
+    rc = _run_ldb(monkeypatch, config, engine)
+    return rc, engine, recorder, pending_dir
+
+
+def test_prepare_without_source_admin_writes_only_the_grants_that_are_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode PREPARE — without source admin credentials the source grants the runtime
+    # user lacks through its role go to a file for a DBA, and PREPARE fails until they are applied.
+    # Given: PREPARE without source admin credentials where only DELETE is missing on SRC.T1
+    # When: ldb-run executes
+    rc, engine, recorder, pending_dir = _run_prepare_without_source_admin(
+        monkeypatch, tmp_path, missing=[("SRC", "T1", "DELETE")]
+    )
+
+    # Then: the file holds that grant only, nothing was granted over a source connection and the run fails
+    source_file = _script_files(pending_dir)["source_grants"]
+    assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE;" in source_file
+    assert "GRANT SELECT" not in source_file
+    assert engine.source_granted == []
+    assert rc == 1
+    assert any("a DBA must apply them" in m for m in recorder.messages.get("warning", []))
+    assert any("SRC.T1 (DELETE)" in m for m in recorder.messages["error"])
+
+
+def test_prepare_without_source_admin_writes_no_grants_file_when_nothing_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode PREPARE — a rerun after the grants were applied leaves no file behind
+    # Given: PREPARE without source admin credentials where the runtime user has every privilege
+    # When: ldb-run executes
+    rc, _, _, pending_dir = _run_prepare_without_source_admin(monkeypatch, tmp_path, missing=[])
+
+    # Then: no source grants file was written and PREPARE succeeds
+    assert "source_grants" not in _script_files(pending_dir)
+    assert rc == 0
+
+
+def test_prepare_reports_a_role_that_is_not_enabled_for_the_runtime_user(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — a role granted but not active in the session gives no privilege
+    # Given: PREPARE where the source role is not enabled for the runtime user
+    engine = _HistoryDdlEngine()
+    engine.enabled_roles = {"LDB_HISTORY_ROLE"}
+    engine.missing_privileges["LDB_SOURCE_ROLE"] = [("SRC", "T1", "SELECT")]
+    _grant_targets(monkeypatch)
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+
+    # When: ldb-run executes
+    rc = _run_ldb(monkeypatch, _history_ddl_config(mode="PREPARE", ddl_pending_dir=str(tmp_path / "p")), engine)
+
+    # Then: the error names the role and PREPARE fails
+    assert rc == 1
+    assert any("role LDB_SOURCE_ROLE is not enabled" in m for m in recorder.messages["error"])
+    # And: it points to ldb-impl and writes no table grants, which cannot fix a role the user does not hold
+    assert any("ldb-impl" in m for m in recorder.messages["error"])
+    assert "source_grants" not in _script_files(tmp_path / "p")
+    # And: it stops there, without processing the tables
+    assert not any("not visible" in m for m in recorder.messages.get("warning", []))
+    assert any("PREPARE incomplete: run ldb-impl" in m for m in recorder.messages["error"])
+
+
+def test_prepare_verifies_the_history_grants_with_the_runtime_history_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    # Spec: README > Run ILM > --mode PREPARE — after applying the history grants PREPARE confirms the runtime
+    # user receives them, and fails when it does not.
+    # Given: PREPARE with admin credentials where the history role still gives nothing to the runtime user
+    engine = _HistoryDdlEngine()
+    engine.missing_privileges["LDB_HISTORY_ROLE"] = [("HIST", "T1", "INSERT")]
+    _grant_targets(monkeypatch)
+
+    # When: ldb-run executes
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
+        engine,
+    )
+
+    # Then: PREPARE fails because the grant is not effective
+    assert rc == 1
+
+
+def test_validate_reports_missing_privileges_without_changing_anything(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode VALIDATE — VALIDATE reads the privileges the runtime users lack through
+    # their roles: missing ones on the action's own environment fail it, the other environment only warns.
+    # Given: a source run where both roles give nothing to their runtime users
+    engine = _HistoryDdlEngine()
+    engine.missing_privileges["LDB_SOURCE_ROLE"] = [("SRC", "T1", "SELECT")]
+    engine.missing_privileges["LDB_HISTORY_ROLE"] = [("HIST", "T1", "SELECT")]
+    runtime_conns = {"SOURCE": SimpleNamespace(), "HISTORY": SimpleNamespace()}
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+
+    # When: the privileges are validated
+    ok = ldb_runner._validate_privileges(
+        _history_ddl_config(mode="VALIDATE"),
+        engine,
+        runtime_conns,
+        _make_tables_config("T1"),  # type: ignore[arg-type]
+    )
+
+    # Then: validation fails on the source gap, the history gap is a warning and nothing was granted
+    assert ok is False
+    assert any("SOURCE runtime user lacks" in m for m in recorder.messages["error"])
+    assert any("HISTORY runtime user lacks" in m for m in recorder.messages.get("warning", []))
+    assert any("--mode PREPARE" in m for m in recorder.messages["error"])
+    assert engine.source_granted == [] and engine.admin_applied == []
+
+
+def test_prepare_fails_when_the_runtime_user_cannot_see_a_configured_table(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — a table the runtime user cannot see is an error, not a warning
+    # Given: PREPARE where the table configuration has no visible columns for T1
+    engine = _HistoryDdlEngine()
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(ldb_runner, "logger", recorder)
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
+    invisible = _make_tables_config("T1")
+    invisible[("SRC", "T1")].update(skip=True, columns_metadata={})
+    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: invisible)
+
+    # When: ldb-run executes
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner.ldb_run(_history_ddl_config(mode="PREPARE", ddl_pending_dir=str(tmp_path / "p")))
+
+    # Then: it exits 1 and names the table
+    assert exc_info.value.code == 1
+    assert any("SRC.T1" in m for m in recorder.messages["error"])

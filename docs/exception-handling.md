@@ -12,6 +12,7 @@ LimitsDb translates failures at subsystem boundaries into the hierarchy in
   as `ldb-impl` right after creating or verifying it, can tell.
 - `ValidationError`: configuration or runtime state violates the domain contract.
 - `ExecutionError`: ILM, status persistence, or administrative work fails.
+- `RunnerBusyError` (an `ExecutionError`): another runner holds the lock of a table (`ORA-00054` on `LDB_RUN_LOCK`); nothing is started and the CLI exits 1. Block errors `-20005` (run ownership lost), `-20006` (PREVIEW refused over an EXECUTE status) and `-20007` (invalid `ldb_mode`) leave the control row untouched.
 
 Translated errors use exception chaining so callers can inspect `__cause__`.
 Messages identify the operation and file or table where useful, but never
