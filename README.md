@@ -371,7 +371,10 @@ the `LDB_LOG` timestamps (a table's rows are split at each `TSTART`, and tables 
 previous one's last activity, without repeating a table, belong to the same execution), and the current state of
 each table comes from `LDB_CTL`. Executions that predate the upgrade are therefore reported too.
 
-These details need a user that can read the `gv$` views. `STATUS` first probes them with the runtime user. If
+Session statistics are an optional capability of the database engine: an engine that does not offer them (the
+`DatabaseEngine` defaults) still gets states, rows and times from the control tables, with no grants or scripts.
+
+These Oracle details need a user that can read the `gv$` views. `STATUS` first probes them with the runtime user. If
 some are unreadable and admin credentials for that environment are configured, the session details are read
 over the admin connection instead (the control tables are still read with the runtime user). If neither user can
 read them, `STATUS` skips whatever those views would have given (progress, current wait, wait profile), still

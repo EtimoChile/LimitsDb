@@ -13,6 +13,7 @@ from limitsdb.core.ldb_status_report import build_executions
 from limitsdb.db.ldb_engines import (
     ColumnDefinition,
     ControlEntry,
+    DatabaseEngine,
     LogEntry,
     MonitoringAccess,
     OperationProgress,
@@ -3365,3 +3366,24 @@ def test_a_successful_connection_logs_no_detail(monkeypatch, capsys, caplog):
     messages = [r.getMessage() for r in caplog.records if "connected" in r.getMessage()]
     assert "SOURCE runtime: connected" in messages
     assert not any(" as " in m or "sd" in m.split(": ")[-1] for m in messages)
+
+
+def test_an_engine_without_monitoring_still_gets_states_rows_and_no_grants_script(monkeypatch, capsys, tmp_path):
+    # Spec: README > Run ILM > --mode STATUS — session statistics are optional engine capabilities; an engine that
+    # keeps the contract defaults reports states and rows, and neither asks for grants nor writes a script
+    # Given: an engine with the default (no) monitoring and a table whose runner liveness cannot be probed
+    class _PlainEngine(_MonitorEngine):
+        check_monitoring_access = staticmethod(DatabaseEngine.check_monitoring_access)
+        is_run_alive = staticmethod(DatabaseEngine.is_run_alive)
+        get_session_activity = staticmethod(DatabaseEngine.get_session_activity)
+
+    engine = _PlainEngine(records={"SOURCE": [_running()]})
+
+    # When
+    code, output = _run_status(monkeypatch, capsys, engine, ddl_pending_dir=str(tmp_path))
+
+    # Then: the report works from the heartbeat, with no monitoring message and nothing written
+    assert code == 0
+    assert "RUNNING" in output
+    assert "monitoring" not in output
+    assert list(tmp_path.iterdir()) == []

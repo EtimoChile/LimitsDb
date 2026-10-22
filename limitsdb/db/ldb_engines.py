@@ -399,11 +399,13 @@ class DatabaseEngine(ABC):
             conn: Active database connection."""
         pass
 
+    # Optional capabilities of the STATUS mode: an engine without live statistics keeps these defaults, and the
+    # report still shows states and rows from the control tables.
+
     @staticmethod
-    @abstractmethod
     def is_run_alive(conn: Any, owner: str, table_name: str, run_id: str) -> bool | None:
         """Tells whether the runner that owns a table is alive by trying its mutex without waiting.
-        The lock is released at once, so the probe never holds anything.
+        The lock is released at once, so the probe never holds anything. Optional: the default cannot tell.
         Args:
             conn: Active database connection (its own connection: it is rolled back).
             owner: Schema owner of the table.
@@ -412,30 +414,30 @@ class DatabaseEngine(ABC):
         Returns:
             True when another session holds the table's runner lock, False when nobody does, and None when
             the run has no runner lock (a generated SCRIPT) or the lock cannot be probed."""
-        pass
+        return None
 
     @staticmethod
-    @abstractmethod
     def check_monitoring_access(conn: Any, grantee: str) -> MonitoringAccess:
-        """Probes the session-monitoring views with the connection's own privileges.
+        """Probes the session-monitoring facilities with the connection's own privileges. Optional: the default
+        reports that the engine offers none, so STATUS skips them without grants or scripts.
         Args:
             conn: Active database connection.
             grantee: User or role named in the grant hints."""
-        pass
+        return MonitoringAccess(session=False, progress=False, waits=False)
 
     @staticmethod
-    @abstractmethod
     def get_session_activity(
         conn: Any, session: str, access: MonitoringAccess, min_wait_seconds: float
     ) -> SessionActivity:
         """Reads the liveness, long-operation progress, current wait and wait profile of a session.
         Only what ``access`` allows is read; the rest comes back empty (``alive`` None without session access).
+        Optional: the default reports nothing.
         Args:
             conn: Active database connection.
             session: Session registered by the run.
             access: Result of ``check_monitoring_access``.
             min_wait_seconds: A current wait shorter than this is not reported."""
-        pass
+        return SessionActivity(alive=None, current_wait=None, progress=None, waits=())
 
     @staticmethod
     @abstractmethod
