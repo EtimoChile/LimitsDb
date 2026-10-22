@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-15
-last-updated: 2026-10-15
+last-reviewed: 2026-10-21
+last-updated: 2026-10-21
 ---
 
 # Current state
@@ -182,6 +182,7 @@ but does not replace the sources defined in `AGENTS.md`.
   `ddl_failures`) instead of generate/execute twins; `PEND-021` is resolved.
 - `DEC-022`: without admin credentials, `ldb-impl` writes one bootstrap script
   per database (PL/SQL blocks tolerating only "already exists"); `PEND-017` is resolved.
+- `DEC-039`: `HISTORY_ILM` joins (with `use_added_columns: false`) read the history owner of each referenced table; `extra_select_tables` / `history_extra_select_tables` grant `SELECT` on tables read by filter subqueries.
 - `DEC-029`: `get_connection` marks ORA-01017 as `InvalidCredentialsError` without telling a missing user from a wrong
   password; `ldb-impl` names the runtime user whose existing password differs, and its bootstrap script asks
   for that password once; `PEND-020` is resolved.

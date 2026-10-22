@@ -24,6 +24,8 @@ _VALID_TABLE_KEYS: set[str] = {
     "purge_date_expr",
     "additional_filter_expr",
     "history_addtl_filter_expr",
+    "extra_select_tables",
+    "history_extra_select_tables",
     "history_hint_expr",
     "orphan_check_column",
     "referencing_tables",
@@ -52,6 +54,8 @@ class IlmRule(TypedDict):
     purge_date_expr: str | None
     additional_filter_expr: str | None
     history_addtl_filter_expr: str | None
+    extra_select_tables: str | None
+    history_extra_select_tables: str | None
     history_hint_expr: str | None
     source_orphan_purge: str
     orphan_check_column: str | None
@@ -101,6 +105,8 @@ def normalize_table_row(table: dict[str, Any], cond: dict[str, Any]) -> IlmRule:
         "purge_date_expr",
         "additional_filter_expr",
         "history_addtl_filter_expr",
+        "extra_select_tables",
+        "history_extra_select_tables",
         "history_hint_expr",
         "orphan_check_column",
         "referencing_tables",

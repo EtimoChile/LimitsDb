@@ -1,7 +1,9 @@
 import logging
 import os
+import re
 import socket
 import uuid
+from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from operator import attrgetter
 from typing import Any, Literal, TypedDict, cast
@@ -156,16 +158,84 @@ def _collect_privilege_targets(
     return sorted(tables)
 
 
+_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
+_SELECT_PRIVILEGES = ("SELECT",)
+
+# Tables that receive the same privileges: ``(privileges, tables)``
+PrivilegePlan = list[tuple[tuple[str, ...], list[tuple[str, str]]]]
+
+
+def _parse_extra_tables(
+    value: str | None, default_owner: str, engine: DatabaseEngine, field: str, key: tuple[str, str]
+) -> list[tuple[str, str]]:
+    """Parse a comma-separated ``[OWNER.]TABLE`` list; a table without owner belongs to ``default_owner``."""
+    tables: list[tuple[str, str]] = []
+    for entry in (value or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = [part.strip() for part in entry.split(".")]
+        if len(parts) > 2 or not all(parts) or " " in entry:
+            raise ValueError(f"Invalid {field} entry '{entry}' for {key}: expected [OWNER.]TABLE")
+        owner, table_name = (default_owner, parts[0]) if len(parts) == 1 else (parts[0], parts[1])
+        tables.append((engine.get_identifier_str(owner), engine.get_identifier_str(table_name)))
+    return tables
+
+
+def _collect_privilege_plan(
+    tables_conf_rows: list[IlmRule], env: Literal["SOURCE", "HISTORY"], engine: DatabaseEngine
+) -> PrivilegePlan:
+    """Return the privileges the environment's role needs: all of them on the configured tables and SELECT
+    on the extra tables read by the predicates. In history, ``history_extra_select_tables`` falls back to
+    ``extra_select_tables`` just as ``history_addtl_filter_expr`` falls back to ``additional_filter_expr``."""
+    owner_key: Literal["source_owner", "history_owner"] = "source_owner" if env == "SOURCE" else "history_owner"
+    configured = _collect_privilege_targets(tables_conf_rows, owner_key, engine)
+    extra: set[tuple[str, str]] = set()
+    for row in tables_conf_rows:
+        key = (row[owner_key], row["table_name"])
+        field = "extra_select_tables"
+        value = row.get("extra_select_tables")
+        if env == "HISTORY" and row.get("history_extra_select_tables") is not None:
+            field, value = "history_extra_select_tables", row.get("history_extra_select_tables")
+        extra.update(_parse_extra_tables(value, row[owner_key], engine, field, key))
+    plan: PrivilegePlan = []
+    if configured:
+        plan.append((_TABLE_PRIVILEGES, configured))
+    extra_only = sorted(extra - set(configured))
+    if extra_only:
+        plan.append((_SELECT_PRIVILEGES, extra_only))
+    return plan
+
+
 def _runtime_owner(config: Config, rule: IlmRule) -> str:
     """Return the schema whose rows are processed for the selected ILM action."""
     return rule["source_owner"] if config.execution.action == "SOURCE_ILM" else rule["history_owner"]
 
 
-def _runtime_join_expression(config: Config, rule: IlmRule) -> str:
-    """Render source joins, avoiding them when history predicates use stored derived columns."""
+def _to_history_owners(join_expr: str, history_owners: Mapping[tuple[str, str], str]) -> str:
+    """Point each ``<source owner>.<table>`` of the join at the history copy of the referenced table."""
+    for (source_owner, table_name), history_owner in history_owners.items():
+        if source_owner == history_owner:
+            continue
+        flags = 0 if source_owner.startswith('"') or table_name.startswith('"') else re.IGNORECASE
+        pattern = rf"(?<![\w$#.]){re.escape(source_owner)}\s*\.\s*{re.escape(table_name)}(?![\w$#])"
+        replacement = f"{history_owner}.{table_name}"
+        join_expr = re.sub(pattern, lambda _, text=replacement: text, join_expr, flags=flags)
+    return join_expr
+
+
+def _runtime_join_expression(
+    config: Config, rule: IlmRule, history_owners: Mapping[tuple[str, str], str] | None = None
+) -> str:
+    """Render the joins of the runtime environment, avoiding them when history predicates use stored derived columns.
+
+    ``join_expr`` names the referenced tables by their source owner; in ``HISTORY_ILM`` they are read from
+    their history owner (``history_owners`` maps each source table to it)."""
     join_expr = rule["join_expr"]
     if not join_expr or (config.execution.action == "HISTORY_ILM" and config.execution.use_added_columns):
         return ""
+    if config.execution.action == "HISTORY_ILM" and history_owners:
+        join_expr = _to_history_owners(join_expr, history_owners)
     join_type = "left outer" if rule["source_orphan_purge"] == "Y" else "inner"
     return join_expr.replace("@", join_type)
 
@@ -285,9 +355,10 @@ def _validate_privileges(
 
     Missing privileges on the action's own environment fail the validation; those on the other one are
     warnings, since PREPARE creates the history objects. Returns False when the validation must fail."""
+    rules = [cond for cnf in tables_config.values() for cond in cnf["conds"]]
     targets = {
-        "SOURCE": sorted(tables_config),
-        "HISTORY": sorted({(cnf["conds"][0]["history_owner"], key[1]) for key, cnf in tables_config.items()}),
+        "SOURCE": _collect_privilege_plan(rules, "SOURCE", engine),
+        "HISTORY": _collect_privilege_plan(rules, "HISTORY", engine),
     }
     primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
     ok = True
@@ -352,9 +423,6 @@ def _build_history_table_definition(
         columns=tuple(required_columns),
         primary_key=primary_key,
     )
-
-
-_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
 
 
 def _app_role(config: Config, env: Literal["SOURCE", "HISTORY"]) -> str:
@@ -424,10 +492,10 @@ def _ensure_history_tables(
         if not delta_statements:
             logger.info("History tables are up to date; no changes needed.")
             return
-        history_tables = [
-            (engine.get_identifier_str(td.owner), engine.get_identifier_str(td.name)) for td, _ in table_defs_and_cnf
-        ]
-        _apply_history_delta_without_admin(config, engine, table_defs_and_cnf, history_tables, len(delta_statements))
+        history_plan = _collect_privilege_plan(
+            [cond for _, table_cnf in table_defs_and_cnf for cond in table_cnf["conds"]], "HISTORY", engine
+        )
+        _apply_history_delta_without_admin(config, engine, table_defs_and_cnf, history_plan, len(delta_statements))
         return
 
     # Admin credentials present.
@@ -464,7 +532,7 @@ def _apply_history_delta_without_admin(
     config: Config,
     engine: DatabaseEngine,
     table_defs_and_cnf: list[tuple[Any, ProcessedTableConfig]],
-    history_tables: list[tuple[str, str]],
+    history_plan: PrivilegePlan,
     delta_size: int,
 ) -> None:
     """Run the history DDL delta and its grants with runtime credentials; failures go to a pending file, exit 1."""
@@ -476,14 +544,15 @@ def _apply_history_delta_without_admin(
             engine.ensure_table_structure(
                 runtime_conn, table_def, table_cnf, ddl_sink=ddl_sink, ddl_failures=ddl_failures
             )
-        engine.ensure_table_privileges(
-            runtime_conn,
-            _app_role(config, "HISTORY"),
-            history_tables,
-            _TABLE_PRIVILEGES,
-            ddl_sink=ddl_sink,
-            ddl_failures=ddl_failures,
-        )
+        for privileges, tables in history_plan:
+            engine.ensure_table_privileges(
+                runtime_conn,
+                _app_role(config, "HISTORY"),
+                tables,
+                privileges,
+                ddl_sink=ddl_sink,
+                ddl_failures=ddl_failures,
+            )
 
     try:
         deliver_ddl(
@@ -645,14 +714,13 @@ def _write_script_ddl_files(
     file holds the source grants, since the two databases are run by different users. The ILM
     script, which runs many times, goes to stdout and stays free of them.
     """
-    history_tables = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
+    history_plan = _collect_privilege_plan(tables_conf_rows, "HISTORY", engine)
 
     def script_history(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
         assert ddl_sink is not None
         _script_history_ddl(config, engine, source_connection, tables_config, ddl_sink)
-        engine.ensure_table_privileges(
-            None, _app_role(config, "HISTORY"), history_tables, _TABLE_PRIVILEGES, ddl_sink=ddl_sink
-        )
+        for privileges, tables in history_plan:
+            engine.ensure_table_privileges(None, _app_role(config, "HISTORY"), tables, privileges, ddl_sink=ddl_sink)
 
     deliver_ddl(
         config,
@@ -663,13 +731,12 @@ def _write_script_ddl_files(
         description="history table DDL and grants generated by ldb-run --mode SCRIPT.",
     )
     if config.execution.action == "SOURCE_ILM" and not source_grants_applied:
-        source_tables = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
+        source_plan = _collect_privilege_plan(tables_conf_rows, "SOURCE", engine)
 
         def script_source_grants(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
             assert ddl_sink is not None
-            engine.ensure_table_privileges(
-                None, _app_role(config, "SOURCE"), source_tables, _TABLE_PRIVILEGES, ddl_sink=ddl_sink
-            )
+            for privileges, tables in source_plan:
+                engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, privileges, ddl_sink=ddl_sink)
 
         deliver_ddl(
             config,
@@ -689,14 +756,14 @@ def _check_role_privileges(
     engine: DatabaseEngine,
     connection: Any,
     env: Literal["SOURCE", "HISTORY"],
-    tables: list[tuple[str, str]],
+    plan: PrivilegePlan,
     level: int,
 ) -> list[Privilege]:
     """Return the table privileges the runtime user does not receive through the environment's role.
 
     Reads only with the runtime connection, so it needs no admin credentials (DEC-033). A role that is not
     enabled for the user gives nothing; both findings are logged at ``level``."""
-    if not tables:
+    if not plan:
         return []
     role = _app_role(config, env)
     emit = logger.error if level >= logging.ERROR else logger.warning
@@ -708,7 +775,11 @@ def _check_role_privileges(
             env,
             role,
         )
-    missing = engine.get_missing_table_privileges(connection, role, tables, _TABLE_PRIVILEGES)
+    missing = [
+        privilege
+        for privileges, tables in plan
+        for privilege in engine.get_missing_table_privileges(connection, role, tables, privileges)
+    ]
     if missing and role_enabled:
         by_table: dict[tuple[str, str], list[str]] = {}
         for owner, table_name, privilege in missing:
@@ -723,14 +794,14 @@ def _check_role_privileges(
 
 
 def _verify_history_privileges(
-    config: Config, engine: DatabaseEngine, tables: list[tuple[str, str]], level: int = logging.ERROR
+    config: Config, engine: DatabaseEngine, plan: PrivilegePlan, level: int = logging.ERROR
 ) -> list[Privilege]:
     """Check the history grants over the runtime HISTORY connection, once the objects and grants should exist."""
-    if not tables or not _credentials_present(config, admin=False, env="HISTORY"):
+    if not plan or not _credentials_present(config, admin=False, env="HISTORY"):
         return []
     history_connection = engine.get_connection(config, admin=False, env="HISTORY")
     try:
-        return _check_role_privileges(config, engine, history_connection, "HISTORY", tables, level)
+        return _check_role_privileges(config, engine, history_connection, "HISTORY", plan, level)
     finally:
         engine.close_connection(history_connection)
 
@@ -1041,13 +1112,14 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
             )
             table_cnf["skip"] = True
             continue
+        history_owners: dict[tuple[str, str], str] = {}
         if inherited_references:
             for ref_table in inherited_references.split(","):
                 ref_table = ref_table.strip()
                 if "." in ref_table:
                     ref_owner, ref_table_name = ref_table.split(".")
                 else:
-                    ref_owner, ref_table_name = ldb_cnf_row["source_owner"], ref_table
+                    ref_owner, ref_table_name = cnd0["source_owner"], ref_table
                 ref_table_name, alias = ref_table_name.split(" ")
                 ref_owner = engine.get_identifier_str(ref_owner)
                 ref_table_name = engine.get_identifier_str(ref_table_name)
@@ -1064,6 +1136,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                     table_cnf["skip"] = True
                     break
                 ref_conds = tables_config[(ref_owner, ref_table_name)]["conds"]
+                history_owners[(ref_owner, ref_table_name)] = ref_conds[0]["history_owner"]
                 added_conds.extend([(alias, cond) for cond in ref_conds])
             if table_cnf.get("skip"):
                 continue
@@ -1123,7 +1196,8 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
             table_cnf["skip"] = True
             continue
         table_cnf["skip"] = False
-        # get where expression from cond_expr of all added_conds joined by " or "
+        # Conditions of the same table are alternatives (or); the table and each of its referencing tables must
+        # all be satisfied (and), so a child row is purged only when every parent allows it.
         if config.execution.action == "SOURCE_ILM" and not any(cd["cond_expr"] for _, cd in added_conds):
             raise ValueError(f"At least one condition must be specified for SOURCE_ILM on table {key}")
         predicates_by_alias: dict[str, list[str]] = {}
@@ -1214,7 +1288,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 }
             )
         _, cnf_table_name = key
-        join_expr = _runtime_join_expression(config, cnd0)
+        join_expr = _runtime_join_expression(config, cnd0, history_owners)
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
         base_from = f"from {runtime_owner.lower()}.{cnf_table_name.lower()} A"
         join_clause = f"\n   {join_expr}" if join_expr else ""
@@ -1246,34 +1320,32 @@ def ldb_run(config: Config) -> None:
             raise SystemExit(rc)
         connection = engine.get_connection(config)
         tables_conf_rows = _load_offline_rows(config)
-        source_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "source_owner", engine)
+        source_plan = _collect_privilege_plan(tables_conf_rows, "SOURCE", engine)
         # The runtime user reads column metadata through these grants, so SCRIPT applies them too when it can
         source_grants_applied = False
         if (
             config.execution.action == "SOURCE_ILM"
-            and source_tables_for_privileges
+            and source_plan
             and _credentials_present(config, admin=True, env="SOURCE")
         ):
             source_admin_priv_conn = engine.get_connection(config, admin=True, env="SOURCE")
             try:
-                engine.ensure_table_privileges(
-                    source_admin_priv_conn,
-                    config.administration.source_role_name,
-                    source_tables_for_privileges,
-                    _TABLE_PRIVILEGES,
-                )
+                for privileges, tables in source_plan:
+                    engine.ensure_table_privileges(
+                        source_admin_priv_conn, config.administration.source_role_name, tables, privileges
+                    )
             finally:
                 engine.close_connection(source_admin_priv_conn)
             source_grants_applied = True
         source_missing: list[Privilege] = []
-        if config.execution.action == "SOURCE_ILM" and source_tables_for_privileges:
+        if config.execution.action == "SOURCE_ILM" and source_plan:
             is_prepare = config.execution.mode == "PREPARE"
             source_missing = _check_role_privileges(
                 config,
                 engine,
                 connection,
                 "SOURCE",
-                source_tables_for_privileges,
+                source_plan,
                 logging.ERROR if is_prepare else logging.WARNING,
             )
             if is_prepare and source_missing and not engine.is_role_enabled(connection, _app_role(config, "SOURCE")):
@@ -1296,22 +1368,20 @@ def ldb_run(config: Config) -> None:
                 admin_connection = engine.get_connection(config, admin=True)
             # Without admin credentials the primary-key metadata is read over the runtime connection.
             _ensure_history_tables(config, engine, admin_connection or connection, tables_config)
-            history_tables_for_privileges = _collect_privilege_targets(tables_conf_rows, "history_owner", engine)
-            if history_tables_for_privileges and _credentials_present(config, admin=True, env="HISTORY"):
+            history_plan = _collect_privilege_plan(tables_conf_rows, "HISTORY", engine)
+            if history_plan and _credentials_present(config, admin=True, env="HISTORY"):
                 history_admin_priv_conn = engine.get_connection(config, admin=True, env="HISTORY")
                 try:
-                    engine.ensure_table_privileges(
-                        history_admin_priv_conn,
-                        config.administration.history_role_name,
-                        history_tables_for_privileges,
-                        _TABLE_PRIVILEGES,
-                    )
+                    for privileges, tables in history_plan:
+                        engine.ensure_table_privileges(
+                            history_admin_priv_conn, config.administration.history_role_name, tables, privileges
+                        )
                 finally:
                     engine.close_connection(history_admin_priv_conn)
             if config.execution.mode == "PREPARE":
                 rc = _prepare_result(
                     tables_config,
-                    source_missing + _verify_history_privileges(config, engine, history_tables_for_privileges),
+                    source_missing + _verify_history_privileges(config, engine, history_plan),
                 )
             else:
                 rc = ldb_exec_ilm(config, tables_config, process_date, engine, connection)

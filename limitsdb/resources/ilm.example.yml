@@ -28,6 +28,8 @@
 #         purge_date_expr: "@INVD_DATE"
 #         source_additional_filter_expr: "@INV_STATUS='A'"
 #         history_addtl_filter_expr: "@INV_STATUS='H'" # Optional history-only expression. Falls back to additional_filter_expr when omitted.  (must follow DB identifier rules)
+#         extra_select_tables: "GL.INV_STATUSES" # Optional tables read by additional_filter_expr subqueries: [OWNER.]TABLE list that receives SELECT grants only
+#         history_extra_select_tables: "INV_STATUSES" # Optional history-only list for history_addtl_filter_expr. Falls back to extra_select_tables when omitted
 #   - source_owner: GL # Child table definition. Inherit conditions from parent tables. Can have multiple parent tables
 #     history_owner: GL
 #     table_name: INV_DET
@@ -35,7 +37,7 @@
 #     hint_expr: full(A) full(B) use_hash(A, B)
 #     history_hint_expr: full(A)
 #     referencing_tables: INV_HEAD B # List of parent tables
-#     join_expr: "@ JOIN GL.INV_HEAD B ON B.INV_ID=A.INV_ID" # Join expression to link to parent table (must follow DB identifier rules)
+#     join_expr: "@ JOIN GL.INV_HEAD B ON B.INV_ID=A.INV_ID" # Join expression to link to parent table (must follow DB identifier rules). With use_added_columns: false, HISTORY_ILM joins the history copy: GL.INV_HEAD becomes <history_owner>.INV_HEAD
 #     source_orphan_purge: true # Archive source rows whose referenced parent is absent; requires use_added_columns: true
 #     orphan_check_column: B.INV_ID # Parent column checked with IS NULL after the left outer join
 #     # conds:
@@ -63,7 +65,7 @@
 #     hint_expr: full(A) full(B) full(C) full(D) use_hash(A, B, C, D)
 #     history_hint_expr: full(A)
 #     referencing_tables: GL.DSP_HEAD B, GL.INV_DET C, GL.INV_HEAD D
-#     join_expr: "@ JOIN GL.DSP_HEAD B ON B.DSP_ID=A.DSP_ID @ JOIN GL.INV_DET C ON C.IND_ID = A.IND_ID @ JOIN GL.INV_HEAD ON D.INV_ID= C.INV_ID"
+#     join_expr: "@ JOIN GL.DSP_HEAD B ON B.DSP_ID=A.DSP_ID @ JOIN GL.INV_DET C ON C.IND_ID = A.IND_ID @ JOIN GL.INV_HEAD D ON D.INV_ID= C.INV_ID"
 #     source_orphan_purge: true
 #     orphan_check_column: B.DSP_ID, C.IND_ID, D.INV_ID # Any NULL check marks the source row as orphaned
 #     has_lob_columns: true

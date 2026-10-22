@@ -773,6 +773,136 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest
     assert "SOURCE.PARENT" not in history_query
 
 
+class _JoinEngine:
+    """Engine double for process_tables_cnf: two tables whose queries are returned as the SQL block."""
+
+    get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+    get_date_condition = staticmethod(OracleEngine.get_date_condition)
+    get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
+    rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
+    get_fallback_expression = staticmethod(OracleEngine.get_fallback_expression)
+
+    @staticmethod
+    def get_ldb_columns_expressions():
+        return "l_process_date", "sysdate"
+
+    @staticmethod
+    def get_table_columns(connection, owner, table_name):
+        names = ["ID", "PARENT_ID", "CREATED_AT"]
+        return names, {
+            name: ColumnDefinition(name=name, data_type="varchar2", id=index, length=20)
+            for index, name in enumerate(names, start=1)
+        }
+
+    @staticmethod
+    def generate_sql_block(config, table_cnf, process_date):
+        return table_cnf["query_expr"]
+
+
+def _join_rules(join_expr: str) -> list[dict]:
+    common = {
+        "source_owner": "GL",
+        "history_owner": "GLH",
+        "retain_months_source": 2,
+        "retain_months_history": 3,
+        "exec_day": None,
+        "frecuency": "D",
+        "is_active": "Y",
+        "purge_date_expr": "@CREATED_AT",
+        "additional_filter_expr": None,
+        "history_addtl_filter_expr": None,
+        "extra_select_tables": None,
+        "history_extra_select_tables": None,
+        "history_hint_expr": None,
+        "source_orphan_purge": "N",
+        "orphan_check_column": None,
+        "has_lob_columns": "N",
+        "referencing_tables": None,
+        "join_expr": None,
+        "hint_expr": None,
+        "long_columns": None,
+        "ctl_status": None,
+    }
+    return [
+        {**common, "id": 1, "table_name": "PARENT"},
+        {
+            **common,
+            "id": 2,
+            "table_name": "CHILD",
+            "referencing_tables": "GL.PARENT B",
+            "join_expr": join_expr,
+        },
+    ]
+
+
+def _join_query(monkeypatch: pytest.MonkeyPatch, action: str, join_expr: str, **config_kwargs) -> str:
+    """Return the query of the CHILD table as planned for the action."""
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: _join_rules(join_expr))
+    config = Config(
+        schema="s",
+        action=action,
+        mode="SCRIPT",
+        source_dsn="dsn",
+        source_username="user",
+        source_password="password",
+        history_dsn="dsn",
+        history_username="user",
+        history_password="password",
+        **config_kwargs,
+    )
+    tables = ldb_runner.process_tables_cnf(object(), config, _JoinEngine(), "20261007")
+    return tables[("GL", "CHILD")]["query_expr"]
+
+
+def test_history_join_reads_the_history_copy_of_the_referenced_table(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > Referencing tables — join_expr names the referenced table by its source
+    # owner; a HISTORY_ILM run without derived columns joins the history copy, which lives in its history_owner.
+    # Given: a child joined to GL.PARENT whose history copy is GLH.PARENT, history run without added columns
+    # When: the history query is planned
+    query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID", use_added_columns=False)
+
+    # Then: the join reads GLH.PARENT, and the source owner does not appear
+    assert "inner JOIN GLH.PARENT B" in query
+    assert "GL.PARENT" not in query.replace("GLH.PARENT", "")
+
+
+def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_referenced_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Spec: README > ILM Rule Semantics > Referencing tables — only the referenced table moves to its history
+    # owner; other text of the join (columns, aliases, longer names) must remain as written.
+    # Given: lower-case and spaced owner qualification, and a longer name sharing the table's prefix
+    join_expr = "@ JOIN gl . parent B ON B.ID=A.PARENT_ID AND A.X=GL.PARENT_X.Y"
+
+    # When: the history query is planned without added columns
+    query = _join_query(monkeypatch, "HISTORY_ILM", join_expr, use_added_columns=False)
+
+    # Then: the referenced table is rewritten and the longer name is untouched
+    assert "JOIN GLH.PARENT B" in query
+    assert "GL.PARENT_X.Y" in query
+
+
+def test_source_join_keeps_the_source_owner(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > Referencing tables — SOURCE_ILM reads the referenced tables from source.
+    # Given: the same child and join as the history case
+    # When: the source query is planned
+    query = _join_query(monkeypatch, "SOURCE_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
+
+    # Then: the join is not redirected to the history owner
+    assert "inner JOIN GL.PARENT B" in query
+    assert "JOIN GLH" not in query
+
+
+def test_history_join_with_added_columns_has_no_join(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > Historical predicate snapshot — with use_added_columns the history
+    # run uses the stored values and does not join.
+    # Given / When: a history run with the default added columns
+    query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
+
+    # Then: the query has no join
+    assert "JOIN" not in query.upper()
+
+
 # ---------------------------------------------------------------------------
 # generate_script_output — public interface
 # ---------------------------------------------------------------------------
@@ -1704,11 +1834,13 @@ class _RecordingLogger:
         return record
 
 
-def _run_ldb(monkeypatch: pytest.MonkeyPatch, config: Config, engine: _HistoryDdlEngine, *tables: str) -> int:
+def _run_ldb(
+    monkeypatch: pytest.MonkeyPatch, config: Config, engine: _HistoryDdlEngine, *tables: str, rows: list | None = None
+) -> int:
     """Run ldb_run with the engine double and one history table per name (T1 by default); return the exit code."""
     tables_config = _make_tables_config(*(tables or ("T1",)))
     monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: rows or [])
     monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: tables_config)
     monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", lambda *args: 0)
     with pytest.raises(SystemExit) as exc_info:
@@ -2090,6 +2222,89 @@ def _grant_targets(monkeypatch: pytest.MonkeyPatch) -> None:
         "_collect_privilege_targets",
         lambda rows, key, engine: [("SRC" if key == "source_owner" else "HIST", "T1")],
     )
+
+
+def _extra_rows(**extra) -> list[dict]:
+    """One configured table SRC.T1 / HIST.T1 whose predicates read other tables."""
+    return [{"source_owner": "SRC", "history_owner": "HIST", "table_name": "T1", **extra}]
+
+
+def _script_with_extra_tables(monkeypatch: pytest.MonkeyPatch, tmp_path, **extra):
+    engine = _HistoryDdlEngine()
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(tmp_path / "pending")),
+        engine,
+        rows=_extra_rows(**extra),
+    )
+    return rc, engine, _script_files(tmp_path / "pending")
+
+
+def test_extra_select_tables_are_granted_select_only_in_source_and_history(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ILM Rule Semantics > Extra tables — tables read by filter subqueries receive SELECT only,
+    # and history falls back to extra_select_tables when history_extra_select_tables is omitted.
+    # Given: a table whose filter reads SRC.LOOKUP (owner given) and OTHER.RATES
+    # When: ldb-run generates the script with the grants
+    rc, engine, files = _script_with_extra_tables(
+        monkeypatch, tmp_path, extra_select_tables="SRC.LOOKUP, OTHER.RATES", history_extra_select_tables=None
+    )
+
+    # Then: both environments grant SELECT on both tables and nothing else on them
+    assert rc == 0
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert "GRANT SELECT ON OTHER.RATES TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert not [grant for grant in engine.source_granted if "LOOKUP" in grant and "SELECT" not in grant]
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_HISTORY_ROLE;" in files["history_ddl"]
+    assert "GRANT SELECT ON OTHER.RATES TO LDB_HISTORY_ROLE;" in files["history_ddl"]
+    assert "GRANT DELETE ON OTHER.RATES" not in files["history_ddl"]
+
+
+def test_history_extra_select_tables_replace_the_source_list_in_history(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ILM Rule Semantics > Extra tables — history_extra_select_tables takes precedence over
+    # extra_select_tables in history, as history_addtl_filter_expr does over additional_filter_expr; an entry
+    # without owner belongs to the owner of the environment.
+    # Given: a source list and a different history list with an unqualified table
+    rc, engine, files = _script_with_extra_tables(
+        monkeypatch, tmp_path, extra_select_tables="SRC.LOOKUP", history_extra_select_tables="RATES_COPY"
+    )
+
+    # Then: source grants the source list; history grants only its own list, in the history owner
+    assert rc == 0
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_SOURCE_ROLE" in engine.source_granted
+    assert "GRANT SELECT ON HIST.RATES_COPY TO LDB_HISTORY_ROLE;" in files["history_ddl"]
+    assert "LOOKUP" not in files["history_ddl"]
+
+
+def test_extra_select_table_that_is_also_configured_keeps_all_its_privileges(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > ILM Rule Semantics > Extra tables — a table already managed by ILM keeps the full
+    # privileges; the extra list never narrows them nor repeats the grant.
+    # Given: the extra list names the configured table itself
+    rc, engine, _files = _script_with_extra_tables(monkeypatch, tmp_path, extra_select_tables="SRC.T1")
+
+    # Then: SRC.T1 has its four privileges, each granted once
+    assert rc == 0
+    assert sorted(g for g in engine.source_granted if "SRC.T1" in g) == sorted(
+        f"GRANT {privilege} ON SRC.T1 TO LDB_SOURCE_ROLE" for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+    )
+
+
+@pytest.mark.parametrize("entry", ["A.B.C", "A. ", "TWO WORDS", "SRC."])
+def test_malformed_extra_select_table_is_rejected_before_any_grant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, entry: str
+):
+    # Spec: README > ILM Rule Semantics > Extra tables — entries are [OWNER.]TABLE separated by commas.
+    # Given: an entry that is not an optionally qualified table name
+    engine = _HistoryDdlEngine()
+
+    # When / Then: the run is refused with a ValueError and no grant was applied
+    with pytest.raises(ValueError, match="extra_select_tables"):
+        _run_ldb(
+            monkeypatch,
+            _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(tmp_path / "pending")),
+            engine,
+            rows=_extra_rows(extra_select_tables=entry),
+        )
+    assert engine.source_granted == [] and engine.admin_applied == []
 
 
 def test_script_run_applies_source_grants_when_source_admin_credentials_exist(
