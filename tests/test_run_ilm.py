@@ -1,5 +1,6 @@
+import logging
 from concurrent.futures import Future
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,18 @@ from limitsdb.core import ldb_ddl, ldb_params_config, ldb_runner, ldb_utils
 from limitsdb.core.ldb_errors import ConfigurationError, ExecutionError, RunnerBusyError
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.core.ldb_status import Status
-from limitsdb.db.ldb_engines import ColumnDefinition
+from limitsdb.core.ldb_status_report import build_executions
+from limitsdb.db.ldb_engines import (
+    ColumnDefinition,
+    ControlEntry,
+    DatabaseEngine,
+    LogEntry,
+    MonitoringAccess,
+    OperationProgress,
+    SessionActivity,
+    TableRunRecord,
+    WaitItem,
+)
 from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
 
 # ---------------------------------------------------------------------------
@@ -357,6 +369,10 @@ def test_validate_mode_opens_and_closes_all_four_connections(monkeypatch: pytest
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             conn = SimpleNamespace(admin=admin, env=env)
             opened.append(conn)
@@ -388,6 +404,10 @@ def test_validate_mode_returns_error_when_required_connection_fails(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             if admin and env is None:
                 raise RuntimeError("source admin unavailable")
@@ -417,6 +437,10 @@ def test_validate_mode_skips_optional_credentials_not_provided(monkeypatch: pyte
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             conn = SimpleNamespace(admin=admin, env=env)
             opened.append(conn)
@@ -460,6 +484,10 @@ def test_validate_mode_returns_error_when_system_date_check_fails(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             return SimpleNamespace(admin=admin, env=env)
 
@@ -488,6 +516,10 @@ def test_validate_mode_returns_error_when_config_processing_raises(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             return SimpleNamespace(admin=admin, env=env)
 
@@ -521,6 +553,10 @@ def test_validate_mode_for_history_ilm_opens_history_then_source_connections(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             conn = SimpleNamespace(admin=admin, env=env)
             opened.append(conn)
@@ -573,6 +609,8 @@ class _MinimalEngine:
     @staticmethod
     def get_identifier_str(value):
         return str(value).upper()
+
+    format_identifier = staticmethod(OracleEngine.format_identifier)
 
     @staticmethod
     def get_status(connection, process_date):
@@ -698,6 +736,7 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest
 
     class DummyEngine:
         get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+        format_identifier = staticmethod(OracleEngine.format_identifier)
         get_date_condition = staticmethod(OracleEngine.get_date_condition)
         get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
         rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
@@ -777,9 +816,11 @@ class _JoinEngine:
     """Engine double for process_tables_cnf: two tables whose queries are returned as the SQL block."""
 
     get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+    format_identifier = staticmethod(OracleEngine.format_identifier)
     get_date_condition = staticmethod(OracleEngine.get_date_condition)
     get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
     rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
+    rewrite_table_owners = staticmethod(OracleEngine.rewrite_table_owners)
     get_fallback_expression = staticmethod(OracleEngine.get_fallback_expression)
 
     @staticmethod
@@ -862,8 +903,8 @@ def test_history_join_reads_the_history_copy_of_the_referenced_table(monkeypatch
     query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID", use_added_columns=False)
 
     # Then: the join reads GLH.PARENT, and the source owner does not appear
-    assert "inner JOIN GLH.PARENT B" in query
-    assert "GL.PARENT" not in query.replace("GLH.PARENT", "")
+    assert "inner JOIN glh.PARENT B" in query
+    assert "GL.PARENT" not in query.replace("glh.PARENT", "")
 
 
 def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_referenced_table(
@@ -877,9 +918,148 @@ def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_re
     # When: the history query is planned without added columns
     query = _join_query(monkeypatch, "HISTORY_ILM", join_expr, use_added_columns=False)
 
-    # Then: the referenced table is rewritten and the longer name is untouched
-    assert "JOIN GLH.PARENT B" in query
+    # Then: the referenced table is rewritten (its token as written) and the longer name is untouched
+    assert "JOIN glh.parent B" in query
     assert "GL.PARENT_X.Y" in query
+
+
+def test_config_identifiers_are_the_exact_dictionary_names(monkeypatch: pytest.MonkeyPatch):
+    # Spec: ilm.example.yml > Identifier rules — single-identifier parameters hold the name exactly as the data
+    # dictionary has it; only the SQL text of expressions follows the engine's SQL identifier rules
+    # Given: objects whose dictionary names are mixed case, written in the config exactly like that, and a join
+    # written as SQL needs it (quoted)
+    rules = _join_rules('@ JOIN "Gl"."Parent" B ON B.ID=A.PARENT_ID')
+    for rule, table in zip(rules, ("Parent", "Child"), strict=True):
+        rule.update(source_owner="Gl", history_owner="Glh", table_name=table)
+    rules[1]["referencing_tables"] = "Gl.Parent B"
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rules)
+    config = Config(
+        schema="s",
+        action="HISTORY_ILM",
+        mode="SCRIPT",
+        use_added_columns=False,
+        source_dsn="dsn",
+        source_username="user",
+        source_password="password",
+        history_dsn="dsn",
+        history_username="user",
+        history_password="password",
+    )
+
+    # When: the configuration is processed
+    tables = ldb_runner.process_tables_cnf(object(), config, _JoinEngine(), "20261007")
+
+    # Then: the tables are keyed by the names as written, and the
+    # history join renders the history owner like any generated SQL identifier
+    assert ("Gl", "Child") in tables
+    assert 'JOIN "Glh"."Parent" B' in tables[("Gl", "Child")]["query_expr"]
+    # and the FROM clause (the runtime owner, here history) follows the same rules instead of being lower-cased
+    assert tables[("Gl", "Child")]["query_expr"].startswith('from "Glh"."Child" A')
+
+
+@pytest.mark.parametrize("env, owner_key", [("SOURCE", "source_owner"), ("HISTORY", "history_owner")])
+def test_privilege_targets_are_the_exact_dictionary_names(env: str, owner_key: str):
+    # Spec: ilm.example.yml > Identifier rules — single-identifier parameters hold the exact dictionary name
+    # Given: a rule whose owner and table have mixed-case dictionary names
+    rule = {"source_owner": "Gl", "history_owner": "Glh", "table_name": "Parent"}
+
+    # When: the privileges of the environment are planned
+    plan = ldb_runner._collect_privilege_plan([rule], env, OracleEngine)  # type: ignore[arg-type]
+
+    # Then: the grant target is the name as written, not upper-cased
+    expected_owner = rule[owner_key]
+    assert plan[0][1] == [(expected_owner, "Parent")]
+
+
+def test_extra_select_tables_are_the_exact_dictionary_names():
+    # Spec: ilm.example.yml > Identifier rules — list entries are exact dictionary names; a table without owner
+    # belongs to the rule's owner
+    # Given: a rule with extra tables, one without owner, in mixed case
+    rule = {
+        "source_owner": "Gl",
+        "history_owner": "Glh",
+        "table_name": "Parent",
+        "extra_select_tables": "Dim, Ref.Codes",
+    }
+
+    # When: the SOURCE privileges are planned
+    plan = ldb_runner._collect_privilege_plan([rule], "SOURCE", OracleEngine)  # type: ignore[arg-type]
+
+    # Then: the extra tables keep their case and the default owner is the configured one
+    assert plan[1] == (("SELECT",), [("Gl", "Dim"), ("Ref", "Codes")])
+
+
+def test_history_extra_select_tables_are_the_exact_dictionary_names():
+    # Spec: ilm.example.yml > Identifier rules — history_extra_select_tables overrides extra_select_tables in HISTORY
+    # Given: a rule whose history list is mixed case
+    rule = {
+        "source_owner": "Gl",
+        "history_owner": "Glh",
+        "table_name": "Parent",
+        "extra_select_tables": "Dim",
+        "history_extra_select_tables": "Dim_H",
+    }
+
+    # When: the HISTORY privileges are planned
+    plan = ldb_runner._collect_privilege_plan([rule], "HISTORY", OracleEngine)  # type: ignore[arg-type]
+
+    # Then: the history list is used, with the case as written and the history owner as default
+    assert plan[1] == (("SELECT",), [("Glh", "Dim_H")])
+
+
+def test_extra_select_tables_cannot_hold_quoted_names_with_separators():
+    # Spec: ilm.example.yml > Identifier rules (lists) — entries are split on commas and dots before any quote
+    # is considered
+    # Given: an entry whose quoted table name contains a dot
+    rule = {"source_owner": "GL", "table_name": "PARENT", "extra_select_tables": 'GL."A.B"'}
+
+    # When / Then: the list is rejected as malformed
+    with pytest.raises(ValueError, match="expected"):
+        ldb_runner._collect_privilege_plan([rule], "SOURCE", OracleEngine)  # type: ignore[arg-type,list-item]
+
+
+@pytest.mark.parametrize("referencing", ["Gl.Missing B", "Gl.Parent"])
+def test_referencing_tables_must_name_configured_tables_with_a_alias(referencing: str):
+    # Spec: README > ILM Rule Semantics > Referencing tables — each entry is [OWNER.]TABLE ALIAS of a configured
+    # table
+    # Given: a child pointing to an unconfigured table, or with no alias
+    rows = [
+        {"source_owner": "Gl", "table_name": "Parent", "referencing_tables": ""},
+        {"source_owner": "Gl", "table_name": "Child", "referencing_tables": referencing},
+    ]
+
+    # When / Then: the dependency graph is refused
+    with pytest.raises(ValueError):
+        ldb_runner._build_dependency_graph(rows)  # type: ignore[arg-type]
+
+
+def test_dependency_graph_matches_referenced_tables_case_sensitively():
+    # Spec: ilm.example.yml > Identifier rules — names are exact, so Gl.Parent and GL.PARENT are different tables
+    # Given: a child that references the table with another case than the configured one
+    rows = [
+        {"source_owner": "Gl", "table_name": "Parent", "referencing_tables": ""},
+        {"source_owner": "Gl", "table_name": "Child", "referencing_tables": "GL.PARENT P"},
+    ]
+
+    # When / Then: the reference is not found
+    with pytest.raises(ValueError, match="not present"):
+        ldb_runner._build_dependency_graph(rows)  # type: ignore[arg-type]
+
+
+def test_dependency_graph_orders_mixed_case_tables():
+    # Spec: README > Run ILM > --mode PLAN — referencing (child) tables are planned before the tables they
+    # reference
+    # Given: mixed-case names written identically in the table and in its reference
+    rows = [
+        {"source_owner": "Gl", "table_name": "Parent", "referencing_tables": ""},
+        {"source_owner": "Gl", "table_name": "Child", "referencing_tables": "Gl.Parent P"},
+    ]
+
+    # When: the layers are computed
+    layers = ldb_runner._compute_plan_layers(ldb_runner._build_dependency_graph(rows))  # type: ignore[arg-type]
+
+    # Then: the child layer comes first
+    assert layers == [[("Gl", "Child")], [("Gl", "Parent")]]
 
 
 def test_source_join_keeps_the_source_owner(monkeypatch: pytest.MonkeyPatch):
@@ -1210,9 +1390,11 @@ def test_runner_locks_every_active_table_before_launching_and_releases_after():
     assert engine.events[-2:] == [("release", "lock-connection"), ("close", "lock-connection")]
 
 
-def test_runner_that_finds_another_runner_starts_nothing_and_still_releases(monkeypatch: pytest.MonkeyPatch):
+def test_runner_that_finds_another_runner_starts_nothing_and_still_releases(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
     # Spec: docs/concurrency-control.md > Layer 1 — a table held by another live runner stops this one before
-    # any worker is launched (RunnerBusyError, exit 1 through the CLI)
+    # any worker is launched (logged once, rc 1, no traceback)
     # Given: an engine whose lock acquisition finds the table busy
     class _BusyEngine(_StatusEngine):
         def acquire_run_locks(self, *args):
@@ -1224,10 +1406,30 @@ def test_runner_that_finds_another_runner_starts_nothing_and_still_releases(monk
     monkeypatch.setattr(ldb_runner, "process_table", lambda *args: launched.append(args))
 
     # When/Then: the run is refused, nothing is launched and the lock connection is closed
-    with pytest.raises(RunnerBusyError):
-        ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
+    runner_logger = logging.getLogger(ldb_runner.logger.name)
+    runner_logger.addHandler(caplog.handler)
+    try:
+        result = ldb_runner.ldb_exec_ilm(
+            _execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object()
+        )
+    finally:
+        runner_logger.removeHandler(caplog.handler)
+    assert result == 1
     assert launched == []
+    assert "Another runner is processing A.T1" in caplog.text
+    assert "Runner id" not in caplog.text  # a refused runner never had a run to identify
     assert engine.events[-1] == ("close", "lock-connection")
+
+
+def _tick_clock(monkeypatch: pytest.MonkeyPatch, step: float) -> None:
+    """Make ``time.monotonic`` in the runner advance ``step`` seconds per reading."""
+    state = {"now": 0.0}
+
+    def monotonic() -> float:
+        state["now"] += step
+        return state["now"]
+
+    monkeypatch.setattr(ldb_runner.time, "monotonic", monotonic)
 
 
 def test_lock_connection_is_pinged_while_no_worker_finishes(monkeypatch: pytest.MonkeyPatch):
@@ -1235,6 +1437,7 @@ def test_lock_connection_is_pinged_while_no_worker_finishes(monkeypatch: pytest.
     # cut session while the workers run
     # Given: a worker that is not finished on the first wait, and finished on the second
     engine = _StatusEngine()
+    _tick_clock(monkeypatch, ldb_runner._LOCK_PING_SECONDS)
     real_wait = ldb_runner.wait
     waits = []
 
@@ -1255,9 +1458,62 @@ def test_lock_connection_is_pinged_while_no_worker_finishes(monkeypatch: pytest.
     # When: ILM execution runs
     result = ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
 
-    # Then: the idle wait pinged the lock connection once and the run completed
+    # Then: the idle wait pinged the lock connection and the run completed
     assert result == 0
-    assert engine.events.count(("ping", "lock-connection")) == 1
+    assert engine.events.count(("ping", "lock-connection")) >= 1
+
+
+def test_lock_connection_is_pinged_on_schedule_even_when_workers_keep_finishing(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — the lock session is checked every ping interval of elapsed
+    # time, not only when a wait times out
+    # Given: two tables that finish one after the other, each wait returning at once, and a clock that moves a
+    # full interval per reading
+    engine = _StatusEngine()
+    _tick_clock(monkeypatch, ldb_runner._LOCK_PING_SECONDS)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+    tables = {("A", "T1"): _table_config(), ("A", "T2"): _table_config()}
+
+    # When: ILM execution runs
+    result = ldb_runner.ldb_exec_ilm(_execution_config(), tables, "20261006", engine, object())
+
+    # Then: the lock connection was pinged although no wait ever timed out
+    assert result == 0
+    assert engine.events.count(("ping", "lock-connection")) >= 1
+
+
+def test_wait_never_lasts_past_the_next_lock_ping(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — the ping also keeps the lock session alive, so it happens at
+    # least every ping interval
+    # Given: a clock that advances 10 s per reading and workers that never finish on their own
+    _tick_clock(monkeypatch, 10.0)
+    timeouts: list[float] = []
+    real_wait = ldb_runner.wait
+
+    def record(futures, timeout, return_when):
+        timeouts.append(timeout)
+        if len(timeouts) < 4:
+            return set(), set(futures)
+        return real_wait(futures, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(ldb_runner, "wait", record)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+
+    # When: ILM execution runs
+    ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", _StatusEngine(), object())
+
+    # Then: no wait is longer than what is left of the interval, and it shrinks as the interval is used up
+    assert all(0 <= timeout <= ldb_runner._LOCK_PING_SECONDS for timeout in timeouts)
+    assert timeouts[0] > timeouts[1]
 
 
 def test_lost_lock_connection_aborts_the_run(monkeypatch: pytest.MonkeyPatch):
@@ -1268,6 +1524,7 @@ def test_lost_lock_connection_aborts_the_run(monkeypatch: pytest.MonkeyPatch):
         def check_run_locks(self, lock_conn):
             raise ExecutionError("The runner lock connection was lost")
 
+    _tick_clock(monkeypatch, ldb_runner._LOCK_PING_SECONDS)
     monkeypatch.setattr(ldb_runner, "wait", lambda futures, timeout, return_when: (set(), set(futures)))
     monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
     monkeypatch.setattr(
@@ -1297,6 +1554,10 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
     calls = {"ran": False, "closed": False}
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -1343,6 +1604,10 @@ def test_process_table_returns_error_status_and_closes_connection_on_failure(
     calls = {"saved": False, "closed": False}
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -1396,6 +1661,10 @@ def test_process_table_leaves_the_control_row_alone_when_another_run_owns_the_ta
             super().__init__(type("E", (), {"code": 20002, "message": "in process"})())
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -1442,6 +1711,10 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
     call_count = [0]
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -2259,6 +2532,51 @@ def test_extra_select_tables_are_granted_select_only_in_source_and_history(monke
     assert "GRANT DELETE ON OTHER.RATES" not in files["history_ddl"]
 
 
+@pytest.mark.parametrize("alter_grant", [False, True])
+def test_alter_on_history_tables_is_granted_only_when_history_alter_grant_is_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, alter_grant: bool
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — history_alter_grant (default false) adds ALTER on
+    # the history tables to the history role, never on the source tables.
+    # Given: a SCRIPT run with or without history_alter_grant
+    engine = _HistoryDdlEngine()
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(
+            mode="SCRIPT",
+            history_admin=True,
+            ddl_pending_dir=str(tmp_path / "pending"),
+            history_alter_grant=alter_grant,
+        ),
+        engine,
+        rows=_extra_rows(),
+    )
+
+    # Then: ALTER is in the history grants only when requested, and never in the source grants
+    files = _script_files(tmp_path / "pending")
+    assert rc == 0
+    assert ("GRANT ALTER ON HIST.T1 TO LDB_HISTORY_ROLE;" in files["history_ddl"]) is alter_grant
+    assert not [grant for grant in engine.source_granted if "ALTER" in grant]
+
+
+def test_tables_owned_by_the_runtime_user_get_no_grants():
+    # Spec: README > Run ILM > --mode PREPARE — an owner holds every privilege on its own tables and a grant to
+    # oneself is not recorded, so tables owned by the runtime user are left out of the grants and their checks.
+    # Given: HIST.T1 and SRC.T1 configured, SRC.LOOKUP as extra table
+    rows = _extra_rows(extra_select_tables="SRC.LOOKUP")
+    engine = _HistoryDdlEngine()
+
+    # When: the plans are built for a user that owns HIST, for a stranger, and for the owner of SRC
+    owner_of_history = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "hist")
+    stranger = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "other")
+    owner_of_source = ldb_runner._collect_privilege_plan(rows, "SOURCE", engine, True, "src")
+
+    # Then: the owner keeps only what belongs to others; the stranger gets everything (ALTER only in history)
+    assert owner_of_history == [(("SELECT",), [("SRC", "LOOKUP")])]
+    assert stranger == [(("SELECT", "INSERT", "DELETE", "ALTER"), [("HIST", "T1")]), (("SELECT",), [("SRC", "LOOKUP")])]
+    assert owner_of_source == []
+
+
 def test_history_extra_select_tables_replace_the_source_list_in_history(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: README > ILM Rule Semantics > Extra tables — history_extra_select_tables takes precedence over
     # extra_select_tables in history, as history_addtl_filter_expr does over additional_filter_expr; an entry
@@ -2281,10 +2599,10 @@ def test_extra_select_table_that_is_also_configured_keeps_all_its_privileges(mon
     # Given: the extra list names the configured table itself
     rc, engine, _files = _script_with_extra_tables(monkeypatch, tmp_path, extra_select_tables="SRC.T1")
 
-    # Then: SRC.T1 has its four privileges, each granted once
+    # Then: SRC.T1 has its own two source privileges, each granted once
     assert rc == 0
     assert sorted(g for g in engine.source_granted if "SRC.T1" in g) == sorted(
-        f"GRANT {privilege} ON SRC.T1 TO LDB_SOURCE_ROLE" for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+        f"GRANT {privilege} ON SRC.T1 TO LDB_SOURCE_ROLE" for privilege in ("SELECT", "DELETE")
     )
 
 
@@ -2453,6 +2771,41 @@ def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: py
     assert any("references A.PARENT" in m for m in recorder.messages.get("warning", []))
 
 
+def test_child_before_its_parent_is_skipped_when_the_parent_is_not_visible(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM — a child inherits its parent's conditions, so it is skipped when the parent is not
+    # visible, whatever the order of the configuration
+    # Given: a child listed before its invisible parent
+    rows = [_full_row("CHILD", referencing_tables="A.PARENT p"), _full_row("PARENT")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"CHILD"}), "20261007")
+
+    # Then: both are skipped
+    assert tables[("A", "PARENT")]["skip"] is True
+    assert tables[("A", "CHILD")]["skip"] is True
+
+
+def test_preview_is_refused_over_a_table_already_executed_for_the_date(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW is refused over any EXECUTE status of the same date
+    # Given: a table that ldb_ctl already holds as TEND
+    ldb_runner.logger.addHandler(caplog.handler)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    table = _table_config()
+    table["conds"][0]["ctl_status"] = Status.TABLE_END
+    config = _execution_config()
+    config.mode = "PREVIEW"
+
+    # When: the PREVIEW runs
+    result = ldb_runner.ldb_exec_ilm(config, {("A", "T1"): table}, "20261006", _StatusEngine(), object())
+
+    # Then: it fails and says why
+    assert result == 1
+    assert "PREVIEW is refused" in caplog.text
+
+
 def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: pytest.MonkeyPatch):
     # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW does not mark tables as processed for the day, so a
     # later run still processes them; a real TEND is kept
@@ -2554,9 +2907,9 @@ def test_failed_history_ddl_file_carries_the_table_grants_that_could_not_be_appl
 ):
     # Spec: README > Run ILM > Admin credentials in ldb-run — a grant the runtime user cannot apply
     # is written, like any failed DDL, to the pending file for a DBA.
-    # Given: no history admin credentials; the DDL works but the grant on UPDATE is rejected
+    # Given: no history admin credentials; the DDL works but the grant on INSERT is rejected
     statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
-    grant = "GRANT UPDATE ON HIST.T1 TO LDB_HISTORY_ROLE"
+    grant = "GRANT INSERT ON HIST.T1 TO LDB_HISTORY_ROLE"
     engine = _HistoryDdlEngine({"T1": [statement]}, failing={grant: "ORA-01031: insufficient privileges"})
     pending_dir = tmp_path / "pending"
 
@@ -2753,3 +3106,614 @@ def test_prepare_fails_when_the_runtime_user_cannot_see_a_configured_table(monke
     # Then: it exits 1 and names the table
     assert exc_info.value.code == 1
     assert any("SRC.T1" in m for m in recorder.messages["error"])
+
+
+# ---------------------------------------------------------------------------
+# STATUS mode — README > Run ILM > --mode STATUS
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 10, 22, 12, 0, 0)
+# Each scenario run starts at its own time, hours apart, so the log is split into separate executions
+_RUN_START = {"old": datetime(2026, 10, 22, 8, 0, 0)}
+_DEFAULT_START = datetime(2026, 10, 22, 11, 0, 0)
+
+
+def _label(run_id: str) -> str:
+    """The label STATUS gives to the execution that a scenario ``run_id`` stands for: its start time."""
+    return _RUN_START.get(run_id, _DEFAULT_START).strftime("%Y%m%d-%H%M%S")
+
+
+def _record(run_id="r1", table="ITEMS", **overrides) -> TableRunRecord:
+    values = {
+        "run_id": run_id,
+        "owner": "APP",
+        "table_name": table,
+        "action": "SOURCE_ILM",
+        "process_date": datetime(2026, 10, 22),
+        "started": _RUN_START.get(run_id, _DEFAULT_START),
+        "ended": _RUN_START.get(run_id, _DEFAULT_START) + timedelta(minutes=30),
+        "last_status": Status.TABLE_END,
+        "message": None,
+        "rows": 1000,
+        "in_progress": False,
+        "skipped": False,
+        "last_activity": None,
+        "session": None,
+    }
+    values.update(overrides)
+    return TableRunRecord(**values)  # type: ignore[arg-type]
+
+
+def _entries(records: list[TableRunRecord]) -> tuple[list[LogEntry], list[ControlEntry]]:
+    """The log and control rows that the engine would hold for these scenario records."""
+    log: list[LogEntry] = []
+    control: list[ControlEntry] = []
+
+    def add(record: TableRunRecord, status: str, started, ended, rows=0, message=None):
+        log.append(
+            LogEntry(
+                len(log) + 1,
+                record.owner,
+                record.table_name,
+                record.action,
+                record.process_date or _NOW,
+                status,
+                started,
+                ended,
+                message,
+                rows,
+            )
+        )
+
+    for record in records:
+        started = record.started or _NOW
+        if record.skipped:
+            add(record, Status.ERROR, started, record.ended, message="Table is already processed for date 1")
+            continue
+        add(record, Status.TABLE_START, started, None)
+        add(record, Status.CHUNK_END, started, None if record.in_progress else record.ended, rows=record.rows)
+        if record.last_status not in (Status.CHUNK_END, Status.TABLE_START):
+            add(record, record.last_status, started, record.ended, message=record.message)
+        if record.in_progress:
+            control.append(
+                ControlEntry(
+                    record.owner,
+                    record.table_name,
+                    record.last_status,
+                    record.run_id,
+                    record.action,
+                    record.process_date or _NOW,
+                    started,
+                    None,
+                    record.rows,
+                    record.last_activity,
+                    record.session,
+                )
+            )
+    return log, control
+
+
+def _running(table="ITEMS", **overrides) -> TableRunRecord:
+    values = {
+        "table": table,
+        "last_status": Status.CHUNK_END,
+        "in_progress": True,
+        "ended": None,
+        "last_activity": _NOW,
+        "session": "1.10.99",
+    }
+    values.update(overrides)
+    return _record(**values)
+
+
+_FULL_ACCESS = MonitoringAccess(session=True, progress=True, waits=True)
+
+
+class _MonitorEngine:
+    """Engine double that answers the monitoring contract of DatabaseEngine per environment."""
+
+    def __init__(
+        self, records=None, access=_FULL_ACCESS, activity=None, unreadable=(), runner_alive=None, admin_access=None
+    ):
+        self.records = records or {}
+        self.runner_alive = runner_alive
+        self.admin_access = admin_access
+        self.activity_conns: list[SimpleNamespace] = []
+        self.probed: list[tuple[str, str, str]] = []
+        self.access = access
+        self.activity = activity or SessionActivity(alive=True, current_wait=None, progress=None, waits=())
+        self.unreadable = unreadable
+        self.opened: list[SimpleNamespace] = []
+        self.closed: list[SimpleNamespace] = []
+        self.requested: list[tuple[str, int]] = []
+        self.grantees: list[str] = []
+
+    def get_connection(self, config, *, admin=False, env=None):
+        conn = SimpleNamespace(env=env, admin=admin)
+        self.opened.append(conn)
+        return conn
+
+    def get_system_date(self, conn):
+        return _NOW
+
+    def close_connection(self, conn):
+        self.closed.append(conn)
+
+    def check_monitoring_access(self, conn, grantee):
+        self.grantees.append(grantee)
+        return (self.admin_access or self.access) if conn.admin else self.access
+
+    def get_log_entries(self, conn, max_rows):
+        self.requested.append((conn.env, max_rows))
+        if conn.env in self.unreadable:
+            raise ExecutionError(f"{conn.env} log unreadable")
+        return _entries(self.records.get(conn.env, []))[0]
+
+    def get_control_entries(self, conn):
+        return _entries(self.records.get(conn.env, []))[1]
+
+    def is_run_alive(self, conn, owner, table_name, run_id):
+        self.probed.append((owner, table_name, run_id))
+        return self.runner_alive
+
+    def get_session_activity(self, conn, session, access, min_wait_seconds):
+        self.activity_conns.append(conn)
+        return self.activity
+
+
+def _run_status(monkeypatch: pytest.MonkeyPatch, capsys, engine: _MonitorEngine, **overrides) -> tuple[int, str]:
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
+    config = Config(
+        schema="s",
+        mode="STATUS",
+        source_dsn="sd",
+        source_username="su",
+        source_password="sp",
+        history_dsn="hd",
+        history_username="hu",
+        history_password="hp",
+        **overrides,
+    )
+    with pytest.raises(SystemExit) as outcome:
+        ldb_runner.ldb_run(config)
+    return outcome.value.code, capsys.readouterr().out  # type: ignore[return-value]
+
+
+def _run_line(output: str, run_id: str, section: str) -> str:
+    body = output.split(f"== {section} ==")[1].split("==")[0]
+    return next(line for line in body.splitlines() if f"run {_label(run_id)} " in line)
+
+
+def test_status_mode_needs_no_credentials_to_be_configured():
+    # Spec: README > Run ILM > --mode STATUS — read-only; an environment without credentials is reported, not refused
+    # Given/When: a STATUS config with neither environment configured
+    config = Config(schema="s", mode="STATUS")
+
+    # Then: it is accepted and --last defaults to the current execution only
+    assert config.execution.mode == "STATUS"
+    assert config.execution.last == 1
+
+
+@pytest.mark.parametrize("last", [0, -3])
+def test_status_last_below_one_is_rejected(last):
+    # Spec: README > Run ILM > --last — n is a count of executions, at least 1
+    with pytest.raises(ValueError, match="last"):
+        Config(schema="s", mode="STATUS", last=last)
+
+
+def test_status_reports_source_and_history_and_requests_the_last_n_runs(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — always informs for SOURCE and HISTORY; --last n reads n executions
+    # Given: one finished run in each environment
+    engine = _MonitorEngine(
+        records={"SOURCE": [_record("r1", table="S")], "HISTORY": [_record("old", table="H")]},
+    )
+
+    # When: STATUS runs with --last 3
+    code, output = _run_status(monkeypatch, capsys, engine, last=3)
+
+    # Then: both environments are reported from their own connection and connections are closed
+    assert code == 0
+    assert "== SOURCE ==" in output and "== HISTORY ==" in output
+    assert "APP.S " in output.split("== HISTORY ==")[0]
+    assert "APP.H " in output.split("== HISTORY ==")[1]
+    assert {env for env, _ in engine.requested} == {"SOURCE", "HISTORY"}
+    assert engine.closed == engine.opened
+    assert all(not conn.admin for conn in engine.opened)
+
+
+@pytest.mark.parametrize(
+    ("records", "state"),
+    [
+        ([_record(table="A"), _record(table="B")], "OK"),
+        ([_record(table="A"), _record(table="B", last_status=Status.ERROR, message="ORA-01555")], "ERRORS"),
+        ([_record(table="A"), _record(table="B", last_status=Status.CHUNK_END)], "PARTIAL"),
+        ([_record(table="A"), _running(table="B")], "RUNNING"),
+        # adversarial: refusing a table that was already processed is neither an error nor a partial run
+        ([_record(table="A"), _record(table="B", last_status=Status.ERROR, skipped=True)], "OK"),
+        # adversarial: an error elsewhere wins over an incomplete table
+        ([_record(table="A", last_status=Status.CHUNK_END), _record(table="B", last_status=Status.ERROR)], "ERRORS"),
+    ],
+)
+def test_execution_state_is_running_ok_errors_or_partial(monkeypatch, capsys, records, state):
+    # Spec: README > Run ILM > --mode STATUS — each execution is running, finished OK, finished with errors, or partial
+    engine = _MonitorEngine(records={"SOURCE": records})
+
+    # When: STATUS runs
+    _, output = _run_status(monkeypatch, capsys, engine)
+
+    # Then: the run carries that state, and its rows are always shown
+    line = _run_line(output, "r1", "SOURCE")
+    assert f"  {state}  " in line
+    assert "rows " in line
+
+
+def test_rows_processed_of_a_run_add_up_across_its_tables(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — rows processed are always shown
+    engine = _MonitorEngine(records={"SOURCE": [_record(table="A", rows=1500), _record(table="B", rows=2500)]})
+    _, output = _run_status(monkeypatch, capsys, engine)
+    assert "rows 4,000" in _run_line(output, "r1", "SOURCE")
+
+
+def test_an_unreachable_environment_is_reported_while_the_other_is_still_shown(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — exit 1 only when no environment can be read
+    # Given: the history log cannot be read
+    engine = _MonitorEngine(records={"SOURCE": [_record()]}, unreadable=("HISTORY",))
+
+    # When/Then: SOURCE is reported, HISTORY says why it is not, and the exit code stays 0
+    code, output = _run_status(monkeypatch, capsys, engine)
+    assert code == 0
+    assert "HISTORY log unreadable" in output.split("== HISTORY ==")[1]
+    assert f"run {_label('r1')}" in output.split("== HISTORY ==")[0]
+
+    # Given: neither can be read
+    code, _ = _run_status(monkeypatch, capsys, _MonitorEngine(unreadable=("SOURCE", "HISTORY")))
+    # Then: the command fails
+    assert code == 1
+
+
+def test_an_environment_without_credentials_is_reported_as_not_available(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — a missing environment is reported, not fatal
+    engine = _MonitorEngine(records={"SOURCE": [_record()]})
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
+    config = Config(schema="s", mode="STATUS", source_dsn="sd", source_username="su", source_password="sp")
+
+    with pytest.raises(SystemExit) as outcome:
+        ldb_runner.ldb_run(config)
+
+    output = capsys.readouterr().out
+    assert outcome.value.code == 0
+    assert "credentials are not configured" in output.split("== HISTORY ==")[1]
+
+
+def test_running_table_shows_progress_current_wait_and_the_wait_profile_up_to_95_percent(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — % progress and time left from the long operation, the current wait
+    # when it is significant, and waits plus CPU in seconds, descending, until 95% of the time is covered
+    # Given: a running table whose session spent 60 s on CPU, 30 s on I/O, 6 s on a lock and 4 s on a latch
+    activity = SessionActivity(
+        alive=True,
+        current_wait=WaitItem("enq: TX - row lock contention", 42.0),
+        progress=OperationProgress(percent=37.5, remaining_seconds=3725.0, description="Table Scan APP.ITEMS"),
+        waits=(
+            WaitItem("latch: cache buffers chains", 4.0),
+            WaitItem("CPU", 60.0),
+            WaitItem("enq: TX - row lock contention", 6.0),
+            WaitItem("db file sequential read", 30.0),
+        ),
+    )
+    engine = _MonitorEngine(records={"SOURCE": [_running()]}, activity=activity)
+
+    # When: STATUS runs
+    _, output = _run_status(monkeypatch, capsys, engine)
+
+    # Then: progress, remaining time and the current wait are shown
+    assert "37.5%" in output and "1:02:05 left" in output
+    assert "waiting 42 s on enq: TX - row lock contention" in output
+    # And: the profile is sorted by time and stops once 95% (CPU 60% + I/O 30% + lock 6% = 96%) is covered
+    profile = next(line for line in output.splitlines() if "time (s):" in line)
+    assert profile.index("CPU 60.0") < profile.index("db file sequential read 30.0") < profile.index("row lock")
+    assert "latch" not in profile
+
+
+def test_a_finished_table_shows_no_session_details(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — live statistics apply to active executions only
+    activity = SessionActivity(True, WaitItem("x", 99.0), OperationProgress(5.0, 1.0, None), (WaitItem("CPU", 1.0),))
+    engine = _MonitorEngine(records={"SOURCE": [_record()]}, activity=activity)
+    _, output = _run_status(monkeypatch, capsys, engine)
+    assert "progress:" not in output and "time (s):" not in output and "waiting" not in output
+
+
+def test_a_run_whose_session_is_gone_is_not_reported_as_running(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — running means the registered session is alive; a table left
+    # in progress by a dead session makes the run partial
+    # Given: a table in progress whose session no longer exists
+    engine = _MonitorEngine(
+        records={"SOURCE": [_running()]},
+        activity=SessionActivity(alive=False, current_wait=None, progress=None, waits=()),
+    )
+
+    # When/Then
+    _, output = _run_status(monkeypatch, capsys, engine)
+    assert "  PARTIAL  " in _run_line(output, "r1", "SOURCE")
+    assert "INTERRUPTED" in output
+
+
+@pytest.mark.parametrize(("silent_seconds", "state"), [(30, "RUNNING"), (3600, "PARTIAL")])
+def test_without_session_views_a_table_counts_as_running_only_while_its_heartbeat_is_recent(
+    monkeypatch, capsys, tmp_path, silent_seconds, state
+):
+    # Spec: README > Run ILM > --mode STATUS — without access to gv$session the control table's last activity decides;
+    # the data of the views is skipped and a script with the missing grants is written for a DBA
+    # Given: no readable session view, and a table last active silent_seconds ago
+    hint = "GRANT SELECT ON sys.gv_$session TO LDB_SOURCE_ROLE"
+    no_access = MonitoringAccess(session=False, progress=False, waits=False, grants=(hint,))
+    record = _running(last_activity=_NOW - timedelta(seconds=silent_seconds))
+    engine = _MonitorEngine(records={"SOURCE": [record]}, access=no_access)
+
+    # When/Then: the state follows the heartbeat, is flagged unverified, and the grant hint is printed
+    _, output = _run_status(monkeypatch, capsys, engine, ddl_pending_dir=str(tmp_path))
+    assert f"  {state}  " in _run_line(output, "r1", "SOURCE")
+    assert "session not verified" in output
+    assert engine.activity_conns == []
+    # And: the grants are in a script under the pending directory and the report says to run it
+    script = next(tmp_path.glob("status_*_monitoring_grants_*.sql")).read_text(encoding="utf-8")
+    assert f"{hint};" in script
+    assert "Ask a DBA to run" in output and str(tmp_path) in output
+    assert engine.grantees == ["LDB_SOURCE_ROLE", "LDB_HISTORY_ROLE"]
+
+
+def test_runs_are_listed_most_recent_first_each_with_its_own_state(monkeypatch, capsys):
+    # Spec: README > Run ILM > --last — the state and statistics of each of the last n executions
+    engine = _MonitorEngine(records={"SOURCE": [_record("new", last_status=Status.ERROR), _record("old", table="B")]})
+    _, output = _run_status(monkeypatch, capsys, engine, last=2)
+    assert output.index(f"run {_label('new')}") < output.index(f"run {_label('old')}")
+    assert "  ERRORS  " in _run_line(output, "new", "SOURCE")
+    assert "  OK  " in _run_line(output, "old", "SOURCE")
+
+
+def test_a_held_runner_lock_proves_the_run_is_alive_even_without_session_views(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — liveness is verified by trying the runner mutex without waiting;
+    # a lock held by another session means the run is active, whatever the session views allow
+    # Given: a table in progress, a silent heartbeat, no readable session view, and the runner lock held
+    no_access = MonitoringAccess(session=False, progress=False, waits=False)
+    record = _running(last_activity=_NOW - timedelta(seconds=3600))
+    engine = _MonitorEngine(records={"SOURCE": [record]}, access=no_access, runner_alive=True)
+
+    # When/Then: the run is RUNNING and verified, and the probe named the table and its run
+    _, output = _run_status(monkeypatch, capsys, engine)
+    assert "  RUNNING  " in _run_line(output, "r1", "SOURCE")
+    assert "session not verified" not in output
+    assert ("APP", "ITEMS", "r1") in engine.probed
+
+
+def test_a_free_runner_lock_means_the_run_is_gone_even_if_its_session_looks_alive(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — nobody holds the runner mutex: the run died and left the table in
+    # progress; the lock outranks a recycled or lingering session
+    engine = _MonitorEngine(records={"SOURCE": [_running()]}, runner_alive=False)
+
+    _, output = _run_status(monkeypatch, capsys, engine)
+    assert "  PARTIAL  " in _run_line(output, "r1", "SOURCE")
+    assert "INTERRUPTED" in output
+
+
+def test_runner_lock_is_probed_only_for_tables_in_progress(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — finished tables are never probed (nothing is locked needlessly)
+    engine = _MonitorEngine(records={"SOURCE": [_record(table="A"), _running(table="B")]}, runner_alive=True)
+    _run_status(monkeypatch, capsys, engine)
+    assert [table for _, table, _ in engine.probed] == ["B"]
+
+
+def test_the_admin_connection_reads_the_session_views_the_runtime_user_cannot(monkeypatch, capsys, tmp_path):
+    # Spec: README > Run ILM > --mode STATUS — when the runtime user cannot read the gv$ views and admin credentials
+    # exist, the session details are read over the admin connection and no script is needed
+    # Given: a running table, runtime without views, an admin that reads them all
+    no_access = MonitoringAccess(
+        session=False, progress=False, waits=False, grants=("GRANT SELECT ON sys.gv_$session TO R",)
+    )
+    engine = _MonitorEngine(records={"SOURCE": [_running()]}, access=no_access, admin_access=_FULL_ACCESS)
+
+    # When
+    _, output = _run_status(
+        monkeypatch,
+        capsys,
+        engine,
+        ddl_pending_dir=str(tmp_path),
+        admin_source_username="sa",
+        admin_source_password="sap",
+    )
+
+    # Then: the activity was read with an admin connection, which is closed; nothing is written for a DBA
+    assert [conn.admin for conn in engine.activity_conns] == [True]
+    assert {id(c) for c in engine.closed} == {id(c) for c in engine.opened}
+    assert "admin connection" not in output
+    # And: HISTORY has no admin credentials, so only it gets the script
+    assert [f.name.split("_monitoring")[0] for f in tmp_path.iterdir()] == ["status_history"]
+
+
+def test_an_admin_connection_without_the_views_does_not_replace_the_runtime_one(monkeypatch, capsys, tmp_path):
+    # Spec: README > Run ILM > --mode STATUS — if the admin user cannot read them either, the data is skipped and
+    # the script is written
+    no_access = MonitoringAccess(
+        session=False, progress=False, waits=False, grants=("GRANT SELECT ON sys.gv_$session TO R",)
+    )
+    engine = _MonitorEngine(records={"SOURCE": [_running()]}, access=no_access)
+
+    _, output = _run_status(
+        monkeypatch,
+        capsys,
+        engine,
+        ddl_pending_dir=str(tmp_path),
+        admin_source_username="sa",
+        admin_source_password="sap",
+    )
+
+    assert engine.activity_conns == []
+    assert {id(c) for c in engine.closed} == {id(c) for c in engine.opened}
+    assert len(list(tmp_path.glob("status_*_monitoring_grants_*.sql"))) == 2  # SOURCE and HISTORY
+    assert "admin connection" not in output
+
+
+def test_without_missing_grants_no_script_is_written_and_no_admin_connection_is_opened(monkeypatch, capsys, tmp_path):
+    # Spec: README > Run ILM > --mode STATUS — admin credentials are used only when the runtime user lacks views
+    engine = _MonitorEngine(records={"SOURCE": [_running()]})
+    _run_status(
+        monkeypatch,
+        capsys,
+        engine,
+        ddl_pending_dir=str(tmp_path),
+        admin_source_username="sa",
+        admin_source_password="sap",
+    )
+    assert all(not conn.admin for conn in engine.opened)
+    assert list(tmp_path.iterdir()) == []
+
+
+# --- Grouping of the log into executions (the log carries no run id) ---------------------------------------------
+
+
+def _at(hour: int, minute: int = 0, second: int = 0) -> datetime:
+    return datetime(2026, 10, 22, hour, minute, second)
+
+
+def _table_log(first_id, table, start, statuses, owner="APP", rows=100, message=None):
+    """Log rows of one table run: one row per status, one minute apart, in order."""
+    return [
+        LogEntry(
+            first_id + i, owner, table, "SOURCE_ILM", _at(0), status, start + timedelta(minutes=i),
+            start + timedelta(minutes=i + 1), message if status == Status.ERROR else None,
+            rows if status in (Status.CHUNK_END, Status.LOB_END) else 0,
+        )
+        for i, status in enumerate(statuses)
+    ]  # fmt: skip
+
+
+_FINISHED = [Status.TABLE_START, Status.CHUNK_START, Status.CHUNK_END, Status.CHUNK_END, Status.TABLE_END]
+
+
+def test_log_rows_without_a_run_id_are_grouped_into_executions_by_time():
+    # Spec: README > Run ILM > --mode STATUS — executions are rebuilt from the log timestamps (no run id is stored)
+    # Given: three tables processed by two invocations hours apart, the first with two workers overlapping
+    log = (
+        _table_log(1, "A", _at(8, 0), _FINISHED)
+        + _table_log(10, "B", _at(8, 1), _FINISHED)
+        + _table_log(20, "A", _at(11, 0), _FINISHED)
+    )
+
+    # When
+    executions = build_executions(log, [], last=5)
+
+    # Then: newest first; A and B belong together in the first, labelled with its start time
+    assert [label for label, _ in executions] == ["20261022-110000", "20261022-080000"]
+    assert [r.table_name for r in executions[1][1]] == ["A", "B"]
+    assert [r.table_name for r in executions[0][1]] == ["A"]
+    # And: rows are the chunk rows committed (2 chunks of 100)
+    assert executions[0][1][0].rows == 200 and executions[0][1][0].last_status == Status.TABLE_END
+
+
+def test_last_n_limits_the_executions_to_the_most_recent_ones():
+    # Spec: README > Run ILM > --last — the n most recent executions
+    log = [e for hour in (6, 8, 10) for e in _table_log(hour * 10, "A", _at(hour), _FINISHED)]
+    assert [label for label, _ in build_executions(log, [], last=2)] == ["20261022-100000", "20261022-080000"]
+    assert len(build_executions(log, [], last=1)) == 1
+
+
+def test_a_table_that_appears_twice_starts_a_new_execution_even_when_close_in_time():
+    # Spec: README > Run ILM > --mode STATUS — a run processes a table once; a second run minutes later is another one
+    log = _table_log(1, "A", _at(8, 0), _FINISHED) + _table_log(20, "A", _at(8, 10), _FINISHED)
+    assert len(build_executions(log, [], last=5)) == 2
+
+
+def test_runs_written_by_a_preview_are_not_reported():
+    # Spec: README > Run ILM > --mode STATUS — PREVIEW executions are never shown
+    preview = [Status.TABLE_PREVIEW_START, Status.CHUNK_PREVIEW_END, Status.TABLE_PREVIEW_END]
+    log = _table_log(1, "A", _at(8), _FINISHED) + _table_log(20, "A", _at(9), preview)
+    control = [
+        ControlEntry("APP", "A", Status.TABLE_PREVIEW_END, "p", "SOURCE_ILM", _at(0), _at(9), _at(9), 5, _at(9), None)
+    ]
+
+    executions = build_executions(log, control, last=5)
+
+    assert [label for label, _ in executions] == ["20261022-080000"]
+    assert executions[0][1][0].last_status == Status.TABLE_END
+
+
+def test_the_control_row_says_whether_the_table_is_still_in_progress_and_who_runs_it():
+    # Spec: README > Run ILM > --mode STATUS — the state of the running table comes from ldb_ctl
+    log = _table_log(1, "A", _at(8), [Status.TABLE_START, Status.CHUNK_END])
+    control = [
+        ControlEntry("APP", "A", Status.CHUNK_END, "run-9", "SOURCE_ILM", _at(0), _at(8), None, 450, _at(8, 5), "1.2.3")
+    ]
+
+    ((_, records),) = build_executions(log, control, last=1)
+
+    record = records[0]
+    assert (record.in_progress, record.rows, record.session, record.run_id) == (True, 450, "1.2.3", "run-9")
+    assert record.last_activity == _at(8, 5)
+
+
+def test_a_control_row_without_log_rows_is_still_reported():
+    # Spec: README > Run ILM > --mode STATUS — ldb_ctl is reported even if the log has nothing about the table
+    control = [
+        ControlEntry("APP", "A", Status.TABLE_END, "r", "SOURCE_ILM", _at(0), _at(7), _at(7, 30), 900, None, None)
+    ]
+    ((_, records),) = build_executions([], control, last=1)
+    assert (records[0].table_name, records[0].last_status, records[0].rows, records[0].in_progress) == (
+        "A", Status.TABLE_END, 900, False,
+    )  # fmt: skip
+
+
+def test_a_table_refused_as_already_processed_is_an_execution_member_flagged_skipped():
+    # Spec: README > Run ILM > --mode STATUS — ORA-20003 "already processed" is neither an error nor unfinished work
+    log = _table_log(1, "A", _at(8), _FINISHED) + _table_log(
+        20, "B", _at(8, 2), [Status.ERROR], message="Table B is already processed for date 1"
+    )
+    ((_, records),) = build_executions(log, [], last=1)
+    assert [(r.table_name, r.skipped) for r in records] == [("A", False), ("B", True)]
+
+
+def test_a_table_line_shows_status_rows_times_and_the_control_data(monkeypatch, capsys):
+    # Spec: README > Run ILM > --mode STATUS — per-table status, rows processed, started, finished and elapsed
+    engine = _MonitorEngine(records={"SOURCE": [_record(table="DSP_DET", rows=126038)]})
+    _, output = _run_status(monkeypatch, capsys, engine)
+    start = _RUN_START.get("r1", _DEFAULT_START)
+    assert (
+        f"APP.DSP_DET  status: TEND  rows processed: 126,038, started: {start:%Y-%m-%d %H:%M:%S}"
+        f" finished: {start + timedelta(minutes=30):%Y-%m-%d %H:%M:%S} elapsed 0:30:00"
+    ) in output
+    assert "action: SOURCE_ILM, process date: 2026-10-22" in output
+    assert "admin connection" not in output
+
+
+def test_a_successful_connection_logs_no_detail(monkeypatch, capsys, caplog):
+    # Spec: README > Logging — a successful connection is reported without dsn or user
+    runner_logger = logging.getLogger(ldb_runner.logger.name)
+    runner_logger.addHandler(caplog.handler)
+    monkeypatch.setattr(runner_logger, "level", logging.INFO)
+    engine = _MonitorEngine(records={"SOURCE": [_record()]})
+    try:
+        _run_status(monkeypatch, capsys, engine)
+    finally:
+        runner_logger.removeHandler(caplog.handler)
+    messages = [r.getMessage() for r in caplog.records if "connected" in r.getMessage()]
+    assert "SOURCE runtime: connected" in messages
+    assert not any(" as " in m or "sd" in m.split(": ")[-1] for m in messages)
+
+
+def test_an_engine_without_monitoring_still_gets_states_rows_and_no_grants_script(monkeypatch, capsys, tmp_path):
+    # Spec: README > Run ILM > --mode STATUS — session statistics are optional engine capabilities; an engine that
+    # keeps the contract defaults reports states and rows, and neither asks for grants nor writes a script
+    # Given: an engine with the default (no) monitoring and a table whose runner liveness cannot be probed
+    class _PlainEngine(_MonitorEngine):
+        check_monitoring_access = staticmethod(DatabaseEngine.check_monitoring_access)
+        is_run_alive = staticmethod(DatabaseEngine.is_run_alive)
+        get_session_activity = staticmethod(DatabaseEngine.get_session_activity)
+
+    engine = _PlainEngine(records={"SOURCE": [_running()]})
+
+    # When
+    code, output = _run_status(monkeypatch, capsys, engine, ddl_pending_dir=str(tmp_path))
+
+    # Then: the report works from the heartbeat, with no monitoring message and nothing written
+    assert code == 0
+    assert "RUNNING" in output
+    assert "monitoring" not in output
+    assert list(tmp_path.iterdir()) == []

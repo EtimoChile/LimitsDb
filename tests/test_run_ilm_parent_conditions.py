@@ -10,6 +10,7 @@ class _Engine:
     """Engine double for process_tables_cnf: the SQL block is the planned query."""
 
     get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+    format_identifier = staticmethod(OracleEngine.format_identifier)
     get_date_condition = staticmethod(OracleEngine.get_date_condition)
     get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
     rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)

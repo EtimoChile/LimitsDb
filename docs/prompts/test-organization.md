@@ -33,6 +33,7 @@ is the specification document that governs it, in order of precedence:
 | CLI entry points | README § *CLI Commands* (ldb-run, ldb-crypt, ldb-impl, ldb-init) | `test_cli_entry_points.py` |
 | Oracle-specific SQL and DDL | README § *Run ILM* + Oracle engine | `adapters/oracle/test_oracle_sql_generation.py` |
 | Oracle schema objects | README § *Run ILM* (control/history objects) | `adapters/oracle/test_oracle_schema_objects.py` |
+| Oracle run status and session monitoring | README § *Run ILM* (`--mode STATUS`) | `adapters/oracle/test_oracle_run_status.py` |
 | Oracle connection operations | README § *Run ILM* + `docs/exception-handling.md` § oracle | `adapters/oracle/test_oracle_connection_ops.py` |
 | Oracle E2E (real database) | README § *Oracle integration tests* | `integration/oracle/test_oracle_ilm_lifecycle.py` |
 
@@ -94,6 +95,7 @@ tests/
 │   │   ├── test_oracle_sql_generation.py    — Oracle SQL/PL/SQL specifics
 │   │   ├── test_oracle_schema_objects.py    — DDL: tables, users, roles, sequences
 │   │   └── test_oracle_connection_ops.py    — operations on LDB_CTL/LDB_LOG
+│   │   └── test_oracle_run_status.py        — STATUS queries and session monitoring
 │   └── postgresql/                          ← when the adapter is added
 │
 └── integration/

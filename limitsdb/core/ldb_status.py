@@ -18,6 +18,9 @@ class Status:
     ERROR = "ERROR"
     SKIPPED = "SKIPPED"
 
+    # EXECUTE statuses of a table that is being processed (a PREVIEW has its own, disjoint set)
+    IN_PROGRESS_STATUSES = frozenset({TABLE_START, CHUNK_START, CHUNK_END, LOB_START, LOB_END})
+
     PREVIEW_STATUSES = frozenset(
         {
             TABLE_PREVIEW_START,

@@ -64,6 +64,8 @@ def _build_control_tables(owner: str) -> list[TableDefinition]:
                 ColumnDefinition("CTL_ROWS_PROCESSED", "number", precision=18, scale=0),
                 ColumnDefinition("CTL_PLSQL", "clob"),
                 ColumnDefinition("CTL_RUN_ID", "string", length=36),
+                # Session that runs the table; its format belongs to the engine. Read by ldb-run --mode STATUS
+                ColumnDefinition("CTL_DB_SESSION_ID", "string", length=64),
             ),
             primary_key=("CTL_OWNER", "CTL_TABLE_NAME"),
         ),
