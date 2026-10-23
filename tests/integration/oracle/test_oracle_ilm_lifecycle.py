@@ -1894,7 +1894,7 @@ def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
 ):
     # Spec: README § History DDL in --mode SCRIPT — SCRIPT applies nothing to the databases; the history
     # DDL and the table grants go to files under ddl_pending_dir that run in SQL*Plus, and once the
-    # DBA has run them a new SCRIPT run finds history up to date
+    # DBA has run them a new SCRIPT run finds history up to date and emits nothing
     container = os.getenv("LDB_ORACLE_TEST_CONTAINER")
     if not container:
         pytest.skip("LDB_ORACLE_TEST_CONTAINER (Oracle container with SQL*Plus) is not configured")
@@ -1997,10 +1997,9 @@ def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
             environment=cli_environment,
         )
 
-        # Then: no history structure change is left, and its grants file reruns without error
-        (second_history_file,) = second_dir.glob("history_ddl_*.sql")
-        assert "CREATE TABLE" not in second_history_file.read_text(encoding="utf-8").upper()
-        _run_sql_file_in_oracle_container(container, second_history_file, admin_login=admin_login)
+        # Then: nothing is left to emit: history is up to date and the runtime users own their tables, so
+        # there are no grants either
+        assert not list(second_dir.glob("history_ddl_*.sql"))
     finally:
         if source_connection is not None:
             source_connection.close()
