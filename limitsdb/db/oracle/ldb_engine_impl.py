@@ -1606,7 +1606,7 @@ end;"""
         if effective_pk_index:
             expected_indexes.add(effective_pk_index)
         for index_name in list(effective_indexes.keys()):
-            if index_name not in expected_indexes:
+            if table.drop_unmanaged_indexes and index_name not in expected_indexes:
                 fmttd_iname = OracleEngine._format_identifier(index_name)
                 logger.info("Unmanaged index %s on %s.%s will be dropped", fmttd_iname, fmttd_owner, fmttd_table_name)
                 statements.append(f"DROP INDEX {fmttd_owner}.{fmttd_iname}")

@@ -1974,12 +1974,12 @@ def test_ldb_run_script_mode_writes_ddl_files_a_dba_can_run_with_sqlplus(
                 "SELECT privilege FROM dba_tab_privs WHERE owner = :1 AND table_name = 'ILM_DDLTBL' AND grantee = :2",
                 [history_user, "LDBT_DDL_HISTORY_ROLE"],
             )
-            assert {row[0] for row in cursor} == {"SELECT", "INSERT", "UPDATE", "DELETE"}
+            assert {row[0] for row in cursor} == {"SELECT", "INSERT", "DELETE", "ALTER"}
             cursor.execute(
                 "SELECT privilege FROM dba_tab_privs WHERE owner = :1 AND table_name = 'ILM_DDLTBL' AND grantee = :2",
                 [source_user, "LDBT_DDL_SOURCE_ROLE"],
             )
-            assert {row[0] for row in cursor} == {"SELECT", "INSERT", "UPDATE", "DELETE"}
+            assert {row[0] for row in cursor} == {"SELECT", "DELETE"}
         finally:
             cursor.close()
 

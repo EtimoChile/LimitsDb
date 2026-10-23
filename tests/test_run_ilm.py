@@ -369,6 +369,10 @@ def test_validate_mode_opens_and_closes_all_four_connections(monkeypatch: pytest
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             conn = SimpleNamespace(admin=admin, env=env)
             opened.append(conn)
@@ -400,6 +404,10 @@ def test_validate_mode_returns_error_when_required_connection_fails(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             if admin and env is None:
                 raise RuntimeError("source admin unavailable")
@@ -429,6 +437,10 @@ def test_validate_mode_skips_optional_credentials_not_provided(monkeypatch: pyte
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             conn = SimpleNamespace(admin=admin, env=env)
             opened.append(conn)
@@ -472,6 +484,10 @@ def test_validate_mode_returns_error_when_system_date_check_fails(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             return SimpleNamespace(admin=admin, env=env)
 
@@ -500,6 +516,10 @@ def test_validate_mode_returns_error_when_config_processing_raises(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             return SimpleNamespace(admin=admin, env=env)
 
@@ -533,6 +553,10 @@ def test_validate_mode_for_history_ilm_opens_history_then_source_connections(
     closed = []
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config, *, admin=False, env=None):
             conn = SimpleNamespace(admin=admin, env=env)
             opened.append(conn)
@@ -1530,6 +1554,10 @@ def test_process_table_returns_table_end_and_closes_connection_on_success(
     calls = {"ran": False, "closed": False}
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -1576,6 +1604,10 @@ def test_process_table_returns_error_status_and_closes_connection_on_failure(
     calls = {"saved": False, "closed": False}
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -1629,6 +1661,10 @@ def test_process_table_leaves_the_control_row_alone_when_another_run_owns_the_ta
             super().__init__(type("E", (), {"code": 20002, "message": "in process"})())
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -1675,6 +1711,10 @@ def test_process_table_returns_error_when_recovery_query_also_fails(
     call_count = [0]
 
     class DummyEngine:
+        @staticmethod
+        def get_identifier_str(value):
+            return value.upper()
+
         def get_connection(self, config):
             return object()
 
@@ -2492,6 +2532,51 @@ def test_extra_select_tables_are_granted_select_only_in_source_and_history(monke
     assert "GRANT DELETE ON OTHER.RATES" not in files["history_ddl"]
 
 
+@pytest.mark.parametrize("alter_grant", [False, True])
+def test_alter_on_history_tables_is_granted_only_when_history_alter_grant_is_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, alter_grant: bool
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — history_alter_grant (default false) adds ALTER on
+    # the history tables to the history role, never on the source tables.
+    # Given: a SCRIPT run with or without history_alter_grant
+    engine = _HistoryDdlEngine()
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(
+            mode="SCRIPT",
+            history_admin=True,
+            ddl_pending_dir=str(tmp_path / "pending"),
+            history_alter_grant=alter_grant,
+        ),
+        engine,
+        rows=_extra_rows(),
+    )
+
+    # Then: ALTER is in the history grants only when requested, and never in the source grants
+    files = _script_files(tmp_path / "pending")
+    assert rc == 0
+    assert ("GRANT ALTER ON HIST.T1 TO LDB_HISTORY_ROLE;" in files["history_ddl"]) is alter_grant
+    assert not [grant for grant in engine.source_granted if "ALTER" in grant]
+
+
+def test_tables_owned_by_the_runtime_user_get_no_grants():
+    # Spec: README > Run ILM > --mode PREPARE — an owner holds every privilege on its own tables and a grant to
+    # oneself is not recorded, so tables owned by the runtime user are left out of the grants and their checks.
+    # Given: HIST.T1 and SRC.T1 configured, SRC.LOOKUP as extra table
+    rows = _extra_rows(extra_select_tables="SRC.LOOKUP")
+    engine = _HistoryDdlEngine()
+
+    # When: the plans are built for a user that owns HIST, for a stranger, and for the owner of SRC
+    owner_of_history = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "hist")
+    stranger = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "other")
+    owner_of_source = ldb_runner._collect_privilege_plan(rows, "SOURCE", engine, True, "src")
+
+    # Then: the owner keeps only what belongs to others; the stranger gets everything (ALTER only in history)
+    assert owner_of_history == [(("SELECT",), [("SRC", "LOOKUP")])]
+    assert stranger == [(("SELECT", "INSERT", "DELETE", "ALTER"), [("HIST", "T1")]), (("SELECT",), [("SRC", "LOOKUP")])]
+    assert owner_of_source == []
+
+
 def test_history_extra_select_tables_replace_the_source_list_in_history(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: README > ILM Rule Semantics > Extra tables — history_extra_select_tables takes precedence over
     # extra_select_tables in history, as history_addtl_filter_expr does over additional_filter_expr; an entry
@@ -2514,10 +2599,10 @@ def test_extra_select_table_that_is_also_configured_keeps_all_its_privileges(mon
     # Given: the extra list names the configured table itself
     rc, engine, _files = _script_with_extra_tables(monkeypatch, tmp_path, extra_select_tables="SRC.T1")
 
-    # Then: SRC.T1 has its four privileges, each granted once
+    # Then: SRC.T1 has its own two source privileges, each granted once
     assert rc == 0
     assert sorted(g for g in engine.source_granted if "SRC.T1" in g) == sorted(
-        f"GRANT {privilege} ON SRC.T1 TO LDB_SOURCE_ROLE" for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+        f"GRANT {privilege} ON SRC.T1 TO LDB_SOURCE_ROLE" for privilege in ("SELECT", "DELETE")
     )
 
 
@@ -2822,9 +2907,9 @@ def test_failed_history_ddl_file_carries_the_table_grants_that_could_not_be_appl
 ):
     # Spec: README > Run ILM > Admin credentials in ldb-run — a grant the runtime user cannot apply
     # is written, like any failed DDL, to the pending file for a DBA.
-    # Given: no history admin credentials; the DDL works but the grant on UPDATE is rejected
+    # Given: no history admin credentials; the DDL works but the grant on INSERT is rejected
     statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
-    grant = "GRANT UPDATE ON HIST.T1 TO LDB_HISTORY_ROLE"
+    grant = "GRANT INSERT ON HIST.T1 TO LDB_HISTORY_ROLE"
     engine = _HistoryDdlEngine({"T1": [statement]}, failing={grant: "ORA-01031: insufficient privileges"})
     pending_dir = tmp_path / "pending"
 

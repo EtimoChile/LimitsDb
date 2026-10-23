@@ -141,6 +141,7 @@ class TableDefinition:
     columns: tuple[ColumnDefinition, ...]
     primary_key: tuple[str, ...] | None = None
     indexes: tuple[IndexDefinition, ...] = ()
+    drop_unmanaged_indexes: bool = True
 
 
 @dataclass(frozen=True)

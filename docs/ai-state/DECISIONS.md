@@ -2,7 +2,7 @@
 status: active
 authority: decision-register
 scope: development/maintenance/release
-last-reviewed: 2026-10-15
+last-reviewed: 2026-10-23
 ---
 
 # Compact decision register
@@ -59,3 +59,4 @@ It does not duplicate specifications or record every code change.
 
 Allowed states: `ACTIVE`, `REPLACED`, and `DISCARDED`. A replaced decision
 keeps its row and references the successor ID.
+| `DEC-043` | 2026-10-23 | `ACTIVE` | ILM/privileges | Table grants follow least privilege: the source role gets `SELECT` and `DELETE` on the configured tables, the history role `SELECT`, `INSERT` and `DELETE` (no `UPDATE` anywhere, no `INSERT` on source). `history_alter_grant` (default `true`) adds `ALTER` on the history tables so column additions and widenings are applied with the runtime connection; `CREATE INDEX` is not covered (it needs `INDEX` and creates the index in the grantee's schema). Tables owned by the runtime user are left out of the grants and of their checks: an owner holds every privilege and Oracle does not record a grant to oneself. Privileges stay on roles, not on the runtime user. | `DELETE`/`INSERT` are the only writes the tool makes to configured tables; HISTORY is the less sensitive account and optional admin credentials are the common case, so DDL for new or widened columns should resolve itself. | Refines `DEC-025`, `DEC-033`. | `limitsdb/core/ldb_runner.py` (`_privilege_plan`); `limitsdb/core/ldb_params_config.py`; `README.md` | changelog: grants reduced to least privilege; `history_alter_grant`. |

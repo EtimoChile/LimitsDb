@@ -13,7 +13,44 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
 - **Dry-run anytime.** Generate the exact operations without executing them, to review and approve planned changes.
 - **Keeps secrets safe.** Database credentials are stored encrypted and transparently decrypted at runtime.
 - **Automates control DB objects creation.** Creates missing control schemas and DB objects.
-- **Automates history objects creation and updates.** Creates missing history tables and correct columns, contraints and indexes for ILM executions.
+- **Automates history objects creation and updates.** Creates missing history tables and keeps their columns and primary key in line with source for ILM executions. History tables carry no other index by design: the primary key is the only one (every extra index slows the ILM down, and history is not queried like production).
+
+### Design guarantees
+
+- **No data is lost in a move.** For each chunk, the insert into history and the delete from source run in one
+  transaction that commits only when both succeeded; a failure rolls the chunk back, so a row is never deleted
+  without having reached history. Tables with LOB columns move in a single statement under the same rule.
+- **No child is left without its parent.** Tables are processed children first: a referenced table starts only
+  after every table that references it has finished (`--mode PLAN` shows the order). A child row also moves
+  only when its own conditions and those of every referenced table are met, in source and in history.
+- **Rows never travel through the runner.** The runner sends a generated PL/SQL block and reads counters and
+  statuses back; the rows go from the source session to history through the database link. That keeps the
+  work close to the data, efficient, and the data off the machine running `ldb-run`.
+- **Parallel runs are controlled.** Up to `parallel_max` tables run at once, one database session each, and a
+  table waits for the tables it depends on. A lock per table (`LDB_RUN_LOCK`, plus the row of `LDB_CTL`) lets
+  only one runner work on a table; a second runner is refused before it starts and a worker that loses its
+  table stops. See [concurrency control](docs/concurrency-control.md).
+- **Every run is recorded and can be resumed.** `LDB_CTL` keeps the state of each table and `LDB_LOG` each
+  step and chunk, so an interrupted process can be resumed, by hand or by the runner:
+  - An `EXECUTE` of the same process date continues an incomplete one: finished tables stay finished and the
+    rows already moved are kept.
+  - Inside a run, a table that fails after making progress (it moved rows) is tried again from where it left
+    off. A table that fails without any progress is not retried: it is reported as an error and the run ends
+    with exit code 1, which avoids endless loops over a failure that repeating cannot fix.
+  - `--mode STATUS` shows what is running, finished or interrupted.
+- **Nothing happens by surprise.** `PREVIEW` runs the same logic without moving data and without marking the day as
+  processed; `SCRIPT` generates the SQL for a DBA to run; `VALIDATE` and `PLAN` are read-only.
+- **Least privilege.** The runtime users act through a role that receives only the grants on the configured
+  tables.
+- **Administrative connections are optional.** When administrative credentials are configured (`admin_source_*`,
+  `admin_history_*`), `ldb-impl` and `ldb-run` use them to apply what ILM needs to work: DDL of objects,
+  permissions and alterations of the history tables. ILM itself runs with the runtime users only.
+- **Without administrative connections, a DBA applies the DDL.** If you prefer not to configure them,
+  LimitsDb writes the DDL (bootstrap, grants, history objects) to files under `ddl_pending_dir` for a DBA to run
+  on their own; see [Without admin credentials](#without-admin-credentials).
+- **Credentials are encrypted.** Runtime and administrative passwords live in `secrets[.<PROFILE>].json` as
+  `enc:v1:aes256gcm:…` tokens (`ldb-crypt`), decrypted only in memory when connecting; see
+  [Secrets & Encryption](#secrets--encryption).
 
 ### Typical outcomes
 
@@ -463,9 +500,10 @@ is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
   receive yet through the role, and warns. Once the grants are in place no file
   is written.
 - It checks, with the runtime connections alone, that the source and history
-  roles are enabled for the runtime users and give them `SELECT`, `INSERT`,
-  `UPDATE` and `DELETE` on every configured table. A role that is granted but
-  not a default role gives nothing.
+  roles are enabled for the runtime users and give them the least privileges
+  they use on every configured table: `SELECT` and `DELETE` on source;
+  `SELECT`, `INSERT` and `DELETE` on history. Nothing updates a configured
+  table. A role that is granted but not a default role gives nothing.
   The role must stay a default role of the runtime user (`ldb-run` warns
   when it is not); `GRANT role` makes it default unless the user was altered.
 - The default role names are `LDB_SOURCE_ROLE` and `LDB_HISTORY_ROLE`. When
@@ -473,6 +511,21 @@ is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
   database, those names collide; set `source_role_name` / `history_role_name`
   per schema to keep the roles apart. Reusing one role across schemas also
   works and is rarely a problem.
+- `history_alter_grant` (default `true`) also grants `ALTER` on the history
+  tables to the history role, so `ldb-run` can apply their DDL (new or widened
+  columns, constraints) with the runtime connection and no history admin
+  credentials. Set it to `false` to keep the runtime user from altering those
+  tables (it could also drop columns); the DDL then goes through admin
+  credentials or the DBA file. It does not cover `CREATE INDEX`, which needs
+  the `INDEX` privilege and would create the index in the runtime user's
+  schema: indexes always go through admin credentials or the DBA file.
+- `history_drop_unmanaged_indexes` (default `true`) drops, when the history
+  tables are reconciled, every index that is not the primary key, because
+  history tables carry only the primary key by design. Set it to `false` to
+  keep indexes a DBA adds on purpose.
+- Tables owned by the runtime user itself are left out of the grants and of
+  their checks: an owner already holds every privilege on its own tables, and
+  Oracle does not record a grant to oneself.
 - It creates or alters the history tables and grants them to the history role,
   with the same admin or runtime-connection rules as `EXECUTE`: statements that
   fail go to the pending file.
@@ -515,9 +568,9 @@ emitted, computed like this:
   credentials exist, the runtime one otherwise. The current history structure is
   read, and the file holds only the missing changes.
 - **Neither works or there are no credentials**: `history_baseline` states what to
-  assume. `EMPTY` (default) assumes history has no objects, so every table, key
-  and index is created. `SOURCE` assumes history holds the same objects as
-  source, so only the history-specific differences are emitted (for example the
+  assume. `EMPTY` (default) assumes history has no objects, so every table and
+  primary key is created. `SOURCE` assumes history holds the same tables and
+  primary keys as source, so only the history-specific differences are emitted (for example the
   `LDB_PROCESS_DATE` column and the matching primary key).
 
 Without admin credentials, `ldb-run` applies the history grants right after the

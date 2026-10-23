@@ -93,6 +93,8 @@ class AdministrationConfig:
     history_to_source_dblink_name: str
     source_role_name: str
     history_role_name: str
+    history_alter_grant: bool = True
+    history_drop_unmanaged_indexes: bool = True
 
 
 @dataclass(frozen=True)
@@ -218,6 +220,13 @@ class Config:
     ] = "SRC"
     source_role_name: Annotated[str, Help("Role name to create in the source environment")] = "LDB_SOURCE_ROLE"
     history_role_name: Annotated[str, Help("Role name to create in the history environment")] = "LDB_HISTORY_ROLE"
+    history_alter_grant: Annotated[
+        bool,
+        Help("Also grant ALTER on the history tables to the history role, so the runtime user can apply their DDL"),
+    ] = True
+    history_drop_unmanaged_indexes: Annotated[
+        bool, Help("Drop the history indexes other than the primary key when reconciling the history tables")
+    ] = True
 
     def __post_init__(self) -> None:
         normalized_mode = _normalize_mode(self.mode)
@@ -314,6 +323,8 @@ class Config:
             history_to_source_dblink_name=self.history_to_source_dblink_name,
             source_role_name=self.source_role_name,
             history_role_name=self.history_role_name,
+            history_alter_grant=self.history_alter_grant,
+            history_drop_unmanaged_indexes=self.history_drop_unmanaged_indexes,
         )
 
     @property

@@ -522,6 +522,7 @@ def _history_pk_replacement_script(
     desired_pk: tuple[str, ...] | None,
     existing_pk_column: str = "OLD_COL",
     extra_index: str | None = None,
+    drop_unmanaged_indexes: bool = True,
 ) -> list[str]:
     """Generate the structure script for a table whose existing PK is on existing_pk_column."""
 
@@ -559,7 +560,13 @@ def _history_pk_replacement_script(
     column = ColumnDefinition(name="ID", data_type="integer")
     monkeypatch.setattr(OracleEngine, "get_table_columns", lambda conn, owner, name: (["ID"], {"ID": column}))
     monkeypatch.setattr(OracleEngine, "_column_needs_update", lambda existing, desired: False)
-    table = TableDefinition(owner="OWNER", name="ITEMS", columns=(column,), primary_key=desired_pk)
+    table = TableDefinition(
+        owner="OWNER",
+        name="ITEMS",
+        columns=(column,),
+        primary_key=desired_pk,
+        drop_unmanaged_indexes=drop_unmanaged_indexes,
+    )
     return _structure_statements(DummyConnection(), table)
 
 
@@ -609,6 +616,19 @@ def test_unchanged_primary_key_index_is_kept_while_unrelated_indexes_are_dropped
 
     # Then: only the stray index is dropped; the PK and its index are untouched
     assert statements == ["DROP INDEX owner.stray_idx"]
+
+
+def test_unmanaged_indexes_are_kept_when_dropping_them_is_disabled(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — history_drop_unmanaged_indexes: false keeps
+    # the indexes that are not the primary key.
+    # Given: a matching PK and a stray index, with the drop disabled
+    # When: the structure script is generated
+    statements = _history_pk_replacement_script(
+        monkeypatch, ("ID",), existing_pk_column="ID", extra_index="STRAY_IDX", drop_unmanaged_indexes=False
+    )
+
+    # Then: nothing is emitted
+    assert statements == []
 
 
 @pytest.mark.parametrize(("admin_connection", "prefix"), [(False, "all"), (True, "dba")], ids=["runtime", "admin"])

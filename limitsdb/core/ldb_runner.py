@@ -163,7 +163,12 @@ def _collect_privilege_targets(
     return sorted(tables)
 
 
-_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
+# Least privilege: SOURCE rows are read and deleted; HISTORY rows are inserted (through the database link),
+# read and, by HISTORY_ILM, deleted. Nothing updates a configured table.
+_TABLE_PRIVILEGES: dict[str, tuple[str, ...]] = {
+    "SOURCE": ("SELECT", "DELETE"),
+    "HISTORY": ("SELECT", "INSERT", "DELETE"),
+}
 _SELECT_PRIVILEGES = ("SELECT",)
 
 # Tables that receive the same privileges: ``(privileges, tables)``
@@ -188,10 +193,16 @@ def _parse_extra_tables(
 
 
 def _collect_privilege_plan(
-    tables_conf_rows: list[IlmRule], env: Literal["SOURCE", "HISTORY"], engine: DatabaseEngine
+    tables_conf_rows: list[IlmRule],
+    env: Literal["SOURCE", "HISTORY"],
+    engine: DatabaseEngine,
+    alter: bool = False,
+    runtime_user: str | None = None,
 ) -> PrivilegePlan:
-    """Return the privileges the environment's role needs: all of them on the configured tables and SELECT
-    on the extra tables read by the predicates. In history, ``history_extra_select_tables`` falls back to
+    """Return the privileges the environment's role needs: ``_TABLE_PRIVILEGES`` on the configured tables and SELECT
+    on the extra tables read by the predicates. ``alter`` (``history_alter_grant``) adds ALTER on the configured
+    history tables. Tables owned by ``runtime_user`` need no grant (an owner holds every privilege on its own
+    objects, and a grant to oneself is not recorded) and are left out. In history, ``history_extra_select_tables`` falls back to
     ``extra_select_tables`` just as ``history_addtl_filter_expr`` falls back to ``additional_filter_expr``."""
     owner_key: Literal["source_owner", "history_owner"] = "source_owner" if env == "SOURCE" else "history_owner"
     configured = _collect_privilege_targets(tables_conf_rows, owner_key, engine)
@@ -203,13 +214,26 @@ def _collect_privilege_plan(
         if env == "HISTORY" and row.get("history_extra_select_tables") is not None:
             field, value = "history_extra_select_tables", row.get("history_extra_select_tables")
         extra.update(_parse_extra_tables(value, row[owner_key], engine, field, key))
+    if runtime_user:
+        owned = engine.get_identifier_str(runtime_user)
+        configured = [table for table in configured if table[0] != owned]
+        extra = {table for table in extra if table[0] != owned}
     plan: PrivilegePlan = []
     if configured:
-        plan.append((_TABLE_PRIVILEGES, configured))
+        plan.append((_TABLE_PRIVILEGES[env] + (("ALTER",) if alter and env == "HISTORY" else ()), configured))
     extra_only = sorted(extra - set(configured))
     if extra_only:
         plan.append((_SELECT_PRIVILEGES, extra_only))
     return plan
+
+
+def _privilege_plan(
+    config: Config, tables_conf_rows: list[IlmRule], env: Literal["SOURCE", "HISTORY"], engine: DatabaseEngine
+) -> PrivilegePlan:
+    """``_collect_privilege_plan`` for the environment's runtime user and the ``history_alter_grant`` setting."""
+    runtime_user = config.connections.source.username if env == "SOURCE" else config.connections.history.username
+    alter = env == "HISTORY" and config.administration.history_alter_grant
+    return _collect_privilege_plan(tables_conf_rows, env, engine, alter, runtime_user)
 
 
 def _runtime_owner(config: Config, rule: IlmRule) -> str:
@@ -353,8 +377,8 @@ def _validate_privileges(
     warnings, since PREPARE creates the history objects. Returns False when the validation must fail."""
     rules = [cond for cnf in tables_config.values() for cond in cnf["conds"]]
     targets = {
-        "SOURCE": _collect_privilege_plan(rules, "SOURCE", engine),
-        "HISTORY": _collect_privilege_plan(rules, "HISTORY", engine),
+        "SOURCE": _privilege_plan(config, rules, "SOURCE", engine),
+        "HISTORY": _privilege_plan(config, rules, "HISTORY", engine),
     }
     primary_env = "SOURCE" if config.execution.action == "SOURCE_ILM" else "HISTORY"
     ok = True
@@ -490,6 +514,7 @@ def _build_history_table_definition(
         name=table_name,
         columns=tuple(required_columns),
         primary_key=primary_key,
+        drop_unmanaged_indexes=config.administration.history_drop_unmanaged_indexes,
     )
 
 
@@ -560,8 +585,8 @@ def _ensure_history_tables(
         if not delta_statements:
             logger.info("History tables are up to date; no changes needed.")
             return
-        history_plan = _collect_privilege_plan(
-            [cond for _, table_cnf in table_defs_and_cnf for cond in table_cnf["conds"]], "HISTORY", engine
+        history_plan = _privilege_plan(
+            config, [cond for _, table_cnf in table_defs_and_cnf for cond in table_cnf["conds"]], "HISTORY", engine
         )
         _apply_history_delta_without_admin(config, engine, table_defs_and_cnf, history_plan, len(delta_statements))
         return
@@ -781,7 +806,7 @@ def _write_script_ddl_files(
     file holds the source grants, since the two databases are run by different users. The ILM
     script, which runs many times, goes to stdout and stays free of them.
     """
-    history_plan = _collect_privilege_plan(tables_conf_rows, "HISTORY", engine)
+    history_plan = _privilege_plan(config, tables_conf_rows, "HISTORY", engine)
 
     def script_history(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
         assert ddl_sink is not None
@@ -798,7 +823,7 @@ def _write_script_ddl_files(
         description="history table DDL and grants generated by ldb-run --mode SCRIPT.",
     )
     if config.execution.action == "SOURCE_ILM" and not source_grants_applied:
-        source_plan = _collect_privilege_plan(tables_conf_rows, "SOURCE", engine)
+        source_plan = _privilege_plan(config, tables_conf_rows, "SOURCE", engine)
 
         def script_source_grants(ddl_sink: DdlSink | None, ddl_failures: DdlFailures | None) -> None:
             assert ddl_sink is not None
@@ -1406,7 +1431,7 @@ def ldb_run(config: Config) -> None:
             raise SystemExit(_status_mode(config, engine))
         connection = engine.get_connection(config)
         tables_conf_rows = _load_offline_rows(config)
-        source_plan = _collect_privilege_plan(tables_conf_rows, "SOURCE", engine)
+        source_plan = _privilege_plan(config, tables_conf_rows, "SOURCE", engine)
         # The runtime user reads column metadata through these grants, so SCRIPT applies them too when it can
         source_grants_applied = False
         if (
@@ -1454,7 +1479,7 @@ def ldb_run(config: Config) -> None:
                 admin_connection = engine.get_connection(config, admin=True)
             # Without admin credentials the primary-key metadata is read over the runtime connection.
             _ensure_history_tables(config, engine, admin_connection or connection, tables_config)
-            history_plan = _collect_privilege_plan(tables_conf_rows, "HISTORY", engine)
+            history_plan = _privilege_plan(config, tables_conf_rows, "HISTORY", engine)
             if history_plan and _credentials_present(config, admin=True, env="HISTORY"):
                 history_admin_priv_conn = engine.get_connection(config, admin=True, env="HISTORY")
                 try:
