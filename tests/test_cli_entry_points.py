@@ -54,6 +54,18 @@ def test_argparser_requires_schema_and_rejects_unsupported_engine(monkeypatch: p
         parser.parse_args(["--schema", "s", "--db-engine", "postgres"])
 
 
+def test_status_mode_and_last_option_are_accepted_by_ldb_run(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM — --mode STATUS reports the executions; --last n selects how many (integer)
+    monkeypatch.delenv("LDB_SCHEMA", raising=False)
+    parser = ldb_params_config.build_argparser_from_config()
+
+    # When/Then: STATUS with --last parses; a non-integer count is refused
+    parsed = parser.parse_args(["--schema", "s", "--mode", "STATUS", "--last", "5"])
+    assert (parsed.mode, parsed.last) == ("STATUS", 5)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--schema", "s", "--mode", "STATUS", "--last", "many"])
+
+
 def test_schema_can_be_bootstrapped_from_environment_variable(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/configuration-contract.md — LDB_SCHEMA is the env var for schema;
     # when present, --schema is not required on the CLI
@@ -89,6 +101,9 @@ def test_ldb_impl_control_tables_have_correct_shape():
     assert ctl.primary_key == ("CTL_OWNER", "CTL_TABLE_NAME")
     assert next(c for c in ctl.columns if c.name == "CTL_ACTION").length == 11
     assert next(c for c in log.columns if c.name == "LOG_ACTION").length == 11
+    # And: STATUS can find the session of each table (engine-specific id); the log carries no run id (executions are grouped by time)
+    assert "CTL_DB_SESSION_ID" in {c.name for c in ctl.columns}
+    assert "LOG_RUN_ID" not in {c.name for c in log.columns}
 
 
 def test_ldb_impl_run_cli_creates_database_objects(monkeypatch: pytest.MonkeyPatch):

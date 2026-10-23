@@ -13,7 +13,56 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
 - **Dry-run anytime.** Generate the exact operations without executing them, to review and approve planned changes.
 - **Keeps secrets safe.** Database credentials are stored encrypted and transparently decrypted at runtime.
 - **Automates control DB objects creation.** Creates missing control schemas and DB objects.
-- **Automates history objects creation and updates.** Creates missing history tables and correct columns, contraints and indexes for ILM executions.
+- **Automates history objects creation and updates.** Creates missing history tables and keeps their columns and primary key in line with source for ILM executions. History tables carry no other index by design: the primary key is the only one (every extra index slows the ILM down, and history is not queried like production).
+
+### Design guarantees
+
+- **Built to run every day, unattended, next to the operational load.** ILM projects often fail because they
+  need a window without operational work, and ILM loses the competition for the database. Here the process is
+  meant to run daily from a scheduler, sharing the database with the operational workload, and to answer
+  with an exit code the scheduler can act on (`0` when everything finished, `1` otherwise), so it does not
+  depend on the discipline or the know-how of whoever would run it by hand. Two things make that work:
+  - Tables are read with full scans (`hint_expr` and `history_hint_expr` accept optimizer hints such as
+    `full(A)`), which reduces the chance of having to rebuild old snapshots while operational work changes
+    the table.
+  - Work is done in partial transactions, one per chunk (`chunk_size`), so progress is committed as it goes.
+    If a table fails (for example with a snapshot error) after making progress, the run picks it up again
+    automatically; see the next points.
+- **No data is lost in a move.** For each chunk, the insert into history and the delete from source run in one
+  transaction that commits only when both succeeded; a failure rolls the chunk back, so a row is never deleted
+  without having reached history. Tables with LOB columns move in a single statement under the same rule.
+- **No child is left without its parent.** Tables are processed children first: a referenced table starts only
+  after every table that references it has finished (`--mode PLAN` shows the order). A child row also moves
+  only when its own conditions and those of every referenced table are met, in source and in history.
+- **Rows never travel through the runner.** The runner sends a generated PL/SQL block and reads counters and
+  statuses back; the rows go from the source session to history through the database link. That keeps the
+  work close to the data, efficient, and the data off the machine running `ldb-run`.
+- **Parallel runs are controlled.** Up to `parallel_max` tables run at once, one database session each, and a
+  table waits for the tables it depends on. A lock per table (`LDB_RUN_LOCK`, plus the row of `LDB_CTL`) lets
+  only one runner work on a table; a second runner is refused before it starts and a worker that loses its
+  table stops. See [concurrency control](docs/concurrency-control.md).
+- **Every run is recorded and can be resumed.** `LDB_CTL` keeps the state of each table and `LDB_LOG` each
+  step and chunk, so an interrupted process can be resumed, by hand or by the runner:
+  - An `EXECUTE` of the same process date continues an incomplete one: finished tables stay finished and the
+    rows already moved are kept.
+  - Inside a run, a table that fails after making progress (it moved rows) is tried again from where it left
+    off. A table that fails without any progress is not retried: it is reported as an error and the run ends
+    with exit code 1, which avoids endless loops over a failure that repeating cannot fix.
+  - `--mode STATUS` shows what is running, finished or interrupted.
+- **Nothing happens by surprise.** `PREVIEW` runs the same logic without moving data and without marking the day as
+  processed; `SCRIPT` generates the SQL for a DBA to run; `VALIDATE` and `PLAN` are read-only.
+- **Least privilege.** The runtime users act through a role that receives only the grants they use on the
+  configured tables: `SELECT` and `DELETE` on source; `SELECT`, `INSERT` and `DELETE` on history (plus `ALTER`
+  with `history_alter_grant`, so new or wider columns are applied without admin credentials).
+- **Administrative connections are optional.** When administrative credentials are configured (`admin_source_*`,
+  `admin_history_*`), `ldb-impl` and `ldb-run` use them to apply what ILM needs to work: DDL of objects,
+  permissions and alterations of the history tables. ILM itself runs with the runtime users only.
+- **Without administrative connections, a DBA applies the DDL.** If you prefer not to configure them,
+  LimitsDb writes the DDL (bootstrap, grants, history objects) to files under `ddl_pending_dir` for a DBA to run
+  on their own; see [Without admin credentials](#without-admin-credentials).
+- **Credentials are encrypted.** Runtime and administrative passwords live in `secrets[.<PROFILE>].json` as
+  `enc:v1:aes256gcm:…` tokens (`ldb-crypt`), decrypted only in memory when connecting; see
+  [Secrets & Encryption](#secrets--encryption).
 
 ### Typical outcomes
 
@@ -303,7 +352,8 @@ ldb-run --schema <SCHEMA> [--profile <PROFILE>] --action SOURCE_ILM|HISTORY_ILM 
 Common overrides:
 
 ```
---mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE   # VALIDATE setup and privileges (read-only), PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run
+--mode VALIDATE|PREPARE|PLAN|PREVIEW|SCRIPT|EXECUTE|STATUS   # VALIDATE setup and privileges (read-only), PREPARE grants and objects, PLAN DAG, PREVIEW run without moving data, SCRIPT emit SQL, EXECUTE run, STATUS progress of the executions (read-only)
+--last <int>                                  # STATUS: how many of the most recent executions to report (default: 1)
 --chunk-size <int>                            # Rows per chunk when processing large tables
 --parallel-max <int>                          # Maximum number of tables processed in parallel
 --ddl-pending-dir <path>                      # Where failed history DDL is written for a DBA (default: ldb_ddl_pending)
@@ -323,7 +373,75 @@ ldb-run --schema billing --profile prod --action SOURCE_ILM --mode PREVIEW --log
 
 # Apply quick overrides without editing files
 ldb-run --schema billing --profile prod --action SOURCE_ILM --mode EXECUTE --set chunk_size=200000 --set parallel_max=8
+
+# Progress of the current execution, and of the last five
+ldb-run --schema billing --profile prod --mode STATUS
+ldb-run --schema billing --profile prod --mode STATUS --last 5
 ```
+
+### Execution progress with `--mode STATUS`
+
+`--mode STATUS` is read-only: it needs neither `--action` nor admin credentials, and it never runs ILM or
+changes anything. It connects with the SOURCE and the HISTORY runtime users and always reports both
+environments, because each database has its own control and log tables and runs its own workers. An
+environment whose credentials are missing or that cannot be reached is reported as not available; the exit
+code is 1 only when neither can be read. `--last n` reports the `n` most recent executions (default 1, the
+current or the latest one).
+
+An execution is one `ldb-run` invocation, identified in the report by its start time. Runs started with `--mode PREVIEW` are never shown.
+Each execution has one state:
+
+| State | Meaning |
+|---|---|
+| `RUNNING` | A table is being processed and its runner is alive. |
+| `OK` | Every table finished (`TEND`). A table refused because it was already processed for the date is not a failure. |
+| `ERRORS` | No table is running and at least one failed (`ERROR`). |
+| `PARTIAL` | No table is running or failed, but some did not finish: the run was interrupted, for example because its session ended. |
+
+Whether a runner is alive is verified by trying its table lock (`LDB_RUN_LOCK`) with `NOWAIT` and releasing it at
+once: if another session holds it, the run is active; if the lock is free, the run died and the table is
+`INTERRUPTED`. `SCRIPT` runs take no lock, so they are checked through `gv$session` instead.
+
+Every execution shows its rows processed, start and elapsed time, and each table its status and rows. For a
+table being processed, Oracle adds:
+
+- **Progress:** percentage and estimated time left of its long operation (`gv$session_longops`).
+- **Current wait:** the wait event of its session, only when it has been waiting 5 seconds or more.
+- **Time profile:** the wait events and CPU of the session in seconds, sorted from most to least, listed until
+  they cover 95% of the total time (`gv$session_event` and `gv$sess_time_model`).
+
+Each table line reads `OWNER.TABLE  status: TEND  rows processed: 126,038, started: … finished: … elapsed …`, with the
+action and process date from `LDB_CTL` on the next line (a running table has no `finished` and its elapsed time runs
+to the database clock). The `status` shows the last `LDB_CTL` status of a finished table (`TEND`, `ERROR`…), and a word instead when the
+table has no final status: `RUNNING` (its runner is alive), `INTERRUPTED` (it was left in progress and its runner is gone) or
+`ALREADY PROCESSED` (the run found it finished for the process date and did nothing).
+
+Each worker registers its session in `LDB_CTL.CTL_DB_SESSION_ID` (a single column whose format is the engine's; Oracle writes `instance.sid.audsid`, so RAC is covered) when
+it starts the table, so rerun `ldb-impl` after upgrading. The log has no run id: the executions are rebuilt from
+the `LDB_LOG` timestamps (a table's rows are split at each `TSTART`, and tables that start within 5 minutes of the
+previous one's last activity, without repeating a table, belong to the same execution), and the current state of
+each table comes from `LDB_CTL`. Executions that predate the upgrade are therefore reported too.
+
+Session statistics are an optional capability of the database engine: an engine that does not offer them (the
+`DatabaseEngine` defaults) still gets states, rows and times from the control tables, with no grants or scripts.
+
+These Oracle details need a user that can read the `gv$` views. `STATUS` first probes them with the runtime user. If
+some are unreadable and admin credentials for that environment are configured, the session details are read
+over the admin connection instead (the control tables are still read with the runtime user). If neither user can
+read them, `STATUS` skips whatever those views would have given (progress, current wait, wait profile), still
+reports states and rows, flags the table as `session not verified` (it then counts as running only if its
+control row was updated within the last 10 minutes), writes the missing grants to
+`status_<env>_monitoring_grants_<schema>_<timestamp>.sql` under `--ddl-pending-dir` (the directory the other
+generated scripts use) and tells you to run it in SQL*Plus as a DBA. The script contains, for example:
+
+```sql
+GRANT SELECT ON sys.gv_$session TO LDB_SOURCE_ROLE;
+GRANT SELECT ON sys.gv_$session_longops TO LDB_SOURCE_ROLE;
+GRANT SELECT ON sys.gv_$session_event TO LDB_SOURCE_ROLE;
+GRANT SELECT ON sys.gv_$sess_time_model TO LDB_SOURCE_ROLE;
+```
+
+`ldb-impl` does not grant these: they are SYS objects, outside the schema it manages.
 
 ### Admin credentials in ldb-run
 
@@ -336,12 +454,12 @@ queries; it skips only the data movement). Both operations are idempotent.
 A `PREVIEW` writes its own statuses in `ldb_ctl`, the `EXECUTE` ones prefixed with `P` (`PTSTART`, `PCSTART`,
 `PCEND`, `PLSTART`, `PLEND`, `PTEND`, `PERROR`), and finishes each table with `PTEND`, not `TEND`, so it never marks a
 table as processed for the day: an `EXECUTE` run afterwards (same day) still moves the data. A `PREVIEW` is refused
-(`ORA-20006`) over a table that has an `EXECUTE` status for the same process date. An `EXECUTE` continues an incomplete
+over a table that has an `EXECUTE` status for the same process date (`ORA-20006`; a table already finished with `TEND` is reported as refused and the run exits with code 1). An `EXECUTE` continues an incomplete
 `EXECUTE` of the same process date (finished tables stay finished and the rows already moved are kept); in any other case
 the table starts over and the abandoned run is closed in `ldb_log` as "Incomplete process closed by a later process".
 
 Only one `ldb-run` can work on a table at a time: the runner takes a lock per table in `LDB_RUN_LOCK` and a second runner
-stops with exit code 1 before starting anything. After upgrading, rerun `ldb-impl` so the new table and the supporting
+stops with exit code 1 before starting anything, logging which runner holds the table (run id, mode, host, pid and start); check it with `--mode STATUS`. While workers run, the runner keeps its lock session alive and checks it at least every 30 seconds. After upgrading, rerun `ldb-impl` so the new table and the supporting
 procedures (`check_save_status`, `check_referencing_tables`) are installed.
 
 The generated `SCRIPT` takes the mode from SQL*Plus and runs without the runner lock:
@@ -394,9 +512,10 @@ is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
   receive yet through the role, and warns. Once the grants are in place no file
   is written.
 - It checks, with the runtime connections alone, that the source and history
-  roles are enabled for the runtime users and give them `SELECT`, `INSERT`,
-  `UPDATE` and `DELETE` on every configured table. A role that is granted but
-  not a default role gives nothing.
+  roles are enabled for the runtime users and give them the least privileges
+  they use on every configured table: `SELECT` and `DELETE` on source;
+  `SELECT`, `INSERT` and `DELETE` on history. Nothing updates a configured
+  table. A role that is granted but not a default role gives nothing.
   The role must stay a default role of the runtime user (`ldb-run` warns
   when it is not); `GRANT role` makes it default unless the user was altered.
 - The default role names are `LDB_SOURCE_ROLE` and `LDB_HISTORY_ROLE`. When
@@ -404,6 +523,21 @@ is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
   database, those names collide; set `source_role_name` / `history_role_name`
   per schema to keep the roles apart. Reusing one role across schemas also
   works and is rarely a problem.
+- `history_alter_grant` (default `true`) also grants `ALTER` on the history
+  tables to the history role, so `ldb-run` can apply their DDL (new or widened
+  columns, constraints) with the runtime connection and no history admin
+  credentials. Set it to `false` to keep the runtime user from altering those
+  tables (it could also drop columns); the DDL then goes through admin
+  credentials or the DBA file. It does not cover `CREATE INDEX`, which needs
+  the `INDEX` privilege and would create the index in the runtime user's
+  schema: indexes always go through admin credentials or the DBA file.
+- `history_drop_unmanaged_indexes` (default `true`) drops, when the history
+  tables are reconciled, every index that is not the primary key, because
+  history tables carry only the primary key by design. Set it to `false` to
+  keep indexes a DBA adds on purpose.
+- Tables owned by the runtime user itself are left out of the grants and of
+  their checks: an owner already holds every privilege on its own tables, and
+  Oracle does not record a grant to oneself.
 - It creates or alters the history tables and grants them to the history role,
   with the same admin or runtime-connection rules as `EXECUTE`: statements that
   fail go to the pending file.
@@ -446,9 +580,9 @@ emitted, computed like this:
   credentials exist, the runtime one otherwise. The current history structure is
   read, and the file holds only the missing changes.
 - **Neither works or there are no credentials**: `history_baseline` states what to
-  assume. `EMPTY` (default) assumes history has no objects, so every table, key
-  and index is created. `SOURCE` assumes history holds the same objects as
-  source, so only the history-specific differences are emitted (for example the
+  assume. `EMPTY` (default) assumes history has no objects, so every table and
+  primary key is created. `SOURCE` assumes history holds the same tables and
+  primary keys as source, so only the history-specific differences are emitted (for example the
   `LDB_PROCESS_DATE` column and the matching primary key).
 
 Without admin credentials, `ldb-run` applies the history grants right after the
@@ -489,6 +623,7 @@ the same pending file as the failed DDL, so a DBA can run it.
 | ------------------------ | -------------------------- | ---------------------------- | ------------------------------------------------ |
 | `action`                 | `--action`                 | `LDB_ACTION`                 | `config[.<PROFILE>].yml: action`                   |
 | `mode`                   | `--mode`                   | `LDB_MODE`                   | `config[.<PROFILE>].yml: mode`                     |
+| `last`                   | `--last`                   | `LDB_LAST`                   | `config[.<PROFILE>].yml: last`                     |
 | `chunk_size`             | `--chunk-size`             | `LDB_CHUNK_SIZE`             | `config[.<PROFILE>].yml: chunk_size`               |
 | `use_added_columns`      | —                          | —                            | `config[.<PROFILE>].yml: use_added_columns`        |
 | `add_ldb_columns`        | —                          | —                            | `config[.<PROFILE>].yml: add_ldb_columns`          |
@@ -517,12 +652,13 @@ Builder-only flags (`--config-dir`, `--config-file`, `--set`) control how overla
 
 Each entry in `ilm[.<PROFILE>].yml` merges table-level attributes with one or more rule conditions defined under `conds`. When `conds` is omitted, LimitsDb assumes a single active rule so the table remains eligible for processing.
 
+- **Identifiers:** Parameters that hold a single identifier (`source_owner`, `history_owner`, `table_name`) and the entries of `referencing_tables`, `extra_select_tables` and `history_extra_select_tables` are the exact data dictionary names, with their case and no quotes: `Gl` and `GL` are different objects. The engine adds whatever quoting its SQL needs. Expressions (`purge_date_expr`, the filters, `join_expr`, `hint_expr`) are SQL text and follow the engine's own SQL rules, plus the `@` marks. Entries of a list are split on commas, dots and spaces, so a name containing one of them cannot be used there. `ilm.example.yml` describes these rules.
 - **Activation:** A condition runs only when `is_active: true`. Deactivating the sole condition for a table effectively removes that table from the run.
 - **Retention windows:** `retain_months_source` is required whenever `purge_date_expr` is present. `retain_months_history` extends the history window but also depends on defining the source retention. During `HISTORY_ILM` runs, the engine sums source and history months to determine the cut-off date.
 - **Date expressions:** `purge_date_expr` identifies the date column (or expression) that anchors retention. Prefix column references with `@` (for example, `"@DSP_DATE"`); the runner swaps the prefix for the proper table alias at execution time.
 - **Additional filters:** Add optional filters through `additional_filter_expr` (source runs) and `history_addtl_filter_expr` (history runs). Both accept the same `@column` syntax, and the history expression falls back to the source expression when omitted.
 - **Referencing tables:** Use `referencing_tables` to pull parent conditions into child tables. List entries as `<TABLE> <ALIAS>` (optionally `<OWNER>.<TABLE> <ALIAS>`) and supply matching `join_expr` fragments. The runner inherits the active conditions of each referenced table: the conditions of one table are alternatives (`or`), and a child row is purged only when its own conditions and those of every referenced table are met (`and` between tables). It rewrites the join fragments—`@` becomes `inner` joins by default or `left outer` joins when `source_orphan_purge: true` to find orphans.
-- **Join owners in history:** `join_expr` names each referenced table by its source owner. In `HISTORY_ILM` runs with `use_added_columns: false` the runner joins the history copy instead, replacing `<source_owner>.<table>` with `<history_owner>.<table>` for every table listed in `referencing_tables`. With `use_added_columns: true` history runs do not join.
+- **Join owners in history:** `join_expr` names each referenced table by its source owner. In `HISTORY_ILM` runs with `use_added_columns: false` the runner joins the history copy instead, replacing `<source_owner>.<table>` with `<history_owner>.<table>` for every table listed in `referencing_tables`. The owner is written with the engine's quoting rules, so a case-sensitive history owner keeps its quotes. With `use_added_columns: true` history runs do not join.
 - **Extra tables:** Filters may contain subqueries over tables that ILM does not manage. List them in `extra_select_tables` (read by `additional_filter_expr`, so source runs) and `history_extra_select_tables` (read by `history_addtl_filter_expr`) as comma-separated `[OWNER.]TABLE` entries; an entry without owner belongs to the environment's own owner. The environment's role gets `SELECT` on them wherever it gets the other table grants (`ldb-run`, `--mode PREPARE`, `--mode SCRIPT`) and the privilege checks include them. In history, `history_extra_select_tables` falls back to `extra_select_tables`, just as `history_addtl_filter_expr` falls back to `additional_filter_expr`. A table also managed by ILM keeps its full privileges. For tables that are not in the history database write the access in `history_addtl_filter_expr` yourself (for example `TABLE@SRC`, or `TABLE UNION ALL TABLE@SRC` in a subquery); LimitsDb does not rewrite subqueries. `SRC` is only the default name of the history-to-source database link; it can be overridden with `history_to_source_dblink_name` (and `source_to_history_dblink_name`, default `HIST`, for the other direction). The link connects as the source runtime user and uses the grants of its source role, so a table read as `TABLE@SRC` must also be listed in `extra_select_tables`.
 - **Historical predicate snapshot:** With `use_added_columns` enabled, every archived row preserves the values needed to reevaluate all its predicates in history, including values sourced from related tables. Distinct cut-off dates are stored in helper columns such as `ldb_date_<suffix>`. Predicates that share a date reuse the same helper column while retaining their own filters and retention windows. Other values sourced from related tables are materialized as `<column>_<table_alias>`.
 - **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to archive source rows whose referenced parent is absent. The source query uses `left outer` joins and treats the row as an orphan when any comma-separated check column is `NULL`. `referencing_tables`, `join_expr`, `orphan_check_column`, `use_added_columns: true`, and a positive historical retention are required. Orphans follow the table's normal source-to-history flow rather than being deleted directly. LimitsDb snapshots this state in `LDB_IS_ORPHAN` and stores a fallback date so `HISTORY_ILM` can apply the configured retention without accessing the missing parent.
@@ -549,7 +685,7 @@ Every key is commented; the default value and short help appear inline. Example:
 
 ```yaml
 # action: "SOURCE_ILM"  # ILM target: months_keep_history_max (SOURCE_ILM) or history (HISTORY_ILM)
-# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE
+# mode: "PREVIEW"       # VALIDATE | PREPARE | PLAN | PREVIEW | SCRIPT | EXECUTE | STATUS
 # chunk_size: 100000    # Rows per chunk when processing large tables
 # use_added_columns: True  # Populate derived columns in history tables
 # add_ldb_columns: True  # Add LimitsDb execution-date columns in history tables

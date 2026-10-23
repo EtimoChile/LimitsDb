@@ -18,15 +18,21 @@ from limitsdb.core.ldb_utils import get_effective_credentials, indent_lines, joi
 from limitsdb.db.ldb_engines import (
     ColumnDefinition,
     ColumnMetadata,
+    ControlEntry,
     DatabaseEngine,
     DatabaseLinkDefinition,
     DdlFailures,
     DdlSink,
     IndexMap,
+    LogEntry,
+    MonitoringAccess,
+    OperationProgress,
     RoleDefinition,
     SequenceDefinition,
+    SessionActivity,
     TableDefinition,
     UserDefinition,
+    WaitItem,
 )
 
 SUPPORTING_OBJECT_LIST = [
@@ -94,7 +100,8 @@ BEGIN
                 ctl_process_end,
                 ctl_rows_processed,
                 ctl_plsql,
-                ctl_run_id
+                ctl_run_id,
+                ctl_db_session_id
             )
             VALUES (
                 p_owner,
@@ -106,7 +113,9 @@ BEGIN
                 NULL,
                 0,
                 p_plsql,
-                p_run_id
+                p_run_id,
+                sys_context('USERENV', 'INSTANCE') || '.' || sys_context('USERENV', 'SID')
+                    || '.' || sys_context('USERENV', 'SESSIONID')
             );
             l_ctl_run_id := p_run_id;
         END IF;
@@ -227,6 +236,13 @@ BEGIN
                ctl_run_id         = CASE
                                         WHEN p_status IN ('TSTART', 'PTSTART') THEN p_run_id
                                         ELSE ctl_run_id
+                                    END,
+               -- The session that runs the table, for the STATUS mode (Oracle: instance.sid.audsid, RAC aware)
+               ctl_db_session_id  = CASE
+                                        WHEN p_status IN ('TSTART', 'PTSTART')
+                                            THEN sys_context('USERENV', 'INSTANCE') || '.' || sys_context('USERENV', 'SID')
+                                                 || '.' || sys_context('USERENV', 'SESSIONID')
+                                        ELSE ctl_db_session_id
                                     END
          WHERE ctl_owner = p_owner
            AND ctl_table_name = p_table_name;
@@ -334,6 +350,10 @@ class OracleEngine(DatabaseEngine):
         "QUERY REWRITE",
     )
     _REGULAR_IDENTIFIER = re.compile(r"[A-Z_#$][A-Z0-9_#$]*")  # only DD uppercase identifiers are unquoted
+    _QUALIFIED_TABLE = re.compile(
+        r'(?<![\w$#."])("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)\s*\.\s*("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)'
+        r'(?![\w$#"])'
+    )
     _PREFIXED_IDENTIFIER = re.compile(r'@("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)')
     _PRIVATE_DDL_MARK = re.compile(r"##(.*?)##")
 
@@ -349,6 +369,7 @@ class OracleEngine(DatabaseEngine):
         Returns:
             An active oracledb.Connection."""
         user, password, dsn = get_effective_credentials(config, admin=admin, env=env)
+        target = f"as {user} at {dsn}"
         if not admin:
             # The runtime user is created from its dictionary name, so the login must quote it the same way
             user = OracleEngine._format_identifier(user)
@@ -359,10 +380,10 @@ class OracleEngine(DatabaseEngine):
                 OracleEngine._admin_connections.add(id(connection))
             return cast(oracledb.Connection, connection)
         except Exception as exc:
-            logger.critical("Failed to connect to Oracle DB.", exc_info=True)
+            logger.critical("Failed to connect to Oracle DB %s.", target, exc_info=True)
             if OracleEngine._is_invalid_credentials(exc):
-                raise InvalidCredentialsError("Failed to connect to Oracle database") from exc
-            raise DatabaseConnectionError("Failed to connect to Oracle database") from exc
+                raise InvalidCredentialsError(f"Failed to connect to Oracle database {target}") from exc
+            raise DatabaseConnectionError(f"Failed to connect to Oracle database {target}") from exc
 
     @staticmethod
     def _is_invalid_credentials(exc: Exception) -> bool:
@@ -495,6 +516,21 @@ class OracleEngine(DatabaseEngine):
             return f"{qualifier}.{OracleEngine._format_identifier(replacement)}"
 
         return OracleEngine._PREFIXED_IDENTIFIER.sub(replace_identifier, expression)
+
+    @staticmethod
+    def rewrite_table_owners(expression: str, owners: Mapping[tuple[str, str], str]) -> str:
+        """Point ``owner.table`` references at another owner. Each name found in the SQL text is brought to its
+        dictionary form with ``get_identifier_str`` before it is looked up."""
+
+        def replace_owner(match: re.Match[str]) -> str:
+            owner_token, table_token = match.group(1), match.group(2)
+            source_owner = OracleEngine.get_identifier_str(owner_token)
+            new_owner = owners.get((source_owner, OracleEngine.get_identifier_str(table_token)))
+            if new_owner is None or new_owner == source_owner:
+                return match.group(0)
+            return f"{OracleEngine._format_identifier(new_owner)}.{table_token}"
+
+        return OracleEngine._QUALIFIED_TABLE.sub(replace_owner, expression)
 
     @staticmethod
     def get_column_type(column: ColumnDefinition) -> str:
@@ -807,6 +843,217 @@ end;"""
                 cursor.close()
 
     @staticmethod
+    def get_log_entries(conn: oracledb.Connection, max_rows: int) -> list[LogEntry]:
+        """Returns the most recent ``max_rows`` rows of ``ldb_log``, newest first (the PL/SQL of a run is not read).
+        Args:
+            conn: Active Oracle connection.
+            max_rows: Number of rows to read at most."""
+        cursor: oracledb.Cursor | None = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT log_id, log_owner, log_table_name, log_action, log_process_date, log_status,
+                          log_process_start, log_process_end, log_message, NVL(log_rows_processed, 0)
+                     FROM ldb_log ORDER BY log_id DESC FETCH FIRST :max_rows ROWS ONLY""",
+                {"max_rows": max_rows},
+            )
+            return [
+                LogEntry(
+                    log_id=int(row[0]),
+                    owner=row[1],
+                    table_name=row[2],
+                    action=row[3],
+                    process_date=row[4],
+                    status=row[5],
+                    started=row[6],
+                    ended=row[7],
+                    message=row[8],
+                    rows=int(row[9]),
+                )
+                for row in cursor.fetchall()
+            ]
+        except oracledb.DatabaseError as exc:
+            raise ExecutionError(f"Could not read the execution log: {exc}") from exc
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def get_control_entries(conn: oracledb.Connection) -> list[ControlEntry]:
+        """Returns every row of ``ldb_ctl``: the current state of each table.
+        Args:
+            conn: Active Oracle connection."""
+        cursor: oracledb.Cursor | None = None
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT ctl_owner, ctl_table_name, ctl_status, ctl_run_id, ctl_action, ctl_process_date,
+                          ctl_process_start, ctl_process_end, NVL(ctl_rows_processed, 0),
+                          GREATEST(ctl_process_start, NVL(ctl_process_end, ctl_process_start)), ctl_db_session_id
+                     FROM ldb_ctl"""
+            )
+            return [
+                ControlEntry(
+                    owner=row[0],
+                    table_name=row[1],
+                    status=row[2],
+                    run_id=row[3],
+                    action=row[4],
+                    process_date=row[5],
+                    started=row[6],
+                    ended=row[7],
+                    rows=int(row[8]),
+                    last_activity=row[9],
+                    session=row[10],
+                )
+                for row in cursor.fetchall()
+            ]
+        except oracledb.DatabaseError as exc:
+            detail = exc.args[0] if exc.args else None
+            hint = (
+                " (the control tables predate the STATUS mode: rerun ldb-impl)"
+                if getattr(detail, "code", None) == 904
+                else ""
+            )
+            raise ExecutionError(f"Could not read the control table: {exc}{hint}") from exc
+        finally:
+            if cursor:
+                cursor.close()
+
+    @staticmethod
+    def is_run_alive(conn: oracledb.Connection, owner: str, table_name: str, run_id: str) -> bool | None:
+        """Tells whether the runner that owns a table is alive by trying its mutex without waiting.
+        The lock is released at once, so the probe never holds anything.
+        Args:
+            conn: Active Oracle connection (its own connection: it is rolled back).
+            owner: Schema owner of the table.
+            table_name: Table name.
+            run_id: Run recorded for the table.
+        Returns:
+            True when another session holds the table's runner lock, False when nobody does, and None when
+            the run has no runner lock (a generated SCRIPT, whose id starts with S) or it cannot be probed."""
+        if run_id.startswith("S"):
+            return None
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """SELECT 1 FROM ldb_run_lock
+                WHERE rl_owner = :1 AND rl_table_name = :2 AND rl_kind = 'L' FOR UPDATE NOWAIT""",
+                [owner, table_name],
+            )
+            found = cursor.fetchone() is not None
+            return False if found else None
+        except oracledb.DatabaseError as exc:
+            detail = exc.args[0] if exc.args else None
+            return True if getattr(detail, "code", None) == 54 else None
+        finally:
+            cursor.close()
+            conn.rollback()
+
+    # Views probed by the STATUS mode; a grant is on the SYS wrapper of the GV$ view
+    _MONITORING_VIEWS: ClassVar[tuple[str, ...]] = (
+        "gv$session",
+        "gv$session_longops",
+        "gv$session_event",
+        "gv$sess_time_model",
+    )
+
+    @staticmethod
+    def check_monitoring_access(conn: oracledb.Connection, grantee: str) -> MonitoringAccess:
+        """Probes the session-monitoring views with the connection's own privileges.
+        Args:
+            conn: Active Oracle connection.
+            grantee: User or role named in the grant hints."""
+        readable: dict[str, bool] = {}
+        for view in OracleEngine._MONITORING_VIEWS:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(f"SELECT 1 FROM {view} WHERE 1 = 0")
+                readable[view] = True
+            except oracledb.DatabaseError:
+                readable[view] = False
+            finally:
+                cursor.close()
+        hints = tuple(
+            f"GRANT SELECT ON sys.{view.replace('$', '_$')} TO {grantee}" for view, ok in readable.items() if not ok
+        )
+        return MonitoringAccess(
+            session=readable["gv$session"],
+            progress=readable["gv$session"] and readable["gv$session_longops"],
+            waits=readable["gv$session_event"] and readable["gv$sess_time_model"],
+            grants=hints,
+        )
+
+    @staticmethod
+    def get_session_activity(
+        conn: oracledb.Connection, session: str, access: MonitoringAccess, min_wait_seconds: float
+    ) -> SessionActivity:
+        """Reads the liveness, long-operation progress, current wait and wait profile of a session.
+        Only what ``access`` allows is read; the rest comes back empty (``alive`` None without session access).
+        Args:
+            conn: Active Oracle connection.
+            session: Session id registered by the run (``instance.sid.audsid``).
+            access: Result of ``check_monitoring_access``.
+            min_wait_seconds: A current wait shorter than this is not reported."""
+        alive: bool | None = None
+        try:
+            inst_id, sid, audsid = (int(part) for part in session.split("."))
+        except ValueError:  # not an id this engine wrote: nothing to look up
+            return SessionActivity(alive=None, current_wait=None, progress=None, waits=())
+        current: WaitItem | None = None
+        progress: OperationProgress | None = None
+        waits: list[WaitItem] = []
+        cursor = conn.cursor()
+        try:
+            if access.session:
+                cursor.execute(
+                    """SELECT serial#, state, event, seconds_in_wait, wait_class FROM gv$session
+                    WHERE inst_id = :inst AND sid = :sid AND audsid = :aud""",
+                    {"inst": inst_id, "sid": sid, "aud": audsid},
+                )
+                row = cursor.fetchone()
+                alive = row is not None
+                if row is not None:
+                    serial, state, event, seconds, wait_class = row
+                    if state == "WAITING" and wait_class != "Idle" and float(seconds or 0) >= min_wait_seconds:
+                        current = WaitItem(event, float(seconds))
+                    if access.progress:
+                        cursor.execute(
+                            """SELECT sofar, totalwork, time_remaining, opname, target FROM gv$session_longops
+                            WHERE inst_id = :inst AND sid = :sid AND serial# = :ser AND totalwork > 0
+                              AND sofar < totalwork ORDER BY last_update_time DESC FETCH FIRST 1 ROW ONLY""",
+                            {"inst": inst_id, "sid": sid, "ser": serial},
+                        )
+                        longop = cursor.fetchone()
+                        if longop is not None:
+                            sofar, totalwork, remaining, opname, target = longop
+                            progress = OperationProgress(
+                                percent=100.0 * float(sofar) / float(totalwork),
+                                remaining_seconds=float(remaining) if remaining is not None else None,
+                                description=" ".join(part for part in (opname, target) if part) or None,
+                            )
+            if access.waits and alive is not False:
+                cursor.execute(
+                    """SELECT event, time_waited_micro / 1e6 FROM gv$session_event
+                    WHERE inst_id = :inst AND sid = :sid AND wait_class <> 'Idle' AND time_waited_micro > 0""",
+                    {"inst": inst_id, "sid": sid},
+                )
+                waits = [WaitItem(event, float(seconds)) for event, seconds in cursor.fetchall()]
+                cursor.execute(
+                    """SELECT value / 1e6 FROM gv$sess_time_model
+                    WHERE inst_id = :inst AND sid = :sid AND stat_name = 'DB CPU'""",
+                    {"inst": inst_id, "sid": sid},
+                )
+                cpu = cursor.fetchone()
+                if cpu is not None and cpu[0]:
+                    waits.append(WaitItem("CPU", float(cpu[0])))
+        except oracledb.DatabaseError as exc:
+            raise ExecutionError(f"Could not read the session activity: {exc}") from exc
+        finally:
+            cursor.close()
+        return SessionActivity(alive=alive, current_wait=current, progress=progress, waits=tuple(waits))
+
+    @staticmethod
     def get_resumed_rows(conn: oracledb.Connection, owner: str, table_name: str, process_date: str) -> int:
         """Returns the rows kept when an EXECUTE continues an incomplete EXECUTE of the same process date.
         Args:
@@ -893,9 +1140,9 @@ end;"""
                                               AND rl_kind = :kind)""",
                             {"owner": owner, "table_name": table_name, "kind": kind},
                         )
+                        key_conn.commit()  # one anchor per transaction: a lost race must not undo the others
                     except oracledb.IntegrityError:
                         key_conn.rollback()  # another runner inserted the same anchor first
-            key_conn.commit()
         finally:
             key_cursor.close()
         lock_cursor = lock_conn.cursor()
@@ -907,12 +1154,16 @@ end;"""
                         WHERE rl_owner = :1 AND rl_table_name = :2 AND rl_kind = 'L' FOR UPDATE NOWAIT""",
                         [owner, table_name],
                     )
+                    if lock_cursor.fetchone() is None:
+                        lock_conn.rollback()
+                        raise ExecutionError(f"The lock anchor of {owner}.{table_name} is missing; nothing was started")
                 except oracledb.DatabaseError as exc:
                     lock_conn.rollback()
                     detail = exc.args[0] if exc.args else None
                     if getattr(detail, "code", None) == 54:
+                        holder = OracleEngine._lock_holder(key_conn, owner, table_name)
                         raise RunnerBusyError(
-                            f"Another runner is processing {owner}.{table_name}; nothing was started"
+                            f"Another runner is processing {owner}.{table_name}{holder}; nothing was started"
                         ) from exc
                     raise ExecutionError(f"Failed to lock {owner}.{table_name} for this run") from exc
         finally:
@@ -929,6 +1180,28 @@ end;"""
             key_conn.commit()
         finally:
             key_cursor.close()
+
+    @staticmethod
+    def _lock_holder(key_conn: oracledb.Connection, owner: str, table_name: str) -> str:
+        """Describes the runner published in the key row of a table (`` (run …, mode …, host …, pid …, since …)``);
+        empty when it cannot be read, since it only enriches the busy message."""
+        cursor = key_conn.cursor()
+        try:
+            cursor.execute(
+                """SELECT rl_run_id, rl_mode, rl_host, rl_pid, rl_start FROM ldb_run_lock
+                WHERE rl_owner = :1 AND rl_table_name = :2 AND rl_kind = 'K'""",
+                [owner, table_name],
+            )
+            row = cursor.fetchone()
+        except oracledb.DatabaseError:
+            return ""
+        finally:
+            cursor.close()
+        if row is None or row[0] is None:
+            return ""
+        run_id, mode, host, pid, start = row
+        since = f", since {start:%Y-%m-%d %H:%M:%S}" if start is not None else ""
+        return f" (runner {run_id}, {mode}, host {host}, pid {pid}{since})"
 
     @staticmethod
     def check_run_locks(lock_conn: oracledb.Connection) -> None:
@@ -1333,7 +1606,7 @@ end;"""
         if effective_pk_index:
             expected_indexes.add(effective_pk_index)
         for index_name in list(effective_indexes.keys()):
-            if index_name not in expected_indexes:
+            if table.drop_unmanaged_indexes and index_name not in expected_indexes:
                 fmttd_iname = OracleEngine._format_identifier(index_name)
                 logger.info("Unmanaged index %s on %s.%s will be dropped", fmttd_iname, fmttd_owner, fmttd_table_name)
                 statements.append(f"DROP INDEX {fmttd_owner}.{fmttd_iname}")
@@ -1831,6 +2104,10 @@ end;"""
         return f"{col_name} {col_type}{default_clause}{nullable_clause}"
 
     # format / expressions helpers
+    @staticmethod
+    def format_identifier(name: str) -> str:
+        return OracleEngine._format_identifier(name)
+
     @staticmethod
     def _format_identifier(name: str | None) -> str:
         """Formats an Oracle identifier, quoting if necessary.

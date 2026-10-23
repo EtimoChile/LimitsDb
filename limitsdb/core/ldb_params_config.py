@@ -22,12 +22,12 @@ from limitsdb.core.ldb_utils import resolve_schema_file  # markers for Annotated
 
 logger = get_logger("params_config")
 
-VALID_MODES: tuple[str, ...] = ("VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE")
+VALID_MODES: tuple[str, ...] = ("VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "STATUS")
 MODES_REQUIRING_CONNECTIONS: set[str] = {"VALIDATE", "PREPARE", "PREVIEW", "SCRIPT", "EXECUTE"}
 FILE_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"use_added_columns", "add_ldb_columns"})
 
 IlmAction = Literal["SOURCE_ILM", "HISTORY_ILM"]
-RuntimeMode = Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"]
+RuntimeMode = Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "STATUS"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 HistoryBaseline = Literal["EMPTY", "SOURCE"]
 DatabaseEngineName = Literal["oracle"]
@@ -52,6 +52,7 @@ class ExecutionConfig:
     log_level: LogLevel
     ddl_pending_dir: str
     history_baseline: HistoryBaseline
+    last: int = 1
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,8 @@ class AdministrationConfig:
     history_to_source_dblink_name: str
     source_role_name: str
     history_role_name: str
+    history_alter_grant: bool = True
+    history_drop_unmanaged_indexes: bool = True
 
 
 @dataclass(frozen=True)
@@ -116,14 +119,15 @@ class Config:
         Env("LDB_ACTION"),
     ] = "SOURCE_ILM"
     mode: Annotated[
-        Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE"],
+        Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "STATUS"],
         Help(
             "Runtime mode: VALIDATE config/credentials, "
             "PREPARE apply grants and DDL without running ILM, "
             "PLAN dependency order, "
             "PREVIEW run without moving data (DDL and grants are applied), "
             "SCRIPT generate SQL scripts (grants are applied and DDL is script-generated), "
-            "EXECUTE run ILM applying changes (DDL and grants are applied)"
+            "EXECUTE run ILM applying changes (DDL and grants are applied), "
+            "STATUS report the progress of the current and the last --last executions (read-only, SOURCE and HISTORY)"
         ),
         Cli("--mode"),
         Env("LDB_MODE"),
@@ -131,6 +135,9 @@ class Config:
     chunk_size: Annotated[
         int, Help("Rows per chunk when processing large tables"), Cli("--chunk-size"), Env("LDB_CHUNK_SIZE")
     ] = 100000
+    last: Annotated[
+        int, Help("STATUS mode: number of most recent executions to report"), Cli("--last"), Env("LDB_LAST")
+    ] = 1
     use_added_columns: Annotated[bool, Help("Populate derived columns in history tables")] = True
     add_ldb_columns: Annotated[bool, Help("Add LimitsDb execution-date columns in history tables")] = True
     generate_script: Annotated[bool, Help("Generate SQL script without executing (auto-enabled in SCRIPT mode)")] = (
@@ -213,12 +220,21 @@ class Config:
     ] = "SRC"
     source_role_name: Annotated[str, Help("Role name to create in the source environment")] = "LDB_SOURCE_ROLE"
     history_role_name: Annotated[str, Help("Role name to create in the history environment")] = "LDB_HISTORY_ROLE"
+    history_alter_grant: Annotated[
+        bool,
+        Help("Also grant ALTER on the history tables to the history role, so the runtime user can apply their DDL"),
+    ] = True
+    history_drop_unmanaged_indexes: Annotated[
+        bool, Help("Drop the history indexes other than the primary key when reconciling the history tables")
+    ] = True
 
     def __post_init__(self) -> None:
         normalized_mode = _normalize_mode(self.mode)
         if normalized_mode not in VALID_MODES:
             raise ValidationError(f"invalid mode: {self.mode}")
         self.mode = normalized_mode  # type: ignore[assignment]
+        if self.last < 1:
+            raise ValidationError(f"last must be at least 1: {self.last}")
         if self.mode == "SCRIPT":
             self.generate_script = True
         requires_connections = self.mode in MODES_REQUIRING_CONNECTIONS
@@ -269,6 +285,7 @@ class Config:
             log_level=self.log_level,
             ddl_pending_dir=self.ddl_pending_dir,
             history_baseline=self.history_baseline,
+            last=self.last,
         )
 
     @property
@@ -306,6 +323,8 @@ class Config:
             history_to_source_dblink_name=self.history_to_source_dblink_name,
             source_role_name=self.source_role_name,
             history_role_name=self.history_role_name,
+            history_alter_grant=self.history_alter_grant,
+            history_drop_unmanaged_indexes=self.history_drop_unmanaged_indexes,
         )
 
     @property

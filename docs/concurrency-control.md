@@ -53,8 +53,8 @@ before the next chunk boundary.
 
 | Object | Status | Purpose |
 |---|---|---|
-| `ldb_ctl` | [current] | One row per `(ctl_owner, ctl_table_name)`: `ctl_status`, `ctl_process_date`, `ctl_process_start`, `ctl_process_end`, `ctl_rows_processed`, `ctl_action`, `ctl_plsql`. Its row lock means "a worker is working on this table". |
-| `ldb_log` | [current] | Append-only history: one entry per status change and per chunk. |
+| `ldb_ctl` | [current] | One row per `(ctl_owner, ctl_table_name)`: `ctl_status`, `ctl_process_date`, `ctl_process_start`, `ctl_process_end`, `ctl_rows_processed`, `ctl_action`, `ctl_plsql`, `ctl_run_id`, and `ctl_db_session_id` (the session of the worker, composed by the engine, written at `TSTART`; Oracle: `instance.sid.audsid`). Its row lock means "a worker is working on this table". |
+| `ldb_log` | [current] | Append-only history: one entry per status change and per chunk (it has no run id: STATUS groups it by time). |
 | Lock row per table | [current] | One row per `(owner, table_name)` that a runner locks for its whole run. It is never updated. |
 | Key row per table | [current] | `run_id` (uuid of the runner invocation), mode, host, pid, start time. Written by the runner after it holds the lock; read by workers. |
 
@@ -75,6 +75,15 @@ different schemas or table sets may run at the same time.
 
 PREVIEW and EXECUTE statuses are disjoint [current]. Terminal statuses are `TEND`
 and `PTEND`.
+
+`ldb-run --mode STATUS` only reads these tables. It rebuilds the executions from `ldb_log` by time (a table's rows are split at each `TSTART`; table runs that
+start within 5 minutes of the previous one's last activity, and do not repeat a table, form one execution),
+ignores every run that wrote a PREVIEW status, and takes a table as being processed while its `ldb_ctl` row still carries
+the run's id in `TSTART`, `CSTART`, `CEND`, `LSTART` or `LEND` and the registered session (instance +
+`sid` + `audsid` in `gv$session`) is alive. Liveness is proven first by trying the table's `'L'` row of
+`ldb_run_lock` with `FOR UPDATE NOWAIT` and rolling back immediately: `ORA-00054` means a live runner, an obtained
+lock means none (the probe holds nothing). SCRIPT runs and tables without that row fall back to `gv$session`, then to the heartbeat. A table whose last log row is `ERROR` with the `-20003`
+message ("already processed") is neither an error nor unfinished work.
 
 ### 3.2 Error codes
 
@@ -97,7 +106,8 @@ The runner acquires the right to process its tables before launching any worker.
 
 1. **Anchor rows.** For each configured table, `INSERT … WHERE NOT EXISTS` into
    the lock table with its own commit; `ORA-00001` from a concurrent insert is
-   ignored. Existing rows, locked or not, are never modified here.
+   ignored. Existing rows, locked or not, are never modified here. Each anchor is its own transaction, so a lost race
+   never undoes the anchors committed before it; a lock query that returns no row stops the run.
 2. **Mutex.** On a dedicated connection that never commits, rolls back or runs
    DDL while the run lasts, for each table in sorted order:
    `SELECT … FOR UPDATE NOWAIT` on its lock row. `ORA-00054` means another runner
