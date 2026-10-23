@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-23
+
 - Fix three review findings of the runner: the lock connection is checked every 30 s of elapsed time even while workers keep finishing (before, only an idle wait checked it); `--mode PREVIEW` over a table already `TEND` for the date is refused with exit code 1 instead of exiting 0; and the visibility of every configured table is resolved before references are walked, so a child listed before its invisible parent is skipped too.
 - **Breaking:** single-identifier parameters of the ILM configuration (`source_owner`, `history_owner`, `table_name`, and the entries of `referencing_tables`, `extra_select_tables` and `history_extra_select_tables`) are now the exact data dictionary names, taken literally. Before, the runner passed them through the engine's identifier normalization (Oracle: upper case, or quotes removed), so a mixed-case name needed quotes in the file. Remove any quotes: write `Gl`, not `'"Gl"'`. Expressions still follow the engine's SQL rules.
 - Fix the runner start losing lock anchors: each `LDB_RUN_LOCK` anchor is committed on its own, so a lost insert race no longer rolls back the anchors created before it, and a lock query that returns no row stops the run instead of leaving a table unprotected.
