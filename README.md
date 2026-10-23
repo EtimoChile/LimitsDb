@@ -17,6 +17,17 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
 
 ### Design guarantees
 
+- **Built to run every day, unattended, next to the operational load.** ILM projects often fail because they
+  need a window without operational work, and ILM loses the competition for the database. Here the process is
+  meant to run daily from a scheduler, sharing the database with the operational workload, and to answer
+  with an exit code the scheduler can act on (`0` when everything finished, `1` otherwise), so it does not
+  depend on the discipline or the know-how of whoever would run it by hand. Two things make that work:
+  - Tables are read with full scans (`hint_expr` and `history_hint_expr` accept optimizer hints such as
+    `full(A)`), which reduces the chance of having to rebuild old snapshots while operational work changes
+    the table.
+  - Work is done in partial transactions, one per chunk (`chunk_size`), so progress is committed as it goes.
+    If a table fails (for example with a snapshot error) after making progress, the run picks it up again
+    automatically; see the next points.
 - **No data is lost in a move.** For each chunk, the insert into history and the delete from source run in one
   transaction that commits only when both succeeded; a failure rolls the chunk back, so a row is never deleted
   without having reached history. Tables with LOB columns move in a single statement under the same rule.
@@ -40,8 +51,9 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
   - `--mode STATUS` shows what is running, finished or interrupted.
 - **Nothing happens by surprise.** `PREVIEW` runs the same logic without moving data and without marking the day as
   processed; `SCRIPT` generates the SQL for a DBA to run; `VALIDATE` and `PLAN` are read-only.
-- **Least privilege.** The runtime users act through a role that receives only the grants on the configured
-  tables.
+- **Least privilege.** The runtime users act through a role that receives only the grants they use on the
+  configured tables: `SELECT` and `DELETE` on source; `SELECT`, `INSERT` and `DELETE` on history (plus `ALTER`
+  with `history_alter_grant`, so new or wider columns are applied without admin credentials).
 - **Administrative connections are optional.** When administrative credentials are configured (`admin_source_*`,
   `admin_history_*`), `ldb-impl` and `ldb-run` use them to apply what ILM needs to work: DDL of objects,
   permissions and alterations of the history tables. ILM itself runs with the runtime users only.
