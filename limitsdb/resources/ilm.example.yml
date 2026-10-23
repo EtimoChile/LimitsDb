@@ -1,33 +1,47 @@
-# For example: source_owner, history_owner, table_name, source_orphan_purge
-# All database identifiers in keys values must follow database identifier rules:
-# unquoted → normalized by engine; quoted → case-sensitive and may include special characters.
-# Example: "@inv_dsp_date" → normalized name, '@"inv_dsp_date"' → exact name
-# For examples:
-# source_owner: GL # unquoted, normalized by engine
-# source_owner: '"Gl" # quoted, exact name: Gl
-# source_owner: "\"gL*\"" # quoted, exact name with special characters: gL*
-# source_additional_filter_expr: "@\"INV_STATUS\"='D'" # quoted column name, normalized by engine
+# ILM configuration file
+#
+# Identifier rules
+#
+# 1. Parameters that hold a single identifier (source_owner, history_owner, table_name, ...): write the name
+#    exactly as it is in the data dictionary, including its case. The value is taken literally (no quotes, no
+#    normalization); the engine adds whatever quoting the generated SQL needs:
+#      source_owner: GL            # names GL
+#      source_owner: Gl            # names Gl (a different object than GL)
+#
+# 2. Expressions (purge_date_expr, *_filter_expr, join_expr, hint_expr, ...): write them as the engine would
+#    receive them inside a SQL statement, with its own quoting and case rules. The only addition is the @ mark,
+#    which stands for the place the runner substitutes:
+#      - "@name" in a column expression is replaced by the qualified column (A.name); "@"name"" names a quoted
+#        column. Column names in expressions follow the engine SQL rules.
+#      - "@" at the start of a join is replaced by the join type (inner / left outer).
+#    Table references inside expressions (GL.INV_HEAD in join_expr) are plain SQL text under the engine's rules;
+#    with use_added_columns: false, HISTORY_ILM rewrites the owner of the tables listed in referencing_tables to
+#    their history_owner.
+#
+# 3. Lists (referencing_tables, extra_select_tables, history_extra_select_tables, orphan_check_column): entries are
+#    separated by commas and each identifier follows rule 1 (exact dictionary name). Entries are split on commas,
+#    dots and spaces, so a name that contains one of them cannot be used in a list.
 #
 # Example ILM configuration file
 #
 # tables: # List of tables to apply ILM
-#   - source_owner: GL # Source owner of table (must match DD case)
-#     history_owner: GLHST # History owner of table (must match DD case)
-#     table_name: INV_HEAD # Table name. In this example this is a parent table (must match DD case)
+#   - source_owner: GL # Source owner of table (exact dictionary name)
+#     history_owner: GLHST # History owner of table
+#     table_name: INV_HEAD # Table name. In this example this is a parent table
 #     frecuency: D # Frecuency of ILM application. Expected values (D: dayly, M: monthly)
 #     hint_expr: full(A) # Hint to apply in selection from source table. Use table alias A for source table and B, C, etc for referenced tables
 #     conds: # List of conditions for selection
 #       - is_active: true # if condition is active
 #         retain_months_source: 3 # Months to retain in source
 #         retain_months_history: 11 # Months to retain in history after transfered to history env. If 0 or undefined there will be no history, only source deletion
-#         purge_date_expr: "@INV_DSP_DATE" # Date expression for ILM to compare with. Columns must be marked @ preffix. (must follow DB identifier rules)
-#         source_additional_filter_expr: "@INV_STATUS='D'" # Optional additional expression to apply in ILM selection.  (must follow DB identifier rules)
+#         purge_date_expr: "@INV_DSP_DATE" # Date expression for ILM to compare with. Columns must be marked @ preffix. (SQL text: engine identifier rules)
+#         source_additional_filter_expr: "@INV_STATUS='D'" # Optional additional expression to apply in ILM selection.  (SQL text: engine identifier rules)
 #       - is_active: true # Another condition. Can differ in any definition of other conditions of same table
 #         retain_months_source: 1
 #         retain_months_history: 0
 #         purge_date_expr: "@INVD_DATE"
 #         source_additional_filter_expr: "@INV_STATUS='A'"
-#         history_addtl_filter_expr: "@INV_STATUS='H'" # Optional history-only expression. Falls back to additional_filter_expr when omitted.  (must follow DB identifier rules)
+#         history_addtl_filter_expr: "@INV_STATUS='H'" # Optional history-only expression. Falls back to additional_filter_expr when omitted.  (SQL text: engine identifier rules)
 #         extra_select_tables: "GL.INV_STATUSES" # Optional tables read by additional_filter_expr subqueries: [OWNER.]TABLE list that receives SELECT grants only
 #         history_extra_select_tables: "INV_STATUSES" # Optional history-only list for history_addtl_filter_expr. Falls back to extra_select_tables when omitted
 #   - source_owner: GL # Child table definition. Inherit conditions from parent tables. Can have multiple parent tables
@@ -37,7 +51,7 @@
 #     hint_expr: full(A) full(B) use_hash(A, B)
 #     history_hint_expr: full(A)
 #     referencing_tables: INV_HEAD B # List of parent tables
-#     join_expr: "@ JOIN GL.INV_HEAD B ON B.INV_ID=A.INV_ID" # Join expression to link to parent table (must follow DB identifier rules). With use_added_columns: false, HISTORY_ILM joins the history copy: GL.INV_HEAD becomes <history_owner>.INV_HEAD
+#     join_expr: "@ JOIN GL.INV_HEAD B ON B.INV_ID=A.INV_ID" # Join expression to link to parent table (SQL text: engine identifier rules). With use_added_columns: false, HISTORY_ILM joins the history copy: GL.INV_HEAD becomes <history_owner>.INV_HEAD
 #     source_orphan_purge: true # Archive source rows whose referenced parent is absent; requires use_added_columns: true
 #     orphan_check_column: B.INV_ID # Parent column checked with IS NULL after the left outer join
 #     # conds:

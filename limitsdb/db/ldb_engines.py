@@ -651,6 +651,31 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def rewrite_table_owners(expression: str, owners: Mapping[tuple[str, str], str]) -> str:
+        """Point the ``<owner>.<table>`` references of an expression at another owner, using engine identifier rules.
+
+        Args:
+            expression: SQL fragment (for example a join) that names tables by owner.
+            owners: Mapping from a normalized (owner, table) pair, as ``get_identifier_str`` returns it, to the
+                normalized owner that must replace the one in the expression.
+        Returns:
+            The expression with each matching reference rendered with the new owner, quoted when the engine
+            needs it; the table token and everything else are left as written."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def format_identifier(name: str) -> str:
+        """Render a data dictionary name as an identifier of a SQL statement, using engine identifier rules.
+
+        Args:
+            name: The identifier exactly as the data dictionary has it.
+        Returns:
+            The text to write in SQL, quoted when the engine needs it to reach that exact name."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def get_identifier_str(identifier: str) -> str:
         """Returns the identifier string required to query dictionary views.
         Args:

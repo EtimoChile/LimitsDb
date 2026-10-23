@@ -106,7 +106,8 @@ The runner acquires the right to process its tables before launching any worker.
 
 1. **Anchor rows.** For each configured table, `INSERT … WHERE NOT EXISTS` into
    the lock table with its own commit; `ORA-00001` from a concurrent insert is
-   ignored. Existing rows, locked or not, are never modified here.
+   ignored. Existing rows, locked or not, are never modified here. Each anchor is its own transaction, so a lost race
+   never undoes the anchors committed before it; a lock query that returns no row stops the run.
 2. **Mutex.** On a dedicated connection that never commits, rolls back or runs
    DDL while the run lasts, for each table in sorted order:
    `SELECT … FOR UPDATE NOWAIT` on its lock row. `ORA-00054` means another runner

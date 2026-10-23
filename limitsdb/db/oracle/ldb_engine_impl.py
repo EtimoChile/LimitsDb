@@ -350,6 +350,10 @@ class OracleEngine(DatabaseEngine):
         "QUERY REWRITE",
     )
     _REGULAR_IDENTIFIER = re.compile(r"[A-Z_#$][A-Z0-9_#$]*")  # only DD uppercase identifiers are unquoted
+    _QUALIFIED_TABLE = re.compile(
+        r'(?<![\w$#."])("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)\s*\.\s*("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)'
+        r'(?![\w$#"])'
+    )
     _PREFIXED_IDENTIFIER = re.compile(r'@("(?:""|[^"])*"|[A-Za-z_#$][A-Za-z0-9_#$]*)')
     _PRIVATE_DDL_MARK = re.compile(r"##(.*?)##")
 
@@ -512,6 +516,21 @@ class OracleEngine(DatabaseEngine):
             return f"{qualifier}.{OracleEngine._format_identifier(replacement)}"
 
         return OracleEngine._PREFIXED_IDENTIFIER.sub(replace_identifier, expression)
+
+    @staticmethod
+    def rewrite_table_owners(expression: str, owners: Mapping[tuple[str, str], str]) -> str:
+        """Point ``owner.table`` references at another owner. Each name found in the SQL text is brought to its
+        dictionary form with ``get_identifier_str`` before it is looked up."""
+
+        def replace_owner(match: re.Match[str]) -> str:
+            owner_token, table_token = match.group(1), match.group(2)
+            source_owner = OracleEngine.get_identifier_str(owner_token)
+            new_owner = owners.get((source_owner, OracleEngine.get_identifier_str(table_token)))
+            if new_owner is None or new_owner == source_owner:
+                return match.group(0)
+            return f"{OracleEngine._format_identifier(new_owner)}.{table_token}"
+
+        return OracleEngine._QUALIFIED_TABLE.sub(replace_owner, expression)
 
     @staticmethod
     def get_column_type(column: ColumnDefinition) -> str:
@@ -1121,9 +1140,9 @@ end;"""
                                               AND rl_kind = :kind)""",
                             {"owner": owner, "table_name": table_name, "kind": kind},
                         )
+                        key_conn.commit()  # one anchor per transaction: a lost race must not undo the others
                     except oracledb.IntegrityError:
                         key_conn.rollback()  # another runner inserted the same anchor first
-            key_conn.commit()
         finally:
             key_cursor.close()
         lock_cursor = lock_conn.cursor()
@@ -1135,6 +1154,9 @@ end;"""
                         WHERE rl_owner = :1 AND rl_table_name = :2 AND rl_kind = 'L' FOR UPDATE NOWAIT""",
                         [owner, table_name],
                     )
+                    if lock_cursor.fetchone() is None:
+                        lock_conn.rollback()
+                        raise ExecutionError(f"The lock anchor of {owner}.{table_name} is missing; nothing was started")
                 except oracledb.DatabaseError as exc:
                     lock_conn.rollback()
                     detail = exc.args[0] if exc.args else None
@@ -2082,6 +2104,10 @@ end;"""
         return f"{col_name} {col_type}{default_clause}{nullable_clause}"
 
     # format / expressions helpers
+    @staticmethod
+    def format_identifier(name: str) -> str:
+        return OracleEngine._format_identifier(name)
+
     @staticmethod
     def _format_identifier(name: str | None) -> str:
         """Formats an Oracle identifier, quoting if necessary.

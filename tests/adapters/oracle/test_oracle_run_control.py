@@ -50,7 +50,7 @@ def test_runner_locks_tables_in_sorted_order_then_publishes_its_keys():
     # are taken NOWAIT in a fixed order on the lock connection, and only then are the keys published
     # Given: two connections writing to one log, tables given out of order
     log: list = []
-    lock_conn, key_conn = _Conn("lock", log=log), _Conn("key", log=log)
+    lock_conn, key_conn = _Conn("lock", row=(1,), log=log), _Conn("key", log=log)
 
     # When: the runner acquires its locks
     OracleEngine.acquire_run_locks(
@@ -80,7 +80,9 @@ def test_a_table_held_by_another_runner_raises_runner_busy_and_leaves_nothing_lo
     # Given: the second table cannot be locked
     log: list = []
     key_conn = _Conn("key", log=log)
-    lock_conn = _Conn("lock", log=log, fail_on=lambda sql, params: params == ["A", "T2"], failure=_busy_error())
+    lock_conn = _Conn(
+        "lock", row=(1,), log=log, fail_on=lambda sql, params: params == ["A", "T2"], failure=_busy_error()
+    )
 
     # When/Then: the run is refused with RunnerBusyError naming the table
     with pytest.raises(RunnerBusyError, match=r"A.T2"):
@@ -116,6 +118,58 @@ def test_the_busy_message_names_the_runner_that_holds_the_table():
             42,
         )
     assert "(runner run-9, EXECUTE, host otherhost, pid 77, since 2026-10-22 15:31:05)" in str(caught.value)
+
+
+def test_a_lost_anchor_race_does_not_undo_the_other_anchors():
+    # Spec: docs/concurrency-control.md > Layer 1 — each anchor is committed on its own, so the IntegrityError of
+    # a race on one table rolls back only that insert and never the anchors created before it
+    # Given: the insert of the second table's 'L' anchor loses a race
+    log: list = []
+    lost = oracledb.IntegrityError(type("E", (), {"code": 1, "message": "ORA-00001"})())
+    key_conn = _Conn(
+        "key",
+        log=log,
+        fail_on=lambda sql, params: (
+            sql.lstrip().startswith("INSERT") and params["table_name"] == "T2" and params["kind"] == "L"
+        ),
+        failure=lost,
+    )
+
+    # When: the runner acquires its locks
+    OracleEngine.acquire_run_locks(
+        _Conn("lock", row=(1,), log=log),  # type: ignore[arg-type]
+        key_conn,  # type: ignore[arg-type]
+        [("A", "T1"), ("A", "T2")],
+        "run-1",
+        "EXECUTE",
+        "host",
+        42,
+    )
+
+    # Then: T1's anchors were committed before T2's insert failed, and only the failed insert was rolled back
+    insert_t2 = next(
+        i for i, (who, sql, params) in enumerate(log) if who == "key" and params and params.get("table_name") == "T2"
+    )
+    assert ("key", "COMMIT", None) in log[:insert_t2]
+    assert [entry for entry in log if entry == ("key", "ROLLBACK", None)] == [("key", "ROLLBACK", None)]
+
+
+def test_a_missing_anchor_stops_the_run_instead_of_running_unprotected():
+    # Spec: docs/concurrency-control.md > Layer 1 — a lock that selects no row protects nothing
+    # Given: the lock query returns no row
+    lock_conn = _Conn("lock", row=None)
+
+    # When/Then: the run is refused
+    with pytest.raises(ExecutionError, match=r"A.T1"):
+        OracleEngine.acquire_run_locks(
+            lock_conn,  # type: ignore[arg-type]
+            _Conn("key"),  # type: ignore[arg-type]
+            [("A", "T1")],
+            "run-1",
+            "EXECUTE",
+            "host",
+            42,
+        )
 
 
 def test_any_other_lock_failure_is_an_execution_error_not_a_busy_runner():
@@ -255,7 +309,7 @@ def test_anchor_insert_binds_each_value_once_by_name():
     # Given/When: the runner acquires locks for one table
     log: list = []
     OracleEngine.acquire_run_locks(
-        _Conn("lock", log=log),  # type: ignore[arg-type]
+        _Conn("lock", row=(1,), log=log),  # type: ignore[arg-type]
         _Conn("key", log=log),  # type: ignore[arg-type]
         [("A", "T1")],
         "run-1",
@@ -276,3 +330,25 @@ def test_plsql_text_is_never_mixed_with_the_clob_column_in_nvl():
     proc = " ".join(CHECK_SAVE_STATUS_PROC.split())
     assert "NVL(p_plsql, ctl_plsql)" not in proc
     assert "IF p_plsql IS NOT NULL THEN UPDATE ldb_ctl SET ctl_plsql = p_plsql" in proc
+
+
+@pytest.mark.parametrize(
+    ("expression", "owners", "expected"),
+    [
+        # unquoted references match by upper case and keep the table as written
+        ("@ JOIN gl . parent p ON p.id = a.pid", {("GL", "PARENT"): "HIST"}, "@ JOIN hist.parent p ON p.id = a.pid"),
+        # a quoted source name matches exactly
+        ('@ JOIN "Gl"."Parent" p ON 1=1', {("Gl", "Parent"): "HIST"}, '@ JOIN hist."Parent" p ON 1=1'),
+        ('@ JOIN GL."Parent" p ON 1=1', {("GL", "PARENT"): "HIST"}, '@ JOIN GL."Parent" p ON 1=1'),
+        # the owner is rendered like every other generated identifier: DD upper case unquoted, anything else quoted
+        ("@ JOIN GL.PARENT p ON 1=1", {("GL", "PARENT"): "hist"}, '@ JOIN "hist".PARENT p ON 1=1'),
+        # other schemas, aliases and longer names are left alone
+        ("@ JOIN OTHER.PARENT p ON p.GL = 1", {("GL", "PARENT"): "HIST"}, "@ JOIN OTHER.PARENT p ON p.GL = 1"),
+        ("@ JOIN GL.PARENT_X p ON 1=1", {("GL", "PARENT"): "HIST"}, "@ JOIN GL.PARENT_X p ON 1=1"),
+        # a reference that already points at the owner is not touched
+        ("@ JOIN HIST.PARENT p ON 1=1", {("HIST", "PARENT"): "HIST"}, "@ JOIN HIST.PARENT p ON 1=1"),
+    ],
+)
+def test_table_owners_are_rewritten_with_oracle_identifier_rules(expression, owners, expected):
+    # Spec: DEC-039 — history joins read the history owner; quoting and case follow the engine, not the core
+    assert OracleEngine.rewrite_table_owners(expression, owners) == expected

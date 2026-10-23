@@ -1,7 +1,7 @@
 import logging
 import os
-import re
 import socket
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
@@ -159,12 +159,7 @@ def _compute_plan_layers(graph: dict[tuple[str, str], set[tuple[str, str]]]) -> 
 def _collect_privilege_targets(
     tables_conf_rows: list[IlmRule], owner_key: Literal["source_owner", "history_owner"], engine: DatabaseEngine
 ) -> list[tuple[str, str]]:
-    tables: set[tuple[str, str]] = set(
-        [
-            (engine.get_identifier_str(r[owner_key]), engine.get_identifier_str(r["table_name"]))
-            for r in tables_conf_rows
-        ]
-    )
+    tables: set[tuple[str, str]] = set([(r[owner_key], r["table_name"]) for r in tables_conf_rows])
     return sorted(tables)
 
 
@@ -188,7 +183,7 @@ def _parse_extra_tables(
         if len(parts) > 2 or not all(parts) or " " in entry:
             raise ValueError(f"Invalid {field} entry '{entry}' for {key}: expected [OWNER.]TABLE")
         owner, table_name = (default_owner, parts[0]) if len(parts) == 1 else (parts[0], parts[1])
-        tables.append((engine.get_identifier_str(owner), engine.get_identifier_str(table_name)))
+        tables.append((owner, table_name))
     return tables
 
 
@@ -222,20 +217,11 @@ def _runtime_owner(config: Config, rule: IlmRule) -> str:
     return rule["source_owner"] if config.execution.action == "SOURCE_ILM" else rule["history_owner"]
 
 
-def _to_history_owners(join_expr: str, history_owners: Mapping[tuple[str, str], str]) -> str:
-    """Point each ``<source owner>.<table>`` of the join at the history copy of the referenced table."""
-    for (source_owner, table_name), history_owner in history_owners.items():
-        if source_owner == history_owner:
-            continue
-        flags = 0 if source_owner.startswith('"') or table_name.startswith('"') else re.IGNORECASE
-        pattern = rf"(?<![\w$#.]){re.escape(source_owner)}\s*\.\s*{re.escape(table_name)}(?![\w$#])"
-        replacement = f"{history_owner}.{table_name}"
-        join_expr = re.sub(pattern, lambda _, text=replacement: text, join_expr, flags=flags)
-    return join_expr
-
-
 def _runtime_join_expression(
-    config: Config, rule: IlmRule, history_owners: Mapping[tuple[str, str], str] | None = None
+    config: Config,
+    rule: IlmRule,
+    engine: DatabaseEngine,
+    history_owners: Mapping[tuple[str, str], str] | None = None,
 ) -> str:
     """Render the joins of the runtime environment, avoiding them when history predicates use stored derived columns.
 
@@ -245,7 +231,7 @@ def _runtime_join_expression(
     if not join_expr or (config.execution.action == "HISTORY_ILM" and config.execution.use_added_columns):
         return ""
     if config.execution.action == "HISTORY_ILM" and history_owners:
-        join_expr = _to_history_owners(join_expr, history_owners)
+        join_expr = engine.rewrite_table_owners(join_expr, history_owners)
     join_type = "left outer" if rule["source_orphan_purge"] == "Y" else "inner"
     return join_expr.replace("@", join_type)
 
@@ -1059,6 +1045,7 @@ def _run_table_pool(
         initargs=(config.execution.log_level,),
     ) as executor:
         process_launched = False
+        last_lock_check = time.monotonic()
         while True:
             # While there is space in the pool, try to launch new processes
             while len(processes) < config.execution.parallel_max:
@@ -1082,9 +1069,14 @@ def _run_table_pool(
             logger.debug(f"Active processes: {len(processes)}")
             if processes:
                 # Wait for some process to finish; while none does, check that the locks are still held
-                done, _ = wait(processes, timeout=_LOCK_PING_SECONDS, return_when=FIRST_COMPLETED)
-                if not done:
+                # The ping also keeps the lock session alive, so it must happen at least every _LOCK_PING_SECONDS:
+                # wait only for what is left of the interval, whether or not workers keep finishing
+                remaining = max(0.0, _LOCK_PING_SECONDS - (time.monotonic() - last_lock_check))
+                done, _ = wait(processes, timeout=remaining, return_when=FIRST_COMPLETED)
+                if time.monotonic() - last_lock_check >= _LOCK_PING_SECONDS:
                     engine.check_run_locks(lock_conn)
+                    last_lock_check = time.monotonic()
+                if not done:
                     continue
                 for completed_future in [future for future in processes if future in done]:
                     owner, table_name = process_targets[completed_future]
@@ -1115,9 +1107,17 @@ def _run_table_pool(
             else:
                 break
     if config.execution.mode == "PREVIEW":
+        # A TEND read from the database is an EXECUTE of the same date: PREVIEW is refused over it, not completed
+        for (owner, table_name), cnf in tables_config.items():
+            if not cnf["skip"] and cnf["conds"][0]["ctl_status"] == Status.TABLE_END:
+                logger.error(
+                    "%s.%s was already processed by an EXECUTE for process date %s; PREVIEW is refused.",
+                    owner,
+                    table_name,
+                    process_date,
+                )
         all_done = all(
-            cnf["skip"] or cnf["conds"][0]["ctl_status"] in (Status.TABLE_END, Status.TABLE_PREVIEW_END)
-            for cnf in tables_config.values()
+            cnf["skip"] or cnf["conds"][0]["ctl_status"] == Status.TABLE_PREVIEW_END for cnf in tables_config.values()
         )
     else:
         all_done = engine.all_status_tend(connection, tables_config, process_date)
@@ -1143,9 +1143,6 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     is_source_mode = config.execution.action == "SOURCE_ILM"
     ldb_process_date_expr, ldb_insert_date_expr = engine.get_ldb_columns_expressions()
     for ldb_cnf_row in ldb_conf_rows:
-        ldb_cnf_row["source_owner"] = engine.get_identifier_str(ldb_cnf_row["source_owner"])
-        ldb_cnf_row["table_name"] = engine.get_identifier_str(ldb_cnf_row["table_name"])
-        ldb_cnf_row["history_owner"] = engine.get_identifier_str(ldb_cnf_row["history_owner"])
         key = (ldb_cnf_row["source_owner"], ldb_cnf_row["table_name"])
         if key not in tables_config:
             tables_config[key] = {"conds": [], "referencing_tables": []}
@@ -1161,8 +1158,6 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 else:
                     ref_owner = ldb_cnf_row["source_owner"]
                 ref_table, alias = ref_table.split(" ")
-                ref_owner = engine.get_identifier_str(ref_owner)
-                ref_table = engine.get_identifier_str(ref_table)
                 ref_key = (ref_owner, ref_table)
                 if ref_key not in tables_config:
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in ldb_conf_rows")
@@ -1179,13 +1174,11 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     # Collect each table's active conditions along with inherited referencing-table conditions.
     # Track every expression needed to build the WHERE clause for the combined predicate across all contributing conditions.
     # Persist the resulting predicate in cond_expr so later stages can reuse it.
+    # Resolve the visibility of every table first: a child can precede its parent in the configuration.
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
         _validate_orphan_configuration(config, cnd0, key)
         runtime_owner = _runtime_owner(config, cnd0)
-        inherited_references = cnd0["referencing_tables"]
-        added_conds = [("A", cond) for cond in table_cnf["conds"]]
-        orphan_history_date_predicates: list[str] = []
         table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(
             connection, runtime_owner, cnd0["table_name"]
         )
@@ -1197,6 +1190,13 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 cnd0["table_name"],
             )
             table_cnf["skip"] = True
+    for key, table_cnf in tables_config.items():
+        cnd0 = table_cnf["conds"][0]
+        runtime_owner = _runtime_owner(config, cnd0)
+        inherited_references = cnd0["referencing_tables"]
+        added_conds = [("A", cond) for cond in table_cnf["conds"]]
+        orphan_history_date_predicates: list[str] = []
+        if table_cnf.get("skip"):
             continue
         history_owners: dict[tuple[str, str], str] = {}
         if inherited_references:
@@ -1207,8 +1207,6 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 else:
                     ref_owner, ref_table_name = cnd0["source_owner"], ref_table
                 ref_table_name, alias = ref_table_name.split(" ")
-                ref_owner = engine.get_identifier_str(ref_owner)
-                ref_table_name = engine.get_identifier_str(ref_table_name)
                 if (ref_owner, ref_table_name) not in tables_config:
                     raise ValueError(f"Table {ref_owner}.{ref_table} not found in ldb_conf_rows")
                 if tables_config[(ref_owner, ref_table_name)].get("columns_metadata") == {}:
@@ -1374,9 +1372,9 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                 }
             )
         _, cnf_table_name = key
-        join_expr = _runtime_join_expression(config, cnd0, history_owners)
+        join_expr = _runtime_join_expression(config, cnd0, engine, history_owners)
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
-        base_from = f"from {runtime_owner.lower()}.{cnf_table_name.lower()} A"
+        base_from = f"from {engine.format_identifier(runtime_owner)}.{engine.format_identifier(cnf_table_name)} A"
         join_clause = f"\n   {join_expr}" if join_expr else ""
         where_clause = f"\nwhere {where_expr}" if where_expr else ""
         table_cnf["query_expr"] = base_from + join_clause + where_clause

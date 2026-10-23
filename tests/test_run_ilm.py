@@ -586,6 +586,8 @@ class _MinimalEngine:
     def get_identifier_str(value):
         return str(value).upper()
 
+    format_identifier = staticmethod(OracleEngine.format_identifier)
+
     @staticmethod
     def get_status(connection, process_date):
         return []
@@ -710,6 +712,7 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest
 
     class DummyEngine:
         get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+        format_identifier = staticmethod(OracleEngine.format_identifier)
         get_date_condition = staticmethod(OracleEngine.get_date_condition)
         get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
         rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
@@ -789,9 +792,11 @@ class _JoinEngine:
     """Engine double for process_tables_cnf: two tables whose queries are returned as the SQL block."""
 
     get_identifier_str = staticmethod(OracleEngine.get_identifier_str)
+    format_identifier = staticmethod(OracleEngine.format_identifier)
     get_date_condition = staticmethod(OracleEngine.get_date_condition)
     get_identifiers_from_expression = staticmethod(OracleEngine.get_identifiers_from_expression)
     rewrite_expression_identifiers = staticmethod(OracleEngine.rewrite_expression_identifiers)
+    rewrite_table_owners = staticmethod(OracleEngine.rewrite_table_owners)
     get_fallback_expression = staticmethod(OracleEngine.get_fallback_expression)
 
     @staticmethod
@@ -874,8 +879,8 @@ def test_history_join_reads_the_history_copy_of_the_referenced_table(monkeypatch
     query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID", use_added_columns=False)
 
     # Then: the join reads GLH.PARENT, and the source owner does not appear
-    assert "inner JOIN GLH.PARENT B" in query
-    assert "GL.PARENT" not in query.replace("GLH.PARENT", "")
+    assert "inner JOIN glh.PARENT B" in query
+    assert "GL.PARENT" not in query.replace("glh.PARENT", "")
 
 
 def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_referenced_table(
@@ -889,9 +894,148 @@ def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_re
     # When: the history query is planned without added columns
     query = _join_query(monkeypatch, "HISTORY_ILM", join_expr, use_added_columns=False)
 
-    # Then: the referenced table is rewritten and the longer name is untouched
-    assert "JOIN GLH.PARENT B" in query
+    # Then: the referenced table is rewritten (its token as written) and the longer name is untouched
+    assert "JOIN glh.parent B" in query
     assert "GL.PARENT_X.Y" in query
+
+
+def test_config_identifiers_are_the_exact_dictionary_names(monkeypatch: pytest.MonkeyPatch):
+    # Spec: ilm.example.yml > Identifier rules — single-identifier parameters hold the name exactly as the data
+    # dictionary has it; only the SQL text of expressions follows the engine's SQL identifier rules
+    # Given: objects whose dictionary names are mixed case, written in the config exactly like that, and a join
+    # written as SQL needs it (quoted)
+    rules = _join_rules('@ JOIN "Gl"."Parent" B ON B.ID=A.PARENT_ID')
+    for rule, table in zip(rules, ("Parent", "Child"), strict=True):
+        rule.update(source_owner="Gl", history_owner="Glh", table_name=table)
+    rules[1]["referencing_tables"] = "Gl.Parent B"
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rules)
+    config = Config(
+        schema="s",
+        action="HISTORY_ILM",
+        mode="SCRIPT",
+        use_added_columns=False,
+        source_dsn="dsn",
+        source_username="user",
+        source_password="password",
+        history_dsn="dsn",
+        history_username="user",
+        history_password="password",
+    )
+
+    # When: the configuration is processed
+    tables = ldb_runner.process_tables_cnf(object(), config, _JoinEngine(), "20261007")
+
+    # Then: the tables are keyed by the names as written, and the
+    # history join renders the history owner like any generated SQL identifier
+    assert ("Gl", "Child") in tables
+    assert 'JOIN "Glh"."Parent" B' in tables[("Gl", "Child")]["query_expr"]
+    # and the FROM clause (the runtime owner, here history) follows the same rules instead of being lower-cased
+    assert tables[("Gl", "Child")]["query_expr"].startswith('from "Glh"."Child" A')
+
+
+@pytest.mark.parametrize("env, owner_key", [("SOURCE", "source_owner"), ("HISTORY", "history_owner")])
+def test_privilege_targets_are_the_exact_dictionary_names(env: str, owner_key: str):
+    # Spec: ilm.example.yml > Identifier rules — single-identifier parameters hold the exact dictionary name
+    # Given: a rule whose owner and table have mixed-case dictionary names
+    rule = {"source_owner": "Gl", "history_owner": "Glh", "table_name": "Parent"}
+
+    # When: the privileges of the environment are planned
+    plan = ldb_runner._collect_privilege_plan([rule], env, OracleEngine)  # type: ignore[arg-type]
+
+    # Then: the grant target is the name as written, not upper-cased
+    expected_owner = rule[owner_key]
+    assert plan[0][1] == [(expected_owner, "Parent")]
+
+
+def test_extra_select_tables_are_the_exact_dictionary_names():
+    # Spec: ilm.example.yml > Identifier rules — list entries are exact dictionary names; a table without owner
+    # belongs to the rule's owner
+    # Given: a rule with extra tables, one without owner, in mixed case
+    rule = {
+        "source_owner": "Gl",
+        "history_owner": "Glh",
+        "table_name": "Parent",
+        "extra_select_tables": "Dim, Ref.Codes",
+    }
+
+    # When: the SOURCE privileges are planned
+    plan = ldb_runner._collect_privilege_plan([rule], "SOURCE", OracleEngine)  # type: ignore[arg-type]
+
+    # Then: the extra tables keep their case and the default owner is the configured one
+    assert plan[1] == (("SELECT",), [("Gl", "Dim"), ("Ref", "Codes")])
+
+
+def test_history_extra_select_tables_are_the_exact_dictionary_names():
+    # Spec: ilm.example.yml > Identifier rules — history_extra_select_tables overrides extra_select_tables in HISTORY
+    # Given: a rule whose history list is mixed case
+    rule = {
+        "source_owner": "Gl",
+        "history_owner": "Glh",
+        "table_name": "Parent",
+        "extra_select_tables": "Dim",
+        "history_extra_select_tables": "Dim_H",
+    }
+
+    # When: the HISTORY privileges are planned
+    plan = ldb_runner._collect_privilege_plan([rule], "HISTORY", OracleEngine)  # type: ignore[arg-type]
+
+    # Then: the history list is used, with the case as written and the history owner as default
+    assert plan[1] == (("SELECT",), [("Glh", "Dim_H")])
+
+
+def test_extra_select_tables_cannot_hold_quoted_names_with_separators():
+    # Spec: ilm.example.yml > Identifier rules (lists) — entries are split on commas and dots before any quote
+    # is considered
+    # Given: an entry whose quoted table name contains a dot
+    rule = {"source_owner": "GL", "table_name": "PARENT", "extra_select_tables": 'GL."A.B"'}
+
+    # When / Then: the list is rejected as malformed
+    with pytest.raises(ValueError, match="expected"):
+        ldb_runner._collect_privilege_plan([rule], "SOURCE", OracleEngine)  # type: ignore[arg-type,list-item]
+
+
+@pytest.mark.parametrize("referencing", ["Gl.Missing B", "Gl.Parent"])
+def test_referencing_tables_must_name_configured_tables_with_a_alias(referencing: str):
+    # Spec: README > ILM Rule Semantics > Referencing tables — each entry is [OWNER.]TABLE ALIAS of a configured
+    # table
+    # Given: a child pointing to an unconfigured table, or with no alias
+    rows = [
+        {"source_owner": "Gl", "table_name": "Parent", "referencing_tables": ""},
+        {"source_owner": "Gl", "table_name": "Child", "referencing_tables": referencing},
+    ]
+
+    # When / Then: the dependency graph is refused
+    with pytest.raises(ValueError):
+        ldb_runner._build_dependency_graph(rows)  # type: ignore[arg-type]
+
+
+def test_dependency_graph_matches_referenced_tables_case_sensitively():
+    # Spec: ilm.example.yml > Identifier rules — names are exact, so Gl.Parent and GL.PARENT are different tables
+    # Given: a child that references the table with another case than the configured one
+    rows = [
+        {"source_owner": "Gl", "table_name": "Parent", "referencing_tables": ""},
+        {"source_owner": "Gl", "table_name": "Child", "referencing_tables": "GL.PARENT P"},
+    ]
+
+    # When / Then: the reference is not found
+    with pytest.raises(ValueError, match="not present"):
+        ldb_runner._build_dependency_graph(rows)  # type: ignore[arg-type]
+
+
+def test_dependency_graph_orders_mixed_case_tables():
+    # Spec: README > Run ILM > --mode PLAN — referencing (child) tables are planned before the tables they
+    # reference
+    # Given: mixed-case names written identically in the table and in its reference
+    rows = [
+        {"source_owner": "Gl", "table_name": "Parent", "referencing_tables": ""},
+        {"source_owner": "Gl", "table_name": "Child", "referencing_tables": "Gl.Parent P"},
+    ]
+
+    # When: the layers are computed
+    layers = ldb_runner._compute_plan_layers(ldb_runner._build_dependency_graph(rows))  # type: ignore[arg-type]
+
+    # Then: the child layer comes first
+    assert layers == [[("Gl", "Child")], [("Gl", "Parent")]]
 
 
 def test_source_join_keeps_the_source_owner(monkeypatch: pytest.MonkeyPatch):
@@ -1253,11 +1397,23 @@ def test_runner_that_finds_another_runner_starts_nothing_and_still_releases(
     assert engine.events[-1] == ("close", "lock-connection")
 
 
+def _tick_clock(monkeypatch: pytest.MonkeyPatch, step: float) -> None:
+    """Make ``time.monotonic`` in the runner advance ``step`` seconds per reading."""
+    state = {"now": 0.0}
+
+    def monotonic() -> float:
+        state["now"] += step
+        return state["now"]
+
+    monkeypatch.setattr(ldb_runner.time, "monotonic", monotonic)
+
+
 def test_lock_connection_is_pinged_while_no_worker_finishes(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/concurrency-control.md > Layer 1 — a trivial query on the lock connection detects an idle or
     # cut session while the workers run
     # Given: a worker that is not finished on the first wait, and finished on the second
     engine = _StatusEngine()
+    _tick_clock(monkeypatch, ldb_runner._LOCK_PING_SECONDS)
     real_wait = ldb_runner.wait
     waits = []
 
@@ -1278,9 +1434,62 @@ def test_lock_connection_is_pinged_while_no_worker_finishes(monkeypatch: pytest.
     # When: ILM execution runs
     result = ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", engine, object())
 
-    # Then: the idle wait pinged the lock connection once and the run completed
+    # Then: the idle wait pinged the lock connection and the run completed
     assert result == 0
-    assert engine.events.count(("ping", "lock-connection")) == 1
+    assert engine.events.count(("ping", "lock-connection")) >= 1
+
+
+def test_lock_connection_is_pinged_on_schedule_even_when_workers_keep_finishing(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — the lock session is checked every ping interval of elapsed
+    # time, not only when a wait times out
+    # Given: two tables that finish one after the other, each wait returning at once, and a clock that moves a
+    # full interval per reading
+    engine = _StatusEngine()
+    _tick_clock(monkeypatch, ldb_runner._LOCK_PING_SECONDS)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+    tables = {("A", "T1"): _table_config(), ("A", "T2"): _table_config()}
+
+    # When: ILM execution runs
+    result = ldb_runner.ldb_exec_ilm(_execution_config(), tables, "20261006", engine, object())
+
+    # Then: the lock connection was pinged although no wait ever timed out
+    assert result == 0
+    assert engine.events.count(("ping", "lock-connection")) >= 1
+
+
+def test_wait_never_lasts_past_the_next_lock_ping(monkeypatch: pytest.MonkeyPatch):
+    # Spec: docs/concurrency-control.md > Layer 1 — the ping also keeps the lock session alive, so it happens at
+    # least every ping interval
+    # Given: a clock that advances 10 s per reading and workers that never finish on their own
+    _tick_clock(monkeypatch, 10.0)
+    timeouts: list[float] = []
+    real_wait = ldb_runner.wait
+
+    def record(futures, timeout, return_when):
+        timeouts.append(timeout)
+        if len(timeouts) < 4:
+            return set(), set(futures)
+        return real_wait(futures, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(ldb_runner, "wait", record)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    monkeypatch.setattr(
+        ldb_runner,
+        "process_table",
+        lambda config, owner, table_name, sql, date, run_id: (owner, table_name, Status.TABLE_END, 0, 1, None, None),
+    )
+
+    # When: ILM execution runs
+    ldb_runner.ldb_exec_ilm(_execution_config(), {("A", "T1"): _table_config()}, "20261006", _StatusEngine(), object())
+
+    # Then: no wait is longer than what is left of the interval, and it shrinks as the interval is used up
+    assert all(0 <= timeout <= ldb_runner._LOCK_PING_SECONDS for timeout in timeouts)
+    assert timeouts[0] > timeouts[1]
 
 
 def test_lost_lock_connection_aborts_the_run(monkeypatch: pytest.MonkeyPatch):
@@ -1291,6 +1500,7 @@ def test_lost_lock_connection_aborts_the_run(monkeypatch: pytest.MonkeyPatch):
         def check_run_locks(self, lock_conn):
             raise ExecutionError("The runner lock connection was lost")
 
+    _tick_clock(monkeypatch, ldb_runner._LOCK_PING_SECONDS)
     monkeypatch.setattr(ldb_runner, "wait", lambda futures, timeout, return_when: (set(), set(futures)))
     monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
     monkeypatch.setattr(
@@ -2474,6 +2684,41 @@ def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: py
     assert tables[("A", "PARENT")]["skip"] is True
     assert tables[("A", "CHILD")]["skip"] is True
     assert any("references A.PARENT" in m for m in recorder.messages.get("warning", []))
+
+
+def test_child_before_its_parent_is_skipped_when_the_parent_is_not_visible(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM — a child inherits its parent's conditions, so it is skipped when the parent is not
+    # visible, whatever the order of the configuration
+    # Given: a child listed before its invisible parent
+    rows = [_full_row("CHILD", referencing_tables="A.PARENT p"), _full_row("PARENT")]
+    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+
+    # When: the tables are processed
+    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"CHILD"}), "20261007")
+
+    # Then: both are skipped
+    assert tables[("A", "PARENT")]["skip"] is True
+    assert tables[("A", "CHILD")]["skip"] is True
+
+
+def test_preview_is_refused_over_a_table_already_executed_for_the_date(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW is refused over any EXECUTE status of the same date
+    # Given: a table that ldb_ctl already holds as TEND
+    ldb_runner.logger.addHandler(caplog.handler)
+    monkeypatch.setattr(ldb_runner, "ProcessPoolExecutor", _ImmediateExecutor)
+    table = _table_config()
+    table["conds"][0]["ctl_status"] = Status.TABLE_END
+    config = _execution_config()
+    config.mode = "PREVIEW"
+
+    # When: the PREVIEW runs
+    result = ldb_runner.ldb_exec_ilm(config, {("A", "T1"): table}, "20261006", _StatusEngine(), object())
+
+    # Then: it fails and says why
+    assert result == 1
+    assert "PREVIEW is refused" in caplog.text
 
 
 def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: pytest.MonkeyPatch):
