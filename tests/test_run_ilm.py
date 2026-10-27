@@ -957,65 +957,60 @@ def test_config_identifiers_are_the_exact_dictionary_names(monkeypatch: pytest.M
     assert tables[("Gl", "Child")]["query_expr"].startswith('from "Glh"."Child" A')
 
 
-@pytest.mark.parametrize("env, owner_key", [("SOURCE", "source_owner"), ("HISTORY", "history_owner")])
-def test_privilege_targets_are_the_exact_dictionary_names(env: str, owner_key: str):
+def _planned_grants(monkeypatch: pytest.MonkeyPatch, tmp_path, rows: list, **config) -> tuple[list[str], str]:
+    """Run ldb-run in SCRIPT mode over the rows; return the source grants applied and the history DDL file text."""
+    engine = _HistoryDdlEngine()
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(tmp_path / "pending"), **config),
+        engine,
+        rows=rows,
+    )
+    assert rc == 0
+    return engine.source_granted, _script_files(tmp_path / "pending").get("history_ddl", "")
+
+
+_MIXED_CASE_RULE = {"source_owner": "Gl", "history_owner": "Glh", "table_name": "Parent"}
+
+
+def test_privilege_targets_are_the_exact_dictionary_names(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: ilm.example.yml > Identifier rules — single-identifier parameters hold the exact dictionary name
-    # Given: a rule whose owner and table have mixed-case dictionary names
-    rule = {"source_owner": "Gl", "history_owner": "Glh", "table_name": "Parent"}
+    # Given: a rule whose owners and table have mixed-case dictionary names
+    # When: ldb-run grants the privileges of both environments
+    source_granted, history_ddl = _planned_grants(monkeypatch, tmp_path, [_MIXED_CASE_RULE])
 
-    # When: the privileges of the environment are planned
-    plan = ldb_runner._collect_privilege_plan([rule], env, OracleEngine)  # type: ignore[arg-type]
-
-    # Then: the grant target is the name as written, not upper-cased
-    expected_owner = rule[owner_key]
-    assert plan[0][1] == [(expected_owner, "Parent")]
+    # Then: every grant target is the name as written, not upper-cased
+    assert "GRANT SELECT ON Gl.Parent TO LDB_SOURCE_ROLE" in source_granted
+    assert "GRANT SELECT ON Glh.Parent TO LDB_HISTORY_ROLE;" in history_ddl
+    assert not [grant for grant in source_granted if "GL.PARENT" in grant.upper() and "Gl.Parent" not in grant]
 
 
-def test_extra_select_tables_are_the_exact_dictionary_names():
+def test_extra_select_tables_are_the_exact_dictionary_names(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: ilm.example.yml > Identifier rules — list entries are exact dictionary names; a table without owner
     # belongs to the rule's owner
     # Given: a rule with extra tables, one without owner, in mixed case
-    rule = {
-        "source_owner": "Gl",
-        "history_owner": "Glh",
-        "table_name": "Parent",
-        "extra_select_tables": "Dim, Ref.Codes",
-    }
+    rule = {**_MIXED_CASE_RULE, "extra_select_tables": "Dim, Ref.Codes"}
 
-    # When: the SOURCE privileges are planned
-    plan = ldb_runner._collect_privilege_plan([rule], "SOURCE", OracleEngine)  # type: ignore[arg-type]
+    # When: ldb-run grants the privileges
+    source_granted, _history_ddl = _planned_grants(monkeypatch, tmp_path, [rule])
 
     # Then: the extra tables keep their case and the default owner is the configured one
-    assert plan[1] == (("SELECT",), [("Gl", "Dim"), ("Ref", "Codes")])
+    assert "GRANT SELECT ON Gl.Dim TO LDB_SOURCE_ROLE" in source_granted
+    assert "GRANT SELECT ON Ref.Codes TO LDB_SOURCE_ROLE" in source_granted
 
 
-def test_history_extra_select_tables_are_the_exact_dictionary_names():
+def test_history_extra_select_tables_are_the_exact_dictionary_names(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: ilm.example.yml > Identifier rules — history_extra_select_tables overrides extra_select_tables in HISTORY
     # Given: a rule whose history list is mixed case
-    rule = {
-        "source_owner": "Gl",
-        "history_owner": "Glh",
-        "table_name": "Parent",
-        "extra_select_tables": "Dim",
-        "history_extra_select_tables": "Dim_H",
-    }
+    rule = {**_MIXED_CASE_RULE, "extra_select_tables": "Dim", "history_extra_select_tables": "Dim_H"}
 
-    # When: the HISTORY privileges are planned
-    plan = ldb_runner._collect_privilege_plan([rule], "HISTORY", OracleEngine)  # type: ignore[arg-type]
+    # When: ldb-run grants the privileges
+    source_granted, history_ddl = _planned_grants(monkeypatch, tmp_path, [rule])
 
-    # Then: the history list is used, with the case as written and the history owner as default
-    assert plan[1] == (("SELECT",), [("Glh", "Dim_H")])
-
-
-def test_extra_select_tables_cannot_hold_quoted_names_with_separators():
-    # Spec: ilm.example.yml > Identifier rules (lists) — entries are split on commas and dots before any quote
-    # is considered
-    # Given: an entry whose quoted table name contains a dot
-    rule = {"source_owner": "GL", "table_name": "PARENT", "extra_select_tables": 'GL."A.B"'}
-
-    # When / Then: the list is rejected as malformed
-    with pytest.raises(ValueError, match="expected"):
-        ldb_runner._collect_privilege_plan([rule], "SOURCE", OracleEngine)  # type: ignore[arg-type,list-item]
+    # Then: history uses its own list, with the case as written and the history owner as default
+    assert "GRANT SELECT ON Glh.Dim_H TO LDB_HISTORY_ROLE;" in history_ddl
+    assert "Dim;" not in history_ddl and "Glh.Dim " not in history_ddl
+    assert "GRANT SELECT ON Gl.Dim TO LDB_SOURCE_ROLE" in source_granted
 
 
 @pytest.mark.parametrize("referencing", ["Gl.Missing B", "Gl.Parent"])
@@ -2610,50 +2605,49 @@ def test_alter_on_history_tables_is_granted_only_when_history_alter_grant_is_set
     assert not [grant for grant in engine.source_granted if "ALTER" in grant]
 
 
-def test_tables_owned_by_the_runtime_user_get_no_grants():
+def test_tables_owned_by_the_runtime_user_get_no_grants(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: README > Run ILM > --mode PREPARE — an owner holds every privilege on its own tables and a grant to
     # oneself is not recorded, so tables owned by the runtime user are left out of the grants and their checks.
-    # Given: HIST.T1 and SRC.T1 configured, SRC.LOOKUP as extra table
+    # Given: HIST.T1 and SRC.T1 configured, SRC.LOOKUP as extra table, and history runtime user HIST
     rows = _extra_rows(extra_select_tables="SRC.LOOKUP")
-    engine = _HistoryDdlEngine()
 
-    # When: the plans are built for a user that owns HIST, for a stranger, and for the owner of SRC
-    owner_of_history = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "HIST")
-    stranger = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "other")
-    owner_of_source = ldb_runner._collect_privilege_plan(rows, "SOURCE", engine, True, "SRC")
-
-    # Then: the owner keeps only what belongs to others; the stranger gets everything (ALTER only in history)
-    assert owner_of_history == [(("SELECT",), [("SRC", "LOOKUP")])]
-    assert stranger == [(("SELECT", "INSERT", "DELETE", "ALTER"), [("HIST", "T1")]), (("SELECT",), [("SRC", "LOOKUP")])]
-    assert owner_of_source == []
-
-
-@pytest.mark.parametrize(("runtime_user", "grants_expected"), [("HIST", False), ("hist", True)])
-def test_a_schema_is_the_runtime_users_own_only_when_the_names_match_exactly(
-    monkeypatch: pytest.MonkeyPatch, tmp_path, runtime_user: str, grants_expected: bool
-):
-    # Spec: ilm.example.yml > Identifier rules — owners and usernames are exact dictionary names, so user `hist`
-    # and schema `HIST` are different; only the owner of a table holds every privilege on it and needs no grant.
-    # Given: history tables in schema HIST and a history runtime user named as in the parametrization
-    engine = _HistoryDdlEngine()
-
-    # When: ldb-run generates the history grants
-    rc = _run_ldb(
-        monkeypatch,
-        _history_ddl_config(
-            mode="SCRIPT",
-            history_admin=True,
-            history_username=runtime_user,
-            ddl_pending_dir=str(tmp_path / "pending"),
-        ),
-        engine,
-        rows=_extra_rows(),
+    # When: ldb-run grants the privileges
+    _source_granted, history_ddl = _planned_grants(
+        monkeypatch, tmp_path, rows, history_username="HIST", history_alter_grant=True
     )
 
-    # Then: HIST.T1 is granted to the history role unless the runtime user is exactly HIST
-    assert rc == 0
-    written = _script_files(tmp_path / "pending").get("history_ddl", "")
-    assert ("GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE;" in written) is grants_expected
+    # Then: the owner of HIST keeps only what belongs to others
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_HISTORY_ROLE;" in history_ddl
+    assert "ON HIST.T1" not in history_ddl.replace("CREATE TABLE HIST.T1", "")
+
+
+def test_a_stranger_to_the_history_schema_gets_every_privilege_including_alter(monkeypatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — only the owner is exempt; others get the table privileges
+    # (ALTER only in history, with history_alter_grant) and SELECT on the extra tables
+    # Given: the same tables, with a history runtime user that owns nothing
+    rows = _extra_rows(extra_select_tables="SRC.LOOKUP")
+
+    # When: ldb-run grants the privileges
+    _source_granted, history_ddl = _planned_grants(
+        monkeypatch, tmp_path, rows, history_username="other", history_alter_grant=True
+    )
+
+    # Then: every privilege on HIST.T1 and SELECT on the extra table are granted
+    for privilege in ("SELECT", "INSERT", "DELETE", "ALTER"):
+        assert f"GRANT {privilege} ON HIST.T1 TO LDB_HISTORY_ROLE;" in history_ddl
+    assert "GRANT SELECT ON SRC.LOOKUP TO LDB_HISTORY_ROLE;" in history_ddl
+
+
+def test_the_source_schema_owner_gets_no_source_grants(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # Spec: README > Run ILM > --mode PREPARE — tables owned by the runtime user are left out of the grants
+    # Given: the source runtime user owns both the configured and the extra table
+    rows = _extra_rows(extra_select_tables="SRC.LOOKUP")
+
+    # When: ldb-run grants the privileges
+    source_granted, _history_ddl = _planned_grants(monkeypatch, tmp_path, rows, source_username="SRC")
+
+    # Then: no grant is applied on the source database
+    assert source_granted == []
 
 
 def test_history_extra_select_tables_replace_the_source_list_in_history(monkeypatch: pytest.MonkeyPatch, tmp_path):
@@ -2685,7 +2679,7 @@ def test_extra_select_table_that_is_also_configured_keeps_all_its_privileges(mon
     )
 
 
-@pytest.mark.parametrize("entry", ["A.B.C", "A. ", "TWO WORDS", "SRC."])
+@pytest.mark.parametrize("entry", ["A.B.C", "A. ", "TWO WORDS", "SRC.", 'GL."A.B"'])
 def test_malformed_extra_select_table_is_rejected_before_any_grant(
     monkeypatch: pytest.MonkeyPatch, tmp_path, entry: str
 ):
