@@ -620,6 +620,53 @@ def test_build_config_passes_profile_to_config_loader(monkeypatch: pytest.Monkey
     assert result["profile"] == "prod"
 
 
+def _build_with_pending_dir(monkeypatch: pytest.MonkeyPatch, args: SimpleNamespace, loaded: dict) -> dict:
+    monkeypatch.setattr(ldb_params_config, "env_bindings_from_config", lambda: {})
+    monkeypatch.setattr(ldb_params_config, "read_env_overrides", lambda bindings: {})
+    monkeypatch.setattr(ldb_params_config, "load_runtime_config", lambda **kw: dict(loaded))
+    return ldb_params_config.build_config({"ddl_pending_dir": "ldb_ddl_pending"}, args)
+
+
+def test_relative_ddl_pending_dir_is_placed_under_the_explicit_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Spec: README > Configuration parameters reference — a relative ddl_pending_dir is based on
+    # the configuration directory and the config carries the absolute path
+    # Given: an explicit --config-dir and the default relative directory
+    args = SimpleNamespace(schema="s", profile=None, set=[], config_dir=str(tmp_path))
+
+    # When
+    result = _build_with_pending_dir(monkeypatch, args, {})
+
+    # Then
+    assert result["ddl_pending_dir"] == str((tmp_path / "ldb_ddl_pending").resolve())
+
+
+def test_relative_ddl_pending_dir_defaults_to_the_user_config_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: same as above — without --config-dir the user configuration root is the base
+    # Given: no --config-dir and a known user root
+    monkeypatch.setattr(ldb_utils, "get_config_roots", lambda appname="LimitsDb": (tmp_path / "user", tmp_path / "sys"))
+    args = SimpleNamespace(schema="s", profile=None, set=[])
+
+    # When
+    result = _build_with_pending_dir(monkeypatch, args, {"ddl_pending_dir": "out"})
+
+    # Then
+    assert result["ddl_pending_dir"] == str((tmp_path / "user" / "out").resolve())
+
+
+def test_absolute_ddl_pending_dir_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: same as above — an absolute directory is used as given
+    # Given: an absolute directory and an unrelated --config-dir
+    args = SimpleNamespace(schema="s", profile=None, set=[], config_dir=str(tmp_path / "cfg"))
+
+    # When
+    result = _build_with_pending_dir(monkeypatch, args, {"ddl_pending_dir": str(tmp_path / "abs")})
+
+    # Then
+    assert result["ddl_pending_dir"] == str((tmp_path / "abs").resolve())
+
+
 # ---------------------------------------------------------------------------
 # Schema file resolution
 # ---------------------------------------------------------------------------

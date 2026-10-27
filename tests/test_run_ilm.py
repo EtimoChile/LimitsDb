@@ -2178,6 +2178,55 @@ def test_history_ddl_is_applied_with_runtime_connection_when_admin_absent(
     assert capsys.readouterr().out == ""
 
 
+def test_pending_files_written_in_the_same_second_get_a_counter_and_never_truncate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # Spec: README > Run ILM — a pending file is created exclusively; a name already taken in the
+    # same second gets _2, _3... so DDL from an earlier run is never lost
+    # Given: a frozen clock and three files written under the same directory
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 27, 12, 0, 0)
+
+    monkeypatch.setattr(ldb_ddl, "datetime", _Frozen)
+
+    # When
+    paths = [ldb_ddl.write_pending_file(tmp_path, "history_ddl_s", f"run {n}") for n in (1, 2, 3)]
+
+    # Then: distinct, ordered names and every content intact
+    assert [p.name for p in paths] == [
+        "history_ddl_s_20261027_120000.sql",
+        "history_ddl_s_20261027_120000_2.sql",
+        "history_ddl_s_20261027_120000_3.sql",
+    ]
+    assert [p.read_text(encoding="utf-8") for p in paths] == ["run 1", "run 2", "run 3"]
+    assert all(p.is_absolute() for p in paths)
+
+
+def test_failures_collected_before_the_producer_raises_are_written_then_error_is_reraised(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    # Spec: README > Run ILM > Admin credentials in ldb-run — failed statements reach the pending
+    # file even when a later engine call raises (PEND-032)
+    # Given: a producer that records one failed statement and then raises
+    config = _history_ddl_config(ddl_pending_dir=str(tmp_path / "pending"))
+
+    def produce(sink, failures):
+        failures.append(("ALTER TABLE HIST.T1 ADD (C1 NUMBER)", "ORA-01031: insufficient privileges"))
+        raise RuntimeError("connection lost")
+
+    # When / Then: the original error propagates ...
+    with pytest.raises(RuntimeError, match="connection lost"):
+        ldb_ddl.deliver_ddl(
+            config, produce, destination="execute", env="HISTORY", file_stem="history_ddl", description="x."
+        )
+
+    # ... and the statement collected so far is on disk
+    (file,) = (tmp_path / "pending").glob("history_ddl_s_*.sql")
+    assert "ALTER TABLE HIST.T1 ADD (C1 NUMBER);" in file.read_text(encoding="utf-8")
+
+
 def test_failed_history_ddl_goes_to_pending_file_and_run_exits_1_after_trying_all(
     tmp_path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
 ):

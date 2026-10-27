@@ -166,6 +166,19 @@ def resolve_schema_file(
     return None
 
 
+def resolve_pending_dir(pending_dir: str, explicit_config_dir: str | None) -> str:
+    """Return ``pending_dir`` as an absolute path.
+
+    A relative directory is placed under the configuration directory: ``--config-dir`` when given,
+    otherwise the user configuration root.
+    """
+    path = Path(pending_dir)
+    if not path.is_absolute():
+        base = Path(explicit_config_dir) if explicit_config_dir else get_config_roots()[0]
+        path = base / path
+    return str(path.resolve())
+
+
 def _hints() -> dict[str, Any]:
     from limitsdb.core.ldb_params_config import Config  # lazy import to avoid circulars
 

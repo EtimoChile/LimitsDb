@@ -23,6 +23,33 @@ DdlDestination = Literal["execute", "file"]
 DdlEnv = Literal["SOURCE", "HISTORY"]
 
 
+def write_pending_file(pending_dir: Path, file_stem: str, text: str) -> Path:
+    """Write ``text`` to a new ``<file_stem>_<timestamp>[_<n>].sql`` under ``pending_dir``.
+
+    The file is created exclusively, so a file from an earlier run is never truncated: when the
+    name is taken the counter suffix ``_2``, ``_3``... is tried until the creation succeeds. The
+    operating system decides the winner, so concurrent processes cannot share a name.
+    """
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    attempt = 1
+    while True:
+        suffix = "" if attempt == 1 else f"_{attempt}"
+        path = pending_dir / f"{file_stem}_{stamp}{suffix}.sql"
+        try:
+            handle = path.open("x", encoding="utf-8")
+        except FileExistsError:
+            attempt += 1
+            continue
+        try:
+            with handle:
+                handle.write(text)
+        except OSError:
+            path.unlink(missing_ok=True)
+            raise
+        return path.resolve()
+
+
 def write_ddl_file(
     config: Config,
     file_stem: str,
@@ -35,10 +62,6 @@ def write_ddl_file(
 
     Each entry is (comment, statement); the comment, when present, precedes the statement.
     """
-    pending_dir = Path(config.execution.ddl_pending_dir)
-    pending_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = pending_dir / f"{file_stem}_{config.context.schema}_{stamp}.sql"
     user = config.history_username if env == "HISTORY" else config.source_username
     lines = [
         f"-- LimitsDb: {description}",
@@ -59,8 +82,9 @@ def write_ddl_file(
     lines.append(f"prompt LimitsDb: OK - {len(entries)} statement(s) applied.")
     lines.append("exit success")
     lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    return write_pending_file(
+        Path(config.execution.ddl_pending_dir), f"{file_stem}_{config.context.schema}", "\n".join(lines)
+    )
 
 
 def render_script(title: str, fragments: Sequence[str]) -> str:
@@ -125,8 +149,14 @@ def deliver_ddl(
         return path
 
     failures: DdlFailures = []
-    produce(None, failures)
+    producer_error: BaseException | None = None
+    try:
+        produce(None, failures)
+    except Exception as exc:
+        producer_error = exc
     if not failures:
+        if producer_error is not None:
+            raise producer_error
         return None
     try:
         path = write_ddl_file(
@@ -152,4 +182,6 @@ def deliver_ddl(
         len(failures),
         path,
     )
+    if producer_error is not None:
+        raise producer_error
     raise SystemExit(1)
