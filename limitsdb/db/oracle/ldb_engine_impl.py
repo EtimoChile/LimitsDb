@@ -930,8 +930,9 @@ end;"""
             table_name: Table name.
             run_id: Run recorded for the table.
         Returns:
-            True when another session holds the table's runner lock, False when nobody does, and None when
-            the run has no runner lock (a generated SCRIPT, whose id starts with S) or it cannot be probed."""
+            True when a session holds the table's runner lock and the key row names this run, False when
+            nobody does or the holder is a different run (a later one), and None when the run has no runner
+            lock (a generated SCRIPT, whose id starts with S) or it cannot be probed."""
         if run_id.startswith("S"):
             return None
         cursor = conn.cursor()
@@ -945,7 +946,19 @@ end;"""
             return False if found else None
         except oracledb.DatabaseError as exc:
             detail = exc.args[0] if exc.args else None
-            return True if getattr(detail, "code", None) == 54 else None
+            if getattr(detail, "code", None) != 54:
+                return None
+            # The lock is held, but the table may belong to a later run than the one asked about
+            try:
+                cursor.execute(
+                    """SELECT rl_run_id FROM ldb_run_lock
+                    WHERE rl_owner = :1 AND rl_table_name = :2 AND rl_kind = 'K'""",
+                    [owner, table_name],
+                )
+                key_row = cursor.fetchone()
+            except oracledb.DatabaseError:
+                return None
+            return None if key_row is None else key_row[0] == run_id
         finally:
             cursor.close()
             conn.rollback()
@@ -974,8 +987,9 @@ end;"""
                 readable[view] = False
             finally:
                 cursor.close()
+        target = OracleEngine._format_identifier(grantee)
         hints = tuple(
-            f"GRANT SELECT ON sys.{view.replace('$', '_$')} TO {grantee}" for view, ok in readable.items() if not ok
+            f"GRANT SELECT ON sys.{view.replace('$', '_$')} TO {target}" for view, ok in readable.items() if not ok
         )
         return MonitoringAccess(
             session=readable["gv$session"],

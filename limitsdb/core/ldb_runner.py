@@ -215,9 +215,9 @@ def _collect_privilege_plan(
             field, value = "history_extra_select_tables", row.get("history_extra_select_tables")
         extra.update(_parse_extra_tables(value, row[owner_key], engine, field, key))
     if runtime_user:
-        owned = engine.get_identifier_str(runtime_user)
-        configured = [table for table in configured if table[0] != owned]
-        extra = {table for table in extra if table[0] != owned}
+        # Owners and the username are exact dictionary names: `hist` and `HIST` are different schemas
+        configured = [table for table in configured if table[0] != runtime_user]
+        extra = {table for table in extra if table[0] != runtime_user}
     plan: PrivilegePlan = []
     if configured:
         plan.append((_TABLE_PRIVILEGES[env] + (("ALTER",) if alter and env == "HISTORY" else ()), configured))
