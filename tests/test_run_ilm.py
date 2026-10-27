@@ -1949,17 +1949,19 @@ def _history_ddl_config(
     if history_admin:
         admin_credentials.update(admin_history_username="admin-hist", admin_history_password="admin-hist-pw")
     return Config(
-        schema="s",
-        action=action,
-        mode=mode,
-        source_dsn="src-dsn",
-        source_username="src-user",
-        source_password="src-pw",
-        history_dsn="hist-dsn",
-        history_username="hist-user",
-        history_password="hist-pw",
-        **admin_credentials,
-        **extra,
+        **{
+            "schema": "s",
+            "action": action,
+            "mode": mode,
+            "source_dsn": "src-dsn",
+            "source_username": "src-user",
+            "source_password": "src-pw",
+            "history_dsn": "hist-dsn",
+            "history_username": "hist-user",
+            "history_password": "hist-pw",
+            **admin_credentials,
+            **extra,
+        }
     )
 
 
@@ -2616,14 +2618,42 @@ def test_tables_owned_by_the_runtime_user_get_no_grants():
     engine = _HistoryDdlEngine()
 
     # When: the plans are built for a user that owns HIST, for a stranger, and for the owner of SRC
-    owner_of_history = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "hist")
+    owner_of_history = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "HIST")
     stranger = ldb_runner._collect_privilege_plan(rows, "HISTORY", engine, True, "other")
-    owner_of_source = ldb_runner._collect_privilege_plan(rows, "SOURCE", engine, True, "src")
+    owner_of_source = ldb_runner._collect_privilege_plan(rows, "SOURCE", engine, True, "SRC")
 
     # Then: the owner keeps only what belongs to others; the stranger gets everything (ALTER only in history)
     assert owner_of_history == [(("SELECT",), [("SRC", "LOOKUP")])]
     assert stranger == [(("SELECT", "INSERT", "DELETE", "ALTER"), [("HIST", "T1")]), (("SELECT",), [("SRC", "LOOKUP")])]
     assert owner_of_source == []
+
+
+@pytest.mark.parametrize(("runtime_user", "grants_expected"), [("HIST", False), ("hist", True)])
+def test_a_schema_is_the_runtime_users_own_only_when_the_names_match_exactly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, runtime_user: str, grants_expected: bool
+):
+    # Spec: ilm.example.yml > Identifier rules — owners and usernames are exact dictionary names, so user `hist`
+    # and schema `HIST` are different; only the owner of a table holds every privilege on it and needs no grant.
+    # Given: history tables in schema HIST and a history runtime user named as in the parametrization
+    engine = _HistoryDdlEngine()
+
+    # When: ldb-run generates the history grants
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(
+            mode="SCRIPT",
+            history_admin=True,
+            history_username=runtime_user,
+            ddl_pending_dir=str(tmp_path / "pending"),
+        ),
+        engine,
+        rows=_extra_rows(),
+    )
+
+    # Then: HIST.T1 is granted to the history role unless the runtime user is exactly HIST
+    assert rc == 0
+    written = _script_files(tmp_path / "pending").get("history_ddl", "")
+    assert ("GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE;" in written) is grants_expected
 
 
 def test_history_extra_select_tables_replace_the_source_list_in_history(monkeypatch: pytest.MonkeyPatch, tmp_path):

@@ -81,7 +81,8 @@ start within 5 minutes of the previous one's last activity, and do not repeat a 
 ignores every run that wrote a PREVIEW status, and takes a table as being processed while its `ldb_ctl` row still carries
 the run's id in `TSTART`, `CSTART`, `CEND`, `LSTART` or `LEND` and the registered session (instance +
 `sid` + `audsid` in `gv$session`) is alive. Liveness is proven first by trying the table's `'L'` row of
-`ldb_run_lock` with `FOR UPDATE NOWAIT` and rolling back immediately: `ORA-00054` means a live runner, an obtained
+`ldb_run_lock` with `FOR UPDATE NOWAIT` and rolling back immediately: `ORA-00054` means a live runner when the table's `'K'` row names the run asked about (a different run id
+means a later run holds the table, so the asked run is not alive), an obtained
 lock means none (the probe holds nothing). SCRIPT runs and tables without that row fall back to `gv$session`, then to the heartbeat. A table whose last log row is `ERROR` with the `-20003`
 message ("already processed") is neither an error nor unfinished work.
 
