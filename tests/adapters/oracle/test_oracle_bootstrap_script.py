@@ -162,13 +162,17 @@ def test_bootstrap_script_fails_when_the_existing_primary_key_is_not_the_require
 
 
 def test_bootstrap_script_checks_the_primary_key_of_a_lowercase_table_as_it_was_created():
-    # Spec: identifiers are handled in data-dictionary form — a lowercase name is a quoted identifier
+    # Spec: limitsdb/resources/ilm.example.yml > Identifier rules — identifiers are exact dictionary names, so a
+    # lowercase name is a quoted identifier and the dictionary check must look for it as written
+    # Given: a table whose owner, name and key column are lowercase
     table = TableDefinition(
         owner="ldb", name="log", columns=(ColumnDefinition(name="id", data_type="NUMBER"),), primary_key=("id",)
     )
 
+    # When: the bootstrap script is generated
     script = _tables_script(table)
 
+    # Then: the primary key check names the table, constraint and column as they were created
     assert "c.owner = 'ldb' and c.table_name = 'log'" in script
     assert "c.constraint_name = 'log_PK'" in script
     assert ") = 'id';" in script
@@ -185,8 +189,11 @@ def _link_script(name: str) -> str:
 def test_bootstrap_script_detects_an_existing_database_link_by_exact_name_or_domain_suffix_only():
     # Spec: README > ldb-impl without admin credentials — an existing database link is skipped; a link
     # whose name merely starts with the configured one (HISTORY next to HIST) is another link
+    # Given: a database link named HIST
+    # When: the bootstrap script is generated
     script = _link_script("HIST")
 
+    # Then: the link is looked up by exact name or by name plus domain, never by prefix
     assert "where db_link = 'HIST'" in script
     assert "or db_link like 'HIST.%' escape '\\'" in script
     assert "like 'HIST%'" not in script
@@ -194,11 +201,28 @@ def test_bootstrap_script_detects_an_existing_database_link_by_exact_name_or_dom
 
 
 def test_bootstrap_script_matches_underscore_and_percent_of_a_link_name_literally():
-    # Spec: identifiers are literal names — `_` and `%` in a link name must not act as LIKE wildcards
+    # Spec: README > ldb-impl without admin credentials — an existing link is found by its own name, so `_` and
+    # `%` in a link name must not act as LIKE wildcards and match another link
+    # Given: a database link whose name contains `_` and `%`
+    # When: the bootstrap script is generated
     script = _link_script("LDB_HI%T")
 
+    # Then: both characters are escaped in the lookup
     assert "where db_link = 'LDB_HI%T'" in script
     assert "like 'LDB\\_HI\\%T.%' escape '\\'" in script
+
+
+@pytest.mark.parametrize(("configured", "stored"), [("hist", "HIST"), ("Hist.Domain", "HIST.DOMAIN"), ("hi%t", "HI%T")])
+def test_bootstrap_script_looks_a_database_link_up_the_way_the_dictionary_stores_it(configured: str, stored: str):
+    # Spec: README > ldb-impl without admin credentials — an existing database link is skipped, so a rerun must
+    # find the link it created; the dictionary keeps database link names in upper case
+    # Given: a database link configured with lowercase or mixed-case letters
+    # When: the bootstrap script is generated
+    script = _link_script(configured)
+
+    # Then: the lookup uses the upper-case name, so the link is found instead of created again (ORA-02011)
+    assert f"where db_link = '{stored}'" in script
+    assert f"where db_link = '{configured}'" not in script
 
 
 def test_bootstrap_script_terminates_plsql_objects_with_slash():

@@ -158,8 +158,13 @@ def test_monitoring_access_names_the_grant_for_each_unreadable_view():
 def test_monitoring_grant_names_the_role_as_the_dictionary_stores_it(role: str, rendered: str):
     # Spec: ilm.example.yml > Identifier rules — role names are exact dictionary names; a mixed-case role must be
     # quoted in the grant, or it resolves to another role (LDBHISTORYROLE)
-    access = OracleEngine.check_monitoring_access(_Conn(denied=("gv$session",)), role)  # type: ignore[arg-type]
+    # Given: a connection that cannot read gv$session and a role with the given dictionary name
+    conn = _Conn(denied=("gv$session",))
 
+    # When: the monitoring access is checked for that role
+    access = OracleEngine.check_monitoring_access(conn, role)  # type: ignore[arg-type]
+
+    # Then: the suggested grant names the role as the dictionary stores it
     assert access.grants[0] == f"GRANT SELECT ON sys.gv_$session TO {rendered}"
 
 
@@ -310,7 +315,13 @@ def test_a_table_held_by_a_later_run_does_not_make_an_earlier_run_alive():
 def test_a_held_lock_with_an_unreadable_or_missing_key_row_leaves_liveness_unknown(conn):
     # Spec: docs/concurrency-control.md — when the owner of the lock cannot be determined the answer is "unknown",
     # decided by the session views, never a guess
-    assert OracleEngine.is_run_alive(conn, "APP", "ITEMS", "r1") is None  # type: ignore[arg-type]
+    # Given: a connection where the lock is held but its owner row is missing or unreadable (the parameter)
+
+    # When: the liveness of the run is probed
+    alive = OracleEngine.is_run_alive(conn, "APP", "ITEMS", "r1")  # type: ignore[arg-type]
+
+    # Then: liveness is unknown and the probe released what it took
+    assert alive is None
     assert conn.log[-1][0] == "ROLLBACK"
 
 

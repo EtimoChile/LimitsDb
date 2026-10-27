@@ -1,9 +1,14 @@
 import logging
+import tempfile
 from concurrent.futures import Future
+from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import yaml
 
 from limitsdb.core import ldb_ddl, ldb_params_config, ldb_runner, ldb_utils
 from limitsdb.core.ldb_errors import ConfigurationError, ExecutionError, RunnerBusyError
@@ -2020,13 +2025,16 @@ class _HistoryDdlEngine(ScriptEnvelope):
         self.history_unreachable = history_unreachable
         self.connections: list[tuple[bool, str | None]] = []
         self.attempted: list[str] = []
-        self.admin_applied: list[str] = []
+        self.admin_applied: list[str] = []  # history DDL applied over the history admin connection
+        self.history_granted: list[str] = []  # history grants applied over the history admin connection
+        self.structure_applied_by_admin = False
         self.grants_attempted: list[str] = []
         self.source_granted: list[str] = []
         self.missing_privileges: dict[str, list[tuple[str, str, str]]] = {}
         self.enabled_roles: set[str] | None = None  # None: every role is enabled
         self.structure_reads: list[tuple[str | None, str | None]] = []
         self.table_definitions: list = []
+        self.columns: tuple[str, ...] = ("ID",)  # columns of every table the database reports
 
     def get_connection(self, config, *, admin=False, env=None):
         ldb_utils.get_effective_credentials(config, admin=admin, env=env)
@@ -2043,6 +2051,8 @@ class _HistoryDdlEngine(ScriptEnvelope):
 
     def ensure_table_structure(self, conn, table, table_cnf, *, reference=None, ddl_sink=None, ddl_failures=None):
         self.structure_reads.append((conn.env if conn else None, reference[0] if reference else None))
+        if conn is not None and conn.admin:
+            self.structure_applied_by_admin = True
         self.table_definitions.append(table)
         if conn is None:
             statements = [f"CREATE TABLE {table.owner}.{table.name} (ID NUMBER)"]
@@ -2065,7 +2075,29 @@ class _HistoryDdlEngine(ScriptEnvelope):
         return statements
 
     def get_table_columns(self, conn, owner, table_name):
-        return [], {}
+        metadata = {
+            column: ColumnDefinition(name=column, data_type="varchar2", id=index, length=20)
+            for index, column in enumerate(self.columns)
+        }
+        return list(self.columns), metadata
+
+    def get_status(self, conn, process_date):
+        return []
+
+    @staticmethod
+    def get_ldb_columns_expressions():
+        return "l_process_date", "sysdate"
+
+    @staticmethod
+    def format_identifier(name):
+        return name
+
+    @staticmethod
+    def get_date_condition(expression, retain_months):
+        return f"{expression} < add_months(sysdate, -{retain_months})"
+
+    def generate_sql_block(self, config, table_cnf, process_date):
+        return "select 1 from dual"
 
     def is_role_enabled(self, conn, role):
         return self.enabled_roles is None or role in self.enabled_roles
@@ -2085,7 +2117,7 @@ class _HistoryDdlEngine(ScriptEnvelope):
                 continue
             if conn.admin:
                 assert conn.env == "HISTORY", "history DDL is applied over a history connection"
-                self.admin_applied.append(statement)
+                (self.history_granted if statement.startswith("GRANT ") else self.admin_applied).append(statement)
                 continue
             if statement.startswith("GRANT "):
                 self.grants_attempted.append(statement)
@@ -2098,7 +2130,8 @@ class _HistoryDdlEngine(ScriptEnvelope):
 
     @property
     def history_admin_opened(self) -> bool:
-        return (True, "HISTORY") in self.connections
+        """Whether the history admin connection was used to reconcile the history tables (not only to grant)."""
+        return self.structure_applied_by_admin
 
 
 class _RecordingLogger:
@@ -2114,6 +2147,25 @@ class _RecordingLogger:
         return record
 
 
+def _ilm_table(name: str, columns: tuple[str, ...], **table: object) -> dict:
+    """One ILM table entry SRC.<name> / HIST.<name> with a single active condition; ``table`` overrides its keys."""
+    return {
+        "source_owner": "SRC",
+        "history_owner": "HIST",
+        "table_name": name,
+        "frecuency": "D",
+        "conds": [
+            {
+                "is_active": True,
+                "retain_months_source": 3,
+                "retain_months_history": 12,
+                "purge_date_expr": f"@{columns[0]}",
+            }
+        ],
+        **table,
+    }
+
+
 def _run_ldb(
     monkeypatch: pytest.MonkeyPatch,
     config: Config,
@@ -2121,15 +2173,35 @@ def _run_ldb(
     *tables: str,
     rows: list | None = None,
     table_options: dict | None = None,
+    exec_ilm: Any = None,
 ) -> int:
-    """Run ldb_run with the engine double and one history table per name (T1 by default); return the exit code."""
-    tables_config = _make_tables_config(*(tables or ("T1",)), **(table_options or {}))
+    """Run ldb_run over a real ILM file with the engine double; return the exit code.
+
+    The file holds one table per name (T1 by default), or one per entry of ``rows`` (table-level keys, which win over
+    the defaults). ``exec_ilm`` observes the execution of the ILM (it returns 0). ``table_options`` sets ``columns``, the columns the database reports, and table-level keys.
+    Only the database (``engine``) and the execution of the ILM itself are replaced: the rows are loaded and the
+    configuration is processed by the real code.
+    """
+    options = dict(table_options or {})
+    columns = tuple(options.pop("columns", ("ID",)))
+    engine.columns = columns
+    entries = [{"table_name": name} for name in (tables or ("T1",))] if rows is None else rows
+    ilm = {
+        "tables": [
+            _ilm_table(
+                **{"name": entry["table_name"], "columns": columns},
+                **{**options, **{k: v for k, v in entry.items() if k != "table_name"}},
+            )
+            for entry in entries
+        ]
+    }
     monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: rows or [])
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: tables_config)
-    monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", lambda *args: 0)
-    with pytest.raises(SystemExit) as exc_info:
-        ldb_runner.ldb_run(config)
+    monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", exec_ilm or (lambda *args: 0))
+    with tempfile.TemporaryDirectory() as directory:
+        ilm_path = Path(directory) / "ilm.yml"
+        ilm_path.write_text(yaml.safe_dump(ilm, sort_keys=False), encoding="utf-8")
+        with pytest.raises(SystemExit) as exc_info:
+            ldb_runner.ldb_run(replace(config, ilm_config_file=str(ilm_path)))
     return exc_info.value.code
 
 
@@ -2470,7 +2542,6 @@ def test_script_run_writes_the_history_delta_read_over_the_runtime_history_conne
     statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
     engine = _HistoryDdlEngine({"T1": [statement]})
     pending_dir = tmp_path / "pending"
-    monkeypatch.setattr(ldb_runner, "_collect_privilege_targets", lambda rows, key, engine: [("HIST", "T1")])
 
     # When: ldb-run generates the script
     rc = _run_ldb(
@@ -2553,14 +2624,6 @@ def test_script_run_aligns_history_with_source_when_history_is_unreadable_and_ba
     assert "ALTER TABLE HIST.T1 ADD (LDB_PROCESS_DATE DATE);" in _script_files(pending_dir)["history_ddl"]
     assert engine.structure_reads == [(None, "SRC")]  # runtime source connection, SRC as reference
     assert engine.attempted == [] and engine.admin_applied == []
-
-
-def _grant_targets(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        ldb_runner,
-        "_collect_privilege_targets",
-        lambda rows, key, engine: [("SRC" if key == "source_owner" else "HIST", "T1")],
-    )
 
 
 def _extra_rows(**extra) -> list[dict]:
@@ -2725,7 +2788,6 @@ def test_script_run_applies_source_grants_when_source_admin_credentials_exist(
     # grants, so SCRIPT applies them when source admin credentials exist; history grants stay in the file.
     # Given: SCRIPT mode with source and history admin credentials
     engine = _HistoryDdlEngine()
-    _grant_targets(monkeypatch)
     pending_dir = tmp_path / "pending"
 
     # When: ldb-run generates the script
@@ -2751,7 +2813,6 @@ def test_script_run_writes_source_grants_file_and_warns_without_source_admin_cre
     # file and a warning says tables not yet granted are skipped.
     # Given: SCRIPT mode without source admin credentials
     engine = _HistoryDdlEngine()
-    _grant_targets(monkeypatch)
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
     pending_dir = tmp_path / "pending"
@@ -2777,7 +2838,6 @@ def test_execute_run_without_source_admin_credentials_warns_that_ungranted_table
     # admin credentials; without them tables the runtime user cannot see are skipped, with a warning.
     # Given: EXECUTE mode without source admin credentials
     engine = _HistoryDdlEngine()
-    _grant_targets(monkeypatch)
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
 
@@ -3035,7 +3095,6 @@ def test_prepare_applies_grants_and_history_ddl_without_running_ilm(monkeypatch:
     # Given: PREPARE with source and history admin credentials and a pending history delta
     statement = "ALTER TABLE HIST.T1 ADD (C1 NUMBER)"
     engine = _HistoryDdlEngine({"T1": [statement]})
-    _grant_targets(monkeypatch)
     ilm_runs: list[bool] = []
 
     # When: ldb-run executes
@@ -3043,19 +3102,20 @@ def test_prepare_applies_grants_and_history_ddl_without_running_ilm(monkeypatch:
         monkeypatch,
         _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
         engine,
+        exec_ilm=lambda *args: ilm_runs.append(True) or 0,
     )
-    monkeypatch.setattr(ldb_runner, "ldb_exec_ilm", lambda *args: ilm_runs.append(True) or 0)
     rc_again = _run_ldb(
         monkeypatch,
         _history_ddl_config(mode="PREPARE", history_admin=True, ddl_pending_dir=str(tmp_path / "p")),
         _HistoryDdlEngine(),
+        exec_ilm=lambda *args: ilm_runs.append(True) or 0,
     )
 
     # Then: grants and DDL were applied, the ILM never ran, and a rerun with nothing to change succeeds
     assert rc == 0 and rc_again == 0
     assert "GRANT DELETE ON SRC.T1 TO LDB_SOURCE_ROLE" in engine.source_granted
     assert statement in engine.admin_applied
-    assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE" in engine.admin_applied
+    assert "GRANT DELETE ON HIST.T1 TO LDB_HISTORY_ROLE" in engine.history_granted
     assert ilm_runs == []
 
 
@@ -3065,7 +3125,6 @@ def _run_prepare_without_source_admin(
     """Run PREPARE without source admin credentials where the runtime user lacks the given privileges."""
     engine = _HistoryDdlEngine()
     engine.missing_privileges["LDB_SOURCE_ROLE"] = missing
-    _grant_targets(monkeypatch)
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
     pending_dir = tmp_path / "pending"
@@ -3114,7 +3173,6 @@ def test_prepare_reports_a_role_that_is_not_enabled_for_the_runtime_user(monkeyp
     engine = _HistoryDdlEngine()
     engine.enabled_roles = {"LDB_HISTORY_ROLE"}
     engine.missing_privileges["LDB_SOURCE_ROLE"] = [("SRC", "T1", "SELECT")]
-    _grant_targets(monkeypatch)
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
 
@@ -3140,7 +3198,6 @@ def test_prepare_verifies_the_history_grants_with_the_runtime_history_connection
     # Given: PREPARE with admin credentials where the history role still gives nothing to the runtime user
     engine = _HistoryDdlEngine()
     engine.missing_privileges["LDB_HISTORY_ROLE"] = [("HIST", "T1", "INSERT")]
-    _grant_targets(monkeypatch)
 
     # When: ldb-run executes
     rc = _run_ldb(
@@ -3866,6 +3923,10 @@ def test_a_table_without_history_indexes_asks_the_engine_for_none(monkeypatch: p
     assert engine.table_definitions[0].indexes == ()
 
 
+def _nothing_was_applied(engine: _HistoryDdlEngine) -> bool:
+    return not (engine.attempted or engine.admin_applied or engine.source_granted or engine.history_granted)
+
+
 @pytest.mark.parametrize(
     "indexes, message",
     [
@@ -3874,15 +3935,17 @@ def test_a_table_without_history_indexes_asks_the_engine_for_none(monkeypatch: p
         ({"HIST.IX": "ID"}, "single index name"),
         ({"IX": ""}, "Invalid history_indexes columns"),
         ({"IX": "ID, ID"}, "Invalid history_indexes columns"),
-        ({"IX": "ID, MISSING"}, "unknown column"),
     ],
 )
-def test_malformed_history_indexes_stop_the_run_before_any_ddl(monkeypatch: pytest.MonkeyPatch, indexes, message: str):
+def test_malformed_history_indexes_stop_the_run_before_any_grant_or_ddl(
+    monkeypatch: pytest.MonkeyPatch, indexes, message: str
+):
     # Spec: README > ILM Rule Semantics > History indexes — a name is a single index name other than the
-    # primary key's, and its columns are distinct columns of the table
-    # Given: a setting that breaks one of those rules
-    # When / Then: the run is refused naming the problem, and nothing was applied
+    # primary key's, its columns are distinct, and anything else stops the run before it changes anything
+    # Given: an ILM file whose setting breaks one of those rules, and source and history admin credentials
     engine = _HistoryDdlEngine(delta={"T1": ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]})
+
+    # When / Then: the run is refused naming the problem
     with pytest.raises(ValueError, match=message):
         _run_ldb(
             monkeypatch,
@@ -3890,4 +3953,56 @@ def test_malformed_history_indexes_stop_the_run_before_any_ddl(monkeypatch: pyte
             engine,
             table_options={"columns": ("ID",), "history_indexes": indexes},
         )
-    assert engine.attempted == [] and engine.admin_applied == []
+
+    # and no grant or DDL was applied in either database
+    assert _nothing_was_applied(engine)
+
+
+def test_history_indexes_over_an_unknown_column_stop_the_run_before_any_history_ddl(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > History indexes — the columns of an index must be columns of the table,
+    # and a rejected setting stops the run before it changes anything
+    # Given: an index over a column the table does not have
+    engine = _HistoryDdlEngine(delta={"T1": ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]})
+
+    # When / Then: the run is refused naming the column
+    with pytest.raises(ValueError, match="unknown column"):
+        _run_ldb(
+            monkeypatch,
+            _history_ddl_config(history_admin=True),
+            engine,
+            table_options={"columns": ("ID",), "history_indexes": {"IX": "ID, MISSING"}},
+        )
+
+    # and no history DDL or history grant was applied (the source grants are what let the runtime user read the columns)
+    assert engine.attempted == [] and engine.admin_applied == [] and engine.history_granted == []
+
+
+def test_validate_rejects_history_indexes_over_an_unknown_column(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Run ILM > --mode VALIDATE — VALIDATE checks the configuration without changing anything, so a
+    # policy that EXECUTE would refuse (History indexes: columns must be columns of the table) fails it too
+    # Given: an index over a column the table does not have
+    engine = _HistoryDdlEngine()
+
+    # When: ldb-run validates
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(mode="VALIDATE", history_admin=True),
+        engine,
+        table_options={"columns": ("ID",), "history_indexes": {"IX": "MISSING"}},
+    )
+
+    # Then: validation fails and nothing was applied
+    assert rc == 1
+    assert _nothing_was_applied(engine)
+
+
+def test_history_indexes_may_name_the_columns_ldb_adds_to_the_history_table(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > History indexes — columns are columns of the history table, which also
+    # carries the LimitsDb execution-date columns (add_ldb_columns)
+    # Given: an index over LDB_PROCESS_DATE in a source run
+    # When: ldb-run reconciles the history table
+    rc, engine = _history_indexes_run(monkeypatch, {"T1_H_RUN": "LDB_PROCESS_DATE"})
+
+    # Then: the index is requested
+    assert rc == 0
+    assert [index.columns for index in engine.table_definitions[0].indexes] == [("LDB_PROCESS_DATE",)]
