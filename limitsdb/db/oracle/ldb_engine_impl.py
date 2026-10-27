@@ -1748,6 +1748,23 @@ end;"""
         return created
 
     @staticmethod
+    def script_preamble(*, interactive: bool) -> list[str]:
+        settings = (
+            "set echo on define on verify off sqlblanklines on serveroutput on"
+            if interactive
+            else "set echo on define off sqlblanklines on"
+        )
+        return ["whenever oserror exit failure", "whenever sqlerror exit failure", settings]
+
+    @staticmethod
+    def script_prompt(message: str) -> str:
+        return f"prompt {message}"
+
+    @staticmethod
+    def script_epilogue() -> list[str]:
+        return ["exit success"]
+
+    @staticmethod
     def script_password_prompts(
         users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
     ) -> None:

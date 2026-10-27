@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-21
-last-updated: 2026-10-21
+last-reviewed: 2026-10-27
+last-updated: 2026-10-27
 ---
 
 # Current state
@@ -185,6 +185,7 @@ but does not replace the sources defined in `AGENTS.md`.
 - `DEC-029`: `get_connection` marks ORA-01017 as `InvalidCredentialsError` without telling a missing user from a wrong
   password; `ldb-impl` names the runtime user whose existing password differs, and its bootstrap script asks
   for that password once; `PEND-020` is resolved.
+- `DEC-045`: the script envelope (stop on error, echo, messages, exit) comes from the engine (`script_preamble`, `script_prompt`, `script_epilogue`); the core only orders it.
 - `DEC-030`: generated scripts ask for every password at their start (`script_password_prompts`), before
   changing anything.
 - `DEC-041`: `ldb-run --mode STATUS [--last n]` reports the state (`RUNNING`/`OK`/`ERRORS`/`PARTIAL`), rows and live Oracle session progress of the last executions for SOURCE and HISTORY; PREVIEW runs are excluded; `LDB_CTL` stores the worker session (rerun `ldb-impl`); executions are rebuilt from the `LDB_LOG` timestamps, with no run id in the log.

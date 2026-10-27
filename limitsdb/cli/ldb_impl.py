@@ -192,7 +192,7 @@ def run_cli() -> None:
         pending_dir = Path(config.execution.ddl_pending_dir)
         try:
             path = write_pending_file(
-                pending_dir, f"bootstrap_{config.schema}_{env.lower()}", render_script(title, fragments)
+                pending_dir, f"bootstrap_{config.schema}_{env.lower()}", render_script(engine, title, fragments)
             )
         except OSError as exc:
             logger.error(
