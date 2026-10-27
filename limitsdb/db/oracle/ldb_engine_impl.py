@@ -1948,6 +1948,37 @@ end;"""
         )
 
     @staticmethod
+    def _primary_key_check(table: TableDefinition) -> str:
+        """PL/SQL block that fails unless the table's primary key has the required name and columns.
+
+        ORA-02260 and ORA-02264 only say that some primary key or constraint name exists, so the script
+        checks it in the dictionary instead of trusting the tolerated error.
+        """
+        literal = OracleEngine._quote_literal
+        pk_name = f"{table.name}_PK"
+        columns = ",".join(table.primary_key or ())
+        message = (
+            f"Table {table.owner}.{table.name} must have primary key {pk_name} on ({columns}), but its primary "
+            "key or a constraint with that name is different. LimitsDb does not change it: fix it and rerun."
+        )
+        return (
+            "declare n number;\nbegin\n"
+            "  select count(*) into n from dba_constraints c\n"
+            f"    where c.owner = {literal(table.owner)} and c.table_name = {literal(table.name)}\n"
+            f"      and c.constraint_type = 'P' and c.constraint_name = {literal(pk_name)}\n"
+            "      and (select listagg(cc.column_name, ',') within group (order by cc.position)\n"
+            "             from dba_cons_columns cc\n"
+            "            where cc.owner = c.owner and cc.constraint_name = c.constraint_name) = "
+            f"{literal(columns)};\n"
+            f"  if n = 0 then raise_application_error(-20001, {literal(message)}); end if;\n"
+            "end;\n/"
+        )
+
+    @staticmethod
+    def _like_escape(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
     def _existing_user_notice(username: str) -> str:
         """PL/SQL block that warns when the user already exists, so its password stays unchanged."""
         name = username
@@ -2008,6 +2039,7 @@ end;"""
                     f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {fmt(f'{table.name}_PK')} PRIMARY KEY ({cols})"
                 )
                 sink(block(pk_sql, (-2260, -2264)))
+                sink(OracleEngine._primary_key_check(table))
             for index in table.indexes:
                 unique = "UNIQUE " if index.unique else ""
                 cols = ", ".join(fmt(col) for col in index.columns)
@@ -2038,7 +2070,9 @@ end;"""
             sink(
                 "declare n number;\n"
                 "begin\n"
-                f"  select count(*) into n from user_db_links where upper(db_link) like upper({literal(link.name)}) || '%';\n"
+                "  select count(*) into n from user_db_links\n"
+                f"    where db_link = {literal(link.name)}\n"
+                f"       or db_link like {literal(OracleEngine._like_escape(link.name) + '.%')} escape '\\';\n"
                 f"  if n = 0 then execute immediate '{create_link}'; end if;\n"
                 "end;\n/"
             )

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix the `ldb-impl` bootstrap script finishing with `LimitsDb: OK` over a wrong primary key: after the tolerated "already exists" error, it checks in the dictionary that the primary key of `LDB_CTL` and `LDB_LOG` has the required name and columns, and fails otherwise without changing it.
+- Fix the bootstrap script mistaking another database link for the configured one: a link `HISTORY` no longer prevents creating `HIST`, and `_` or `%` in a name are matched literally. An existing link is detected by its exact name or the name plus a domain suffix.
 - Fix `--mode STATUS` showing an old execution as `RUNNING` while a later run holds the table: a held runner lock now counts only when the table's key row names the run asked about.
 - Fix the monitoring grants script of `--mode STATUS` for case-sensitive roles: the grantee is quoted as the dictionary stores it (`LdbHistoryRole` no longer resolves to another role).
 - Fix the runtime-user ownership of tables comparing names after normalization: a user `hist` no longer hides the grants and checks of schema `HIST`. The username and owners are compared as exact names.

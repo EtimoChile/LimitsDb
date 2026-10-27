@@ -331,7 +331,10 @@ The script:
 - contains no passwords: it prompts for all of them (hidden input) at its start,
   before it changes anything;
 - can be rerun: each object is created in a PL/SQL block that ignores only its
-  own "already exists" error, and an existing database link is skipped;
+  own "already exists" error, and an existing database link (the exact name, or
+  the name followed by a domain, as in `NAME.WORLD`) is skipped. An existing
+  primary key of `LDB_CTL` or `LDB_LOG` is accepted only if it has the required
+  name and columns; otherwise the script fails and leaves the key unchanged;
 - creates the database link after reconnecting as the runtime user, who owns it.
   It asks for that user's password once and reuses it to reconnect. An existing user keeps its password, so the one entered must
   match it; the script says so before it reconnects.
