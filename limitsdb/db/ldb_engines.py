@@ -573,6 +573,28 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def script_preamble(*, interactive: bool) -> list[str]:
+        """Lines that open a script a DBA runs with the engine's own client.
+
+        They make the client stop at the first error with a non-zero exit code and show every statement it
+        runs. With ``interactive`` the script also asks for passwords and reports notices, so the client must
+        accept substitution values and show messages."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def script_prompt(message: str) -> str:
+        """The line that makes the client print ``message`` (one line of text) when the script reaches it."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def script_epilogue() -> list[str]:
+        """Lines that end a script successfully, after its final message."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def ensure_database_links(
         conn: Any,
         links: Sequence[DatabaseLinkDefinition],

@@ -427,7 +427,7 @@ def _status_environment(config: Config, engine: DatabaseEngine, env: Literal["SO
             if admin_conn is not None and admin_access is not None and not admin_access.grants:
                 access, monitor_conn = admin_access, admin_conn
             else:
-                script = _write_monitoring_grants_file(config, env, access)
+                script = _write_monitoring_grants_file(engine, config, env, access)
         return collect_environment(
             engine,
             conn,
@@ -444,7 +444,7 @@ def _status_environment(config: Config, engine: DatabaseEngine, env: Literal["SO
 
 
 def _write_monitoring_grants_file(
-    config: Config, env: Literal["SOURCE", "HISTORY"], access: MonitoringAccess
+    engine: DatabaseEngine, config: Config, env: Literal["SOURCE", "HISTORY"], access: MonitoringAccess
 ) -> Path | None:
     """Write the grants that open the session views to the runtime role, for a DBA to run (nothing is applied)."""
 
@@ -454,6 +454,7 @@ def _write_monitoring_grants_file(
             ddl_sink(grant)
 
     path = deliver_ddl(
+        engine,
         config,
         produce,
         destination="file",
@@ -643,6 +644,7 @@ def _ensure_history_tables(
                 )
 
         deliver_ddl(
+            engine,
             config,
             apply_structure,
             destination="execute",
@@ -683,6 +685,7 @@ def _apply_history_delta_without_admin(
 
     try:
         deliver_ddl(
+            engine,
             config,
             apply_delta,
             destination="execute",
@@ -849,6 +852,7 @@ def _write_script_ddl_files(
             engine.ensure_table_privileges(None, _app_role(config, "HISTORY"), tables, privileges, ddl_sink=ddl_sink)
 
     deliver_ddl(
+        engine,
         config,
         script_history,
         destination="file",
@@ -865,6 +869,7 @@ def _write_script_ddl_files(
                 engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, privileges, ddl_sink=ddl_sink)
 
         deliver_ddl(
+            engine,
             config,
             script_source_grants,
             destination="file",
@@ -944,6 +949,7 @@ def _write_source_grants_file(config: Config, engine: DatabaseEngine, missing: l
             engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, (privilege,), ddl_sink=ddl_sink)
 
     deliver_ddl(
+        engine,
         config,
         produce,
         destination="file",

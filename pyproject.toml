@@ -98,7 +98,7 @@ patch = ["subprocess"]
 [tool.coverage.report]
 show_missing = true
 
-# para las libs externas sin stubs:
+# for external libraries without stubs:
 [[tool.mypy.overrides]]
 module = [
   "pytest",

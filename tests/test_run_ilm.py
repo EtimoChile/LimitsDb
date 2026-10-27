@@ -23,6 +23,8 @@ from limitsdb.db.ldb_engines import (
 )
 from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
 
+from .script_envelope import ScriptEnvelope
+
 # ---------------------------------------------------------------------------
 # Config: ILM run prerequisites
 # ---------------------------------------------------------------------------
@@ -1172,7 +1174,7 @@ class _ImmediateExecutor:
         return future
 
 
-class _StatusEngine:
+class _StatusEngine(ScriptEnvelope):
     def __init__(self):
         self.events = []
 
@@ -2001,7 +2003,7 @@ _MULTILINE_DDL = """ALTER TABLE HIST.{table} ADD (
 )"""
 
 
-class _HistoryDdlEngine:
+class _HistoryDdlEngine(ScriptEnvelope):
     """Engine double for a full ldb_run: reports a DDL delta per history table and records how it was applied.
 
     Connections resolve credentials like a real engine, so a missing credential raises when one is requested."""
@@ -2229,7 +2231,13 @@ def test_failures_collected_before_the_producer_raises_are_written_then_error_is
     # When / Then: the original error propagates ...
     with pytest.raises(RuntimeError, match="connection lost"):
         ldb_ddl.deliver_ddl(
-            config, produce, destination="execute", env="HISTORY", file_stem="history_ddl", description="x."
+            _HistoryDdlEngine(),
+            config,
+            produce,
+            destination="execute",
+            env="HISTORY",
+            file_stem="history_ddl",
+            description="x.",
         )
 
     # ... and the statement collected so far is on disk
@@ -2265,11 +2273,10 @@ def test_failed_history_ddl_goes_to_pending_file_and_run_exits_1_after_trying_al
     content = files[0].read_text(encoding="utf-8")
     assert f"{bad};" in content
     assert "-- Failed with: ORA-01031" in content
-    # Runnable as plain SQL*Plus: stops on error and ends with an explicit OK banner
+    # The engine's envelope surrounds the statements: preamble first, then the OK message, then the epilogue
     lines = content.splitlines()
-    assert "whenever sqlerror exit failure" in lines
-    assert lines.index("whenever sqlerror exit failure") < lines.index(f"{bad};")
-    assert lines[-1] == "exit success" and "LimitsDb: OK" in lines[-2]
+    assert lines.index("#stop-on-error") < lines.index(f"{bad};")
+    assert lines[-1] == "#end" and lines[-2].startswith("#say LimitsDb: OK")
     assert ok_1 not in content and ok_2 not in content
     pending_errors = [message for message in recorder.messages.get("error", []) if str(files[0]) in message]
     assert len(pending_errors) == 1
@@ -3295,7 +3302,7 @@ def _running(table="ITEMS", **overrides) -> TableRunRecord:
 _FULL_ACCESS = MonitoringAccess(session=True, progress=True, waits=True)
 
 
-class _MonitorEngine:
+class _MonitorEngine(ScriptEnvelope):
     """Engine double that answers the monitoring contract of DatabaseEngine per environment."""
 
     def __init__(
@@ -3803,6 +3810,23 @@ def test_an_engine_without_monitoring_still_gets_states_rows_and_no_grants_scrip
     assert "RUNNING" in output
     assert "monitoring" not in output
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_core_adds_no_client_commands_to_the_pending_file_of_an_engine(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: DatabaseEngine.script_preamble/script_prompt/script_epilogue — the engine-independent core writes
+    # no dialect text; every client command of the pending file comes from the engine
+    # Given: an engine whose envelope is not SQL*Plus and a run that writes a history DDL file
+    engine = _HistoryDdlEngine(delta={"HIST.T1": ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]})
+    config = _history_ddl_config(mode="SCRIPT", history_admin=True, ddl_pending_dir=str(tmp_path / "pending"))
+
+    # When: ldb-run SCRIPT writes it
+    assert _run_ldb(monkeypatch, config, engine, rows=_extra_rows()) == 0
+
+    # Then: nothing outside comments and statements is SQL*Plus
+    content = _script_files(tmp_path / "pending")["history_ddl"]
+    for command in ("whenever", "set echo", "prompt ", "exit "):
+        assert command not in content
+    assert "#say LimitsDb: OK" in content
 
 
 def _history_indexes_run(monkeypatch: pytest.MonkeyPatch, history_indexes, columns=("ID", "EVENT_DATE", "CUSTOMER")):
