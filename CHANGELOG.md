@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-27
+
 - **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `script_preamble(interactive=...)`, `script_prompt(message)` and `script_epilogue()`. The client commands that wrap the pending DDL files and the `ldb-impl` bootstrap script (stop at the first error, echo, messages, exit code) now come from the engine instead of the core; the Oracle engine writes the same SQL*Plus text as before.
 - Fix the release workflow publishing to PyPI regardless of TestPyPI: `publish-pypi` now needs `publish-testpypi`, which no longer ignores its failures.
 - Add `history_indexes` to the ILM rules: a per-table map of index name to columns that `ldb-run` keeps on the history table, always non-unique so they help history queries and never reject a load. They are created with the history DDL (admin credentials, else the runtime user, with failures written to the pending DDL file) and are not dropped by `history_drop_unmanaged_indexes`. A malformed entry stops the run before any change.
