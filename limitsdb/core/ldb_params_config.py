@@ -18,7 +18,7 @@ from limitsdb.core.ldb_config_loader import load_runtime_config, read_env_overri
 from limitsdb.core.ldb_errors import ValidationError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_meta import Cli, CliOnly, Env, Help, Secret
-from limitsdb.core.ldb_utils import resolve_schema_file  # markers for Annotated metadata
+from limitsdb.core.ldb_utils import resolve_pending_dir, resolve_schema_file  # markers for Annotated metadata
 
 logger = get_logger("params_config")
 
@@ -394,7 +394,11 @@ def build_argparser_from_config() -> argparse.ArgumentParser:
             parser.add_argument(cli, type=_arg_type_from_default(default), **arg_kwargs)
     # Builder-only flags (not part of Config dataclass)
     parser.add_argument(
-        "--config-dir", help="Configuration root (overrides autodiscovery of ~/.config/LimitsDb and /etc/limitsdb)"
+        "--config-dir",
+        help=(
+            "Configuration root (overrides autodiscovery of ~/.config/LimitsDb and /etc/limitsdb, "
+            r"or %%PROGRAMDATA%%\LimitsDb on Windows)"
+        ),
     )
     parser.add_argument("--config-file", help="Additional YAML overlay (highest priority)")
     parser.add_argument(
@@ -491,6 +495,10 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> d
     # Ensure schema/profile land in the object (the loader also uses them but they are not part of the dict)
     final["schema"] = schema
     final["profile"] = profile
+    if final.get("ddl_pending_dir"):
+        final["ddl_pending_dir"] = resolve_pending_dir(
+            str(final["ddl_pending_dir"]), getattr(cli_args, "config_dir", None)
+        )
     final["ilm_config_file"] = resolve_schema_file(
         schema=str(schema),
         profile=cast(str | None, profile),

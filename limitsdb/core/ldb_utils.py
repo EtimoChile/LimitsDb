@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from collections.abc import Iterable, Sequence
 from importlib.resources import files as ir_files
 from pathlib import Path
@@ -164,6 +166,19 @@ def resolve_schema_file(
     return None
 
 
+def resolve_pending_dir(pending_dir: str, explicit_config_dir: str | None) -> str:
+    """Return ``pending_dir`` as an absolute path.
+
+    A relative directory is placed under the configuration directory: ``--config-dir`` when given,
+    otherwise the user configuration root.
+    """
+    path = Path(pending_dir)
+    if not path.is_absolute():
+        base = Path(explicit_config_dir) if explicit_config_dir else get_config_roots()[0]
+        path = base / path
+    return str(path.resolve())
+
+
 def _hints() -> dict[str, Any]:
     from limitsdb.core.ldb_params_config import Config  # lazy import to avoid circulars
 
@@ -232,11 +247,26 @@ def write_or_update_secrets(schema: str, profile: str | None, config_root: str |
 
 
 def encrypt_secrets_in_place(schema: str, profile: str | None, config_root: str | None) -> Path | None:
+    """Encrypt the plaintext values of the secrets file that the loader will read.
+
+    The file is resolved like the loader does (explicit root, else user root, else system root), so a
+    configuration discovered in the system root is encrypted where it lives. A file that cannot be written
+    is reported with a ``SecretError`` and left unchanged; after encrypting a system-root file the caller is
+    advised to drop the write permission that was granted for the occasion.
+    """
     load_or_create_key()
-    sd = _schema_dir(schema, profile, config_root)
-    p = sd / ("secrets.json" if not profile else f"secrets.{profile}.json")
-    if not p.exists():
+    resolved = resolve_schema_file(
+        schema=schema,
+        profile=profile,
+        explicit_config_dir=config_root,
+        explicit_file=None,
+        prefix_name="secrets",
+        extension_name="json",
+        description="secrets file",
+    )
+    if resolved is None:
         return None
+    p = Path(resolved)
     try:
         loaded: Any = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -250,10 +280,22 @@ def encrypt_secrets_in_place(schema: str, profile: str | None, config_root: str 
         if isinstance(v, str) and v != "" and not is_encrypted(v):
             data[k] = encrypt(v)
             updated = True
-    if updated:
+    if not updated:
+        return None
+    try:
         p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        return p
-    return None
+    except OSError as exc:
+        raise SecretError(
+            f"Secrets file {p} holds cleartext secrets but is not writable ({exc}). Grant write permission on it "
+            "temporarily, rerun to encrypt it, and then remove the write permission again."
+        ) from exc
+    if p.is_relative_to(get_config_roots()[1].resolve()):
+        logger.warning(
+            "Secrets in %s were encrypted. Remove the write permission you granted on it: a read-only "
+            "system-wide secrets file is safer.",
+            p,
+        )
+    return p
 
 
 def write_config_yaml(schema: str, profile: str | None, config_root: str | None, overwrite: bool = False) -> Path:
@@ -300,6 +342,10 @@ def write_ilm_example(schema: str, profile: str | None, config_root: str | None,
 
 def get_config_roots(appname: str = APPNAME) -> tuple[Path, Path]:
     d = PlatformDirs(appname, appauthor=False)
+    if sys.platform == "win32":
+        # "/etc" has no meaning on Windows (it would resolve to <current drive>:\etc); machine-wide
+        # configuration lives under ProgramData.
+        return Path(d.user_config_dir), Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / appname
     return Path(d.user_config_dir), Path("/etc/limitsdb")
 
 
