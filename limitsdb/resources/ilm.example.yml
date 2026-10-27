@@ -44,6 +44,9 @@
 #         history_addtl_filter_expr: "@INV_STATUS='H'" # Optional history-only expression. Falls back to additional_filter_expr when omitted.  (SQL text: engine identifier rules)
 #         extra_select_tables: "GL.INV_STATUSES" # Optional tables read by additional_filter_expr subqueries: [OWNER.]TABLE list that receives SELECT grants only
 #         history_extra_select_tables: "INV_STATUSES" # Optional history-only list for history_addtl_filter_expr. Falls back to extra_select_tables when omitted
+#         history_indexes: # Optional non-unique indexes of the history table (never unique: they help queries, never reject a row). Index name: comma-separated columns, exact names
+#           INV_H_DATE: "INV_DSP_DATE"
+#           INV_H_STATUS: "INV_STATUS, INV_DSP_DATE"
 #   - source_owner: GL # Child table definition. Inherit conditions from parent tables. Can have multiple parent tables
 #     history_owner: GL
 #     table_name: INV_DET

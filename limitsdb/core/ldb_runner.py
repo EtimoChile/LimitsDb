@@ -3,7 +3,7 @@ import os
 import socket
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from functools import partial
 from operator import attrgetter
@@ -24,6 +24,7 @@ from limitsdb.db.ldb_engines import (
     DatabaseEngine,
     DdlFailures,
     DdlSink,
+    IndexDefinition,
     MonitoringAccess,
     TableDefinition,
 )
@@ -491,6 +492,38 @@ def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDef
     )
 
 
+def _parse_history_indexes(
+    rule: IlmRule, key: tuple[str, str], column_names: Iterable[str] | None = None
+) -> tuple[IndexDefinition, ...]:
+    """Parse ``history_indexes`` (index name -> comma-separated columns) into non-unique index definitions.
+
+    History indexes help the queries on history and never reject a row, so they are never unique. With
+    ``column_names`` every column must be one of them.
+    """
+    value = rule.get("history_indexes")
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping):
+        raise ValueError(f"history_indexes for {key} must map each index name to its columns")
+    primary_key_index = f"{rule['table_name']}_PK"
+    known = set(column_names) if column_names is not None else None
+    indexes: list[IndexDefinition] = []
+    for name, columns_text in value.items():
+        index_name = str(name).strip()
+        if not index_name or "." in index_name or " " in index_name:
+            raise ValueError(f"Invalid history_indexes name '{name}' for {key}: expected a single index name")
+        if index_name == primary_key_index:
+            raise ValueError(f"history_indexes name '{index_name}' for {key} is the name of the primary key")
+        columns = tuple(column.strip() for column in str(columns_text or "").split(",") if column.strip())
+        if not columns or len(set(columns)) != len(columns) or any(" " in column for column in columns):
+            raise ValueError(f"Invalid history_indexes columns '{columns_text}' for index {index_name} of {key}")
+        unknown = [column for column in columns if known is not None and column not in known]
+        if unknown:
+            raise ValueError(f"history_indexes {index_name} of {key} names unknown column(s): {', '.join(unknown)}")
+        indexes.append(IndexDefinition(name=index_name, columns=columns, unique=False))
+    return tuple(indexes)
+
+
 def _build_history_table_definition(
     config: Config,
     engine: DatabaseEngine,
@@ -515,6 +548,7 @@ def _build_history_table_definition(
         name=table_name,
         columns=tuple(required_columns),
         primary_key=primary_key,
+        indexes=_parse_history_indexes(cnd0, (cnd0["source_owner"], table_name), (c.name for c in required_columns)),
         drop_unmanaged_indexes=config.administration.history_drop_unmanaged_indexes,
     )
 
@@ -1209,6 +1243,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
         _validate_orphan_configuration(config, cnd0, key)
+        _parse_history_indexes(cnd0, key)
         runtime_owner = _runtime_owner(config, cnd0)
         table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(
             connection, runtime_owner, cnd0["table_name"]
