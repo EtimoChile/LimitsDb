@@ -1960,8 +1960,8 @@ def _history_ddl_config(
     )
 
 
-def _make_tables_config(*table_names: str) -> ldb_runner.TablesConfig:  # type: ignore[return-value]
-    """Return a TablesConfig with one active entry per table name."""
+def _make_tables_config(*table_names: str, columns: tuple[str, ...] = (), **cond: object) -> ldb_runner.TablesConfig:  # type: ignore[return-value]
+    """Return a TablesConfig with one active entry per table name; ``columns`` are the table's column names."""
     row: dict = {
         "source_owner": "SRC",
         "history_owner": "HIST",
@@ -1978,10 +1978,16 @@ def _make_tables_config(*table_names: str) -> ldb_runner.TablesConfig:  # type: 
         "long_columns": None,
         "orphan_check_column": None,
         "join_expr": None,
+        **cond,
+    }
+    metadata = {
+        column: ColumnDefinition(name=column, data_type="varchar2", id=index, length=20)
+        for index, column in enumerate(columns)
     }
     return {  # type: ignore[return-value]
         ("SRC", name): {
             "conds": [{**row, "table_name": name}],
+            **({"columns_metadata": metadata} if metadata else {}),
             "referencing_tables": [],
             "skip": False,
             "sql_block": "select 1 from dual",
@@ -2018,6 +2024,7 @@ class _HistoryDdlEngine:
         self.missing_privileges: dict[str, list[tuple[str, str, str]]] = {}
         self.enabled_roles: set[str] | None = None  # None: every role is enabled
         self.structure_reads: list[tuple[str | None, str | None]] = []
+        self.table_definitions: list = []
 
     def get_connection(self, config, *, admin=False, env=None):
         ldb_utils.get_effective_credentials(config, admin=admin, env=env)
@@ -2034,6 +2041,7 @@ class _HistoryDdlEngine:
 
     def ensure_table_structure(self, conn, table, table_cnf, *, reference=None, ddl_sink=None, ddl_failures=None):
         self.structure_reads.append((conn.env if conn else None, reference[0] if reference else None))
+        self.table_definitions.append(table)
         if conn is None:
             statements = [f"CREATE TABLE {table.owner}.{table.name} (ID NUMBER)"]
         elif reference:
@@ -2105,10 +2113,15 @@ class _RecordingLogger:
 
 
 def _run_ldb(
-    monkeypatch: pytest.MonkeyPatch, config: Config, engine: _HistoryDdlEngine, *tables: str, rows: list | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    engine: _HistoryDdlEngine,
+    *tables: str,
+    rows: list | None = None,
+    table_options: dict | None = None,
 ) -> int:
     """Run ldb_run with the engine double and one history table per name (T1 by default); return the exit code."""
-    tables_config = _make_tables_config(*(tables or ("T1",)))
+    tables_config = _make_tables_config(*(tables or ("T1",)), **(table_options or {}))
     monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
     monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: rows or [])
     monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: tables_config)
@@ -3790,3 +3803,67 @@ def test_an_engine_without_monitoring_still_gets_states_rows_and_no_grants_scrip
     assert "RUNNING" in output
     assert "monitoring" not in output
     assert list(tmp_path.iterdir()) == []
+
+
+def _history_indexes_run(monkeypatch: pytest.MonkeyPatch, history_indexes, columns=("ID", "EVENT_DATE", "CUSTOMER")):
+    """Run ldb-run PREPARE-free EXECUTE over T1 with the given ``history_indexes``; return (code, engine)."""
+    engine = _HistoryDdlEngine()
+    rc = _run_ldb(
+        monkeypatch,
+        _history_ddl_config(history_admin=True),
+        engine,
+        table_options={"columns": columns, "history_indexes": history_indexes},
+    )
+    return rc, engine
+
+
+def test_history_indexes_are_requested_from_the_engine_as_non_unique_indexes(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > History indexes — history_indexes maps an index name to its columns;
+    # the indexes help queries on history and never reject a row, so they are never unique
+    # Given: a table with two history indexes, one of them over two columns
+    # When: ldb-run reconciles the history table
+    rc, engine = _history_indexes_run(monkeypatch, {"T1_H_DATE": "EVENT_DATE", "T1_H_CUST": "CUSTOMER, EVENT_DATE"})
+
+    # Then: the engine is asked for exactly those indexes, in order, none unique
+    assert rc == 0
+    (table,) = engine.table_definitions
+    assert [(i.name, i.columns, i.unique) for i in table.indexes] == [
+        ("T1_H_DATE", ("EVENT_DATE",), False),
+        ("T1_H_CUST", ("CUSTOMER", "EVENT_DATE"), False),
+    ]
+
+
+def test_a_table_without_history_indexes_asks_the_engine_for_none(monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > ILM Rule Semantics > History indexes — without the setting history tables keep only
+    # their primary key
+    rc, engine = _history_indexes_run(monkeypatch, None)
+
+    assert rc == 0
+    assert engine.table_definitions[0].indexes == ()
+
+
+@pytest.mark.parametrize(
+    "indexes, message",
+    [
+        ("EVENT_DATE", "must map each index name"),
+        ({"T1_PK": "ID"}, "name of the primary key"),
+        ({"HIST.IX": "ID"}, "single index name"),
+        ({"IX": ""}, "Invalid history_indexes columns"),
+        ({"IX": "ID, ID"}, "Invalid history_indexes columns"),
+        ({"IX": "ID, MISSING"}, "unknown column"),
+    ],
+)
+def test_malformed_history_indexes_stop_the_run_before_any_ddl(monkeypatch: pytest.MonkeyPatch, indexes, message: str):
+    # Spec: README > ILM Rule Semantics > History indexes — a name is a single index name other than the
+    # primary key's, and its columns are distinct columns of the table
+    # Given: a setting that breaks one of those rules
+    # When / Then: the run is refused naming the problem, and nothing was applied
+    engine = _HistoryDdlEngine(delta={"T1": ["ALTER TABLE HIST.T1 ADD (C1 NUMBER)"]})
+    with pytest.raises(ValueError, match=message):
+        _run_ldb(
+            monkeypatch,
+            _history_ddl_config(history_admin=True),
+            engine,
+            table_options={"columns": ("ID",), "history_indexes": indexes},
+        )
+    assert engine.attempted == [] and engine.admin_applied == []

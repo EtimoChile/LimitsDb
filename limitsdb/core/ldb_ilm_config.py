@@ -27,6 +27,7 @@ _VALID_TABLE_KEYS: set[str] = {
     "extra_select_tables",
     "history_extra_select_tables",
     "history_hint_expr",
+    "history_indexes",
     "orphan_check_column",
     "referencing_tables",
     "join_expr",
@@ -57,6 +58,7 @@ class IlmRule(TypedDict):
     extra_select_tables: str | None
     history_extra_select_tables: str | None
     history_hint_expr: str | None
+    history_indexes: dict[str, str] | None
     source_orphan_purge: str
     orphan_check_column: str | None
     has_lob_columns: str
@@ -108,6 +110,7 @@ def normalize_table_row(table: dict[str, Any], cond: dict[str, Any]) -> IlmRule:
         "extra_select_tables",
         "history_extra_select_tables",
         "history_hint_expr",
+        "history_indexes",
         "orphan_check_column",
         "referencing_tables",
         "join_expr",
