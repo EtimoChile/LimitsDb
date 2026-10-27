@@ -524,6 +524,20 @@ def _parse_history_indexes(
     return tuple(indexes)
 
 
+def _history_columns(table_cnf: ProcessedTableConfig) -> list[ColumnDefinition]:
+    """Columns of a history table: those of the table, then the derived ones."""
+    columns: list[ColumnDefinition] = sorted(table_cnf.get("columns_metadata", {}).values(), key=attrgetter("id"))
+    for other_column in table_cnf.get("other_columns", []):
+        columns.append(other_column["metadata"])
+    return columns
+
+
+def _validate_history_indexes_syntax(rows: Iterable[IlmRule]) -> None:
+    """Reject a malformed ``history_indexes`` before any grant or DDL; its columns are checked once they are known."""
+    for row in rows:
+        _parse_history_indexes(row, (row["source_owner"], row["table_name"]))
+
+
 def _build_history_table_definition(
     config: Config,
     engine: DatabaseEngine,
@@ -533,11 +547,7 @@ def _build_history_table_definition(
     cnd0 = table_cnf["conds"][0]
     history_owner, table_name = cnd0["history_owner"], cnd0["table_name"]
     metadata_owner = _runtime_owner(config, cnd0)
-    required_columns: list[ColumnDefinition] = sorted(
-        table_cnf.get("columns_metadata", {}).values(), key=attrgetter("id")
-    )
-    for other_column in table_cnf.get("other_columns", []):
-        required_columns.append(other_column["metadata"])
+    required_columns = _history_columns(table_cnf)
     pk_columns = list(engine.get_primary_key_columns(source_connection, metadata_owner, table_name, table_cnf))
     if config.execution.add_ldb_columns:
         if "LDB_PROCESS_DATE" not in pk_columns:
@@ -1437,6 +1447,8 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                     "metadata": ColumnDefinition(name="LDB_INSERT_DATE", data_type="date", nullable=False),
                 }
             )
+        # The history table exists only after this validation, so its indexes are checked against its columns here.
+        _parse_history_indexes(cnd0, key, (column.name for column in _history_columns(table_cnf)))
         _, cnf_table_name = key
         join_expr = _runtime_join_expression(config, cnd0, engine, history_owners)
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
@@ -1472,6 +1484,7 @@ def ldb_run(config: Config) -> None:
             raise SystemExit(_status_mode(config, engine))
         connection = engine.get_connection(config)
         tables_conf_rows = _load_offline_rows(config)
+        _validate_history_indexes_syntax(tables_conf_rows)
         source_plan = _privilege_plan(config, tables_conf_rows, "SOURCE", engine)
         # The runtime user reads column metadata through these grants, so SCRIPT applies them too when it can
         source_grants_applied = False

@@ -2084,12 +2084,14 @@ end;"""
                 f"CREATE DATABASE LINK {fmt(link.name)} CONNECT TO {fmt(link.username)} "
                 f'IDENTIFIED BY "&{variable}" USING {literal(link.dsn)}'
             ).replace("'", "''")
+            # The dictionary stores database link names in upper case, however the name was written in the CREATE.
+            stored_name = link.name.upper()
             sink(
                 "declare n number;\n"
                 "begin\n"
                 "  select count(*) into n from user_db_links\n"
-                f"    where db_link = {literal(link.name)}\n"
-                f"       or db_link like {literal(OracleEngine._like_escape(link.name) + '.%')} escape '\\';\n"
+                f"    where db_link = {literal(stored_name)}\n"
+                f"       or db_link like {literal(OracleEngine._like_escape(stored_name) + '.%')} escape '\\';\n"
                 f"  if n = 0 then execute immediate '{create_link}'; end if;\n"
                 "end;\n/"
             )
@@ -2350,7 +2352,8 @@ end;"""
 
     @staticmethod
     def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name])
+        # The dictionary stores database link names in upper case, however the name was written in the CREATE.
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name.upper()])
 
     @staticmethod
     def _get_primary_key_info(

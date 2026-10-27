@@ -500,10 +500,9 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> d
     # Ensure schema/profile land in the object (the loader also uses them but they are not part of the dict)
     final["schema"] = schema
     final["profile"] = profile
-    if final.get("ddl_pending_dir"):
-        final["ddl_pending_dir"] = resolve_pending_dir(
-            str(final["ddl_pending_dir"]), getattr(cli_args, "config_dir", None)
-        )
+    # Neither the loader nor argparse supplies the default, so the declared one is resolved like any other value.
+    pending_dir = final.get("ddl_pending_dir") or Config.ddl_pending_dir
+    final["ddl_pending_dir"] = resolve_pending_dir(str(pending_dir), getattr(cli_args, "config_dir", None))
     final["ilm_config_file"] = resolve_schema_file(
         schema=str(schema),
         profile=cast(str | None, profile),
