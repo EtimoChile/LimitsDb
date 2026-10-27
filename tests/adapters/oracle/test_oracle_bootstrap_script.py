@@ -40,7 +40,7 @@ def _bootstrap(
     OracleEngine.ensure_database_links(
         None, links, ddl_sink=fragments.append, connect_as=(runtime_username, runtime_dsn)
     )
-    return render_script(title, fragments)
+    return render_script(OracleEngine, title, fragments)
 
 
 def _script() -> str:
@@ -277,3 +277,20 @@ def test_bootstrap_script_looks_up_a_lowercase_user_in_the_dictionary_as_it_was_
     assert "from dba_users where username = 'ldb'" in script
     assert "User ldb already exists" in script
     assert "'LDB'" not in script
+
+
+def test_oracle_script_envelope_stops_at_the_first_error_and_ends_with_exit_success():
+    # Spec: DatabaseEngine.script_preamble/script_prompt/script_epilogue — the engine owns the client commands
+    # of the scripts the core composes
+    # When: the engine is asked for the envelope of a non-interactive and an interactive script
+    plain = OracleEngine.script_preamble(interactive=False)
+    interactive = OracleEngine.script_preamble(interactive=True)
+
+    # Then: both stop on the first error; only the interactive one accepts substitution values and notices
+    for lines in (plain, interactive):
+        assert "whenever sqlerror exit failure" in lines
+        assert "whenever oserror exit failure" in lines
+    assert "set echo on define off sqlblanklines on" in plain
+    assert "set echo on define on verify off sqlblanklines on serveroutput on" in interactive
+    assert OracleEngine.script_prompt("LimitsDb: OK") == "prompt LimitsDb: OK"
+    assert OracleEngine.script_epilogue() == ["exit success"]
