@@ -235,6 +235,11 @@ class Config:
         self.mode = normalized_mode  # type: ignore[assignment]
         if self.last < 1:
             raise ValidationError(f"last must be at least 1: {self.last}")
+        if self.history_baseline not in get_args(HistoryBaseline):
+            raise ValidationError(
+                f"invalid history_baseline: {self.history_baseline!r}; "
+                f"valid values: {', '.join(get_args(HistoryBaseline))}"
+            )
         if self.mode == "SCRIPT":
             self.generate_script = True
         requires_connections = self.mode in MODES_REQUIRING_CONNECTIONS

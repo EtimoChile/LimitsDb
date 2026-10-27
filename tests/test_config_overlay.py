@@ -553,6 +553,26 @@ def test_history_baseline_defaults_to_empty_and_is_overridable_by_env_and_cli(mo
     assert ldb_params_config.read_env_overrides(bindings)["history_baseline"] == "SOURCE"
 
 
+@pytest.mark.parametrize("value", ["SORUCE", "source", "", "FULL"])
+def test_history_baseline_outside_empty_or_source_is_rejected_from_any_source(value: str):
+    # Spec: README > Configuration parameters reference — history_baseline accepts only EMPTY or
+    # SOURCE; YAML files and --set reach Config without passing through argparse choices.
+    # Given: a value supplied as YAML or --set would supply it, bypassing the CLI flag
+    # When / Then: the configuration is rejected naming the key and the accepted values
+    with pytest.raises(ldb_params_config.ValidationError, match=r"history_baseline.*EMPTY, SOURCE"):
+        ldb_params_config.Config.from_dict({"schema": "s", "mode": "PLAN", "history_baseline": value})
+
+
+@pytest.mark.parametrize("value", ["EMPTY", "SOURCE"])
+def test_history_baseline_empty_or_source_is_accepted_from_yaml_or_set(value: str):
+    # Spec: README > Configuration parameters reference — history_baseline: EMPTY | SOURCE.
+    # Given / When: a documented value arrives without passing through argparse
+    config = ldb_params_config.Config.from_dict({"schema": "s", "mode": "PLAN", "history_baseline": value})
+
+    # Then: it is kept in the typed execution view
+    assert config.execution.history_baseline == value
+
+
 def test_persistent_column_settings_cannot_be_overridden_via_cli_set(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/configuration-contract.md (DEC-013) — use_added_columns and
     # add_ldb_columns are set in persistent YAML only; --set must reject them to
