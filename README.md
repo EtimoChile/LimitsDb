@@ -404,8 +404,8 @@ Each execution has one state:
 | `PARTIAL` | No table is running or failed, but some did not finish: the run was interrupted, for example because its session ended. |
 
 Whether a runner is alive is verified by trying its table lock (`LDB_RUN_LOCK`) with `NOWAIT` and releasing it at
-once: if another session holds it, the run is active; if the lock is free, the run died and the table is
-`INTERRUPTED`. `SCRIPT` runs take no lock, so they are checked through `gv$session` instead.
+once: if another session holds it for that run (the table's key row names the run), the run is active; if the
+lock is held for a later run, or is free, the run is not alive and the table is `INTERRUPTED`. `SCRIPT` runs take no lock, so they are checked through `gv$session` instead.
 
 Every execution shows its rows processed, start and elapsed time, and each table its status and rows. For a
 table being processed, Oracle adds:
@@ -542,7 +542,8 @@ is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
   keep indexes a DBA adds on purpose.
 - Tables owned by the runtime user itself are left out of the grants and of
   their checks: an owner already holds every privilege on its own tables, and
-  Oracle does not record a grant to oneself.
+  Oracle does not record a grant to oneself. The runtime username and the owners
+  are compared as exact names: user `hist` does not own the tables of schema `HIST`.
 - It creates or alters the history tables and grants them to the history role,
   with the same admin or runtime-connection rules as `EXECUTE`: statements that
   fail go to the pending file.

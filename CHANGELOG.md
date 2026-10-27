@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix `--mode STATUS` showing an old execution as `RUNNING` while a later run holds the table: a held runner lock now counts only when the table's key row names the run asked about.
+- Fix the monitoring grants script of `--mode STATUS` for case-sensitive roles: the grantee is quoted as the dictionary stores it (`LdbHistoryRole` no longer resolves to another role).
+- Fix the runtime-user ownership of tables comparing names after normalization: a user `hist` no longer hides the grants and checks of schema `HIST`. The username and owners are compared as exact names.
 - Fix pending DDL files and `ldb-impl` bootstrap scripts overwriting an earlier file of the same second: they are created exclusively and a name already taken gets a `_2`, `_3`... suffix. A relative `ddl_pending_dir` is now placed under the configuration directory (`--config-dir`, else the user configuration root) instead of the working directory, and the logs show absolute paths.
 - Fix DDL failures collected by `ldb-run` being lost when a later engine call raised: they are written to the pending file before the error propagates.
 
