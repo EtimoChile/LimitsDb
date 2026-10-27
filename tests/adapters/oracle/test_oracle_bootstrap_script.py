@@ -129,6 +129,78 @@ def test_bootstrap_script_creates_database_link_after_connecting_as_runtime_user
     assert "user_db_links" in script  # skipped when the link already exists
 
 
+def _tables_script(table: TableDefinition) -> str:
+    fragments: list[str] = []
+    OracleEngine.ensure_tables(None, [table], ddl_sink=fragments.append)
+    return "\n".join(fragments)
+
+
+def test_bootstrap_script_fails_when_the_existing_primary_key_is_not_the_required_one():
+    # Spec: README > ldb-impl without admin credentials — an "already exists" error for the primary key is
+    # tolerated only when the existing key has the required name and columns; otherwise the script fails
+    # Given: a control table whose primary key is the named constraint on two columns
+    table = TableDefinition(
+        owner="LDB_USER",
+        name="LDB_LOG",
+        columns=(ColumnDefinition(name="A", data_type="NUMBER"), ColumnDefinition(name="B", data_type="NUMBER")),
+        primary_key=("A", "B"),
+    )
+
+    # When: its script is generated
+    script = _tables_script(table)
+
+    # Then: after the tolerant block, the dictionary is checked for that name, type and column order, and a
+    # difference raises an error (which stops the script: whenever sqlerror exit failure)
+    tolerant = script.index("-2260, -2264")
+    check = script.index("from dba_constraints", tolerant)
+    assert "c.owner = 'LDB_USER' and c.table_name = 'LDB_LOG'" in script[check:]
+    assert "c.constraint_type = 'P' and c.constraint_name = 'LDB_LOG_PK'" in script[check:]
+    assert "within group (order by cc.position)" in script[check:]
+    assert ") = 'A,B';" in script[check:]
+    assert "raise_application_error(-20001" in script[check:]
+    assert "LimitsDb does not change it" in script[check:]
+
+
+def test_bootstrap_script_checks_the_primary_key_of_a_lowercase_table_as_it_was_created():
+    # Spec: identifiers are handled in data-dictionary form — a lowercase name is a quoted identifier
+    table = TableDefinition(
+        owner="ldb", name="log", columns=(ColumnDefinition(name="id", data_type="NUMBER"),), primary_key=("id",)
+    )
+
+    script = _tables_script(table)
+
+    assert "c.owner = 'ldb' and c.table_name = 'log'" in script
+    assert "c.constraint_name = 'log_PK'" in script
+    assert ") = 'id';" in script
+    assert "'LDB'" not in script
+
+
+def _link_script(name: str) -> str:
+    fragments: list[str] = []
+    link = DatabaseLinkDefinition(name=name, username="U", password=_SECRET, dsn="host/svc")
+    OracleEngine.ensure_database_links(None, [link], ddl_sink=fragments.append, connect_as=("ldb_user", "host/svc"))
+    return "\n".join(fragments)
+
+
+def test_bootstrap_script_detects_an_existing_database_link_by_exact_name_or_domain_suffix_only():
+    # Spec: README > ldb-impl without admin credentials — an existing database link is skipped; a link
+    # whose name merely starts with the configured one (HISTORY next to HIST) is another link
+    script = _link_script("HIST")
+
+    assert "where db_link = 'HIST'" in script
+    assert "or db_link like 'HIST.%' escape '\\'" in script
+    assert "like 'HIST%'" not in script
+    assert "upper(db_link)" not in script
+
+
+def test_bootstrap_script_matches_underscore_and_percent_of_a_link_name_literally():
+    # Spec: identifiers are literal names — `_` and `%` in a link name must not act as LIKE wildcards
+    script = _link_script("LDB_HI%T")
+
+    assert "where db_link = 'LDB_HI%T'" in script
+    assert "like 'LDB\\_HI\\%T.%' escape '\\'" in script
+
+
 def test_bootstrap_script_terminates_plsql_objects_with_slash():
     # Spec: supporting PL/SQL objects are created in the runtime user's schema and terminated for SQL*Plus
     script = _script()
