@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Fix automatic secret encryption ignoring a configuration discovered in the system root: `ldb-run`, `ldb-impl` and `ldb-crypt` now encrypt the secrets file the loader reads, wherever it is, and no longer create the user configuration directory when there is none. A cleartext secrets file that cannot be written stops with an error asking for a temporary write permission; the rerun that encrypts a system-root file recommends removing that permission.
+- Change the system root on Windows to `%PROGRAMDATA%\LimitsDb` (it was `/etc/limitsdb`, which resolved to `\etc\limitsdb` on the current drive); POSIX keeps `/etc/limitsdb`.
+
 ## [0.8.0] - 2026-10-23
 
 - Add the `history_drop_unmanaged_indexes` setting (default `true`, the previous behavior): set it to `false` to keep the history indexes other than the primary key instead of dropping them.

@@ -394,7 +394,11 @@ def build_argparser_from_config() -> argparse.ArgumentParser:
             parser.add_argument(cli, type=_arg_type_from_default(default), **arg_kwargs)
     # Builder-only flags (not part of Config dataclass)
     parser.add_argument(
-        "--config-dir", help="Configuration root (overrides autodiscovery of ~/.config/LimitsDb and /etc/limitsdb)"
+        "--config-dir",
+        help=(
+            "Configuration root (overrides autodiscovery of ~/.config/LimitsDb and /etc/limitsdb, "
+            r"or %%PROGRAMDATA%%\LimitsDb on Windows)"
+        ),
     )
     parser.add_argument("--config-file", help="Additional YAML overlay (highest priority)")
     parser.add_argument(

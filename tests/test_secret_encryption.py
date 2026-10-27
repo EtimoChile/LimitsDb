@@ -1,11 +1,14 @@
 import base64
 import json
+import logging
 import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from limitsdb.cli import ldb_run
+from limitsdb.cli import ldb_crypt, ldb_run
 from limitsdb.core import ldb_crypto, ldb_utils
 from limitsdb.core.ldb_errors import SecretError
 
@@ -211,3 +214,89 @@ def test_secrets_are_masked_in_logged_config():
     # Then: password is redacted; non-secret field is unchanged
     assert masked["source_password"] == "****"
     assert masked["other"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Automatic encryption of a secrets file discovered in the system root
+# ---------------------------------------------------------------------------
+
+_PLAIN_KEY = "source_password"
+
+
+def _system_root_with_plaintext_secret(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path]:
+    user_root = tmp_path / "user"
+    system_root = tmp_path / "system"
+    secrets_path = system_root / "schemas" / "s" / "secrets.json"
+    secrets_path.parent.mkdir(parents=True)
+    secrets_path.write_text(json.dumps({_PLAIN_KEY: "clear"}), encoding="utf-8")
+    monkeypatch.setattr(ldb_utils, "get_config_roots", lambda appname="LimitsDb": (user_root, system_root))
+    monkeypatch.setenv("LDB_MASTER_KEY", "A" * 32)
+    return user_root, system_root, secrets_path
+
+
+def test_cleartext_secrets_in_system_root_are_encrypted_where_they_live(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    # Spec: README > Secrets & Encryption — ldb-run and ldb-impl encrypt cleartext secrets before the
+    # first run, in the file the configuration loader reads (system root when it is the one discovered)
+    # Given: cleartext secrets only in the system root and nothing in the user root
+    user_root, _, secrets_path = _system_root_with_plaintext_secret(monkeypatch, tmp_path)
+    args = SimpleNamespace(schema="s", profile=None, config_dir=None)
+    monkeypatch.setattr(ldb_crypt, "_parse_args", lambda: args)
+    ldb_logger = logging.getLogger("ldb")
+    ldb_logger.addHandler(caplog.handler)
+
+    # When: ldb-crypt runs without --config-dir
+    try:
+        ldb_crypt.run_cli()
+    finally:
+        ldb_logger.removeHandler(caplog.handler)
+
+    # Then: the system-root file is encrypted, the user root is not created, and removing the
+    # temporary write permission is recommended
+    stored = json.loads(secrets_path.read_text(encoding="utf-8"))
+    assert ldb_crypto.is_encrypted(stored[_PLAIN_KEY])
+    assert not user_root.exists()
+    assert "Remove the write permission" in caplog.text
+
+
+def test_unwritable_system_root_secrets_are_reported_and_left_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    # Spec: docs/exception-handling.md — SecretError: secret files fail; the message asks for a
+    # temporary write permission so the run can be repeated
+    # Given: cleartext secrets in a read-only system-root file
+    _, _, secrets_path = _system_root_with_plaintext_secret(monkeypatch, tmp_path)
+    original = secrets_path.read_text(encoding="utf-8")
+    secrets_path.chmod(stat.S_IREAD)
+    if os.access(secrets_path, os.W_OK):
+        secrets_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+        pytest.skip("the file stays writable for this user (running as administrator/root)")
+
+    try:
+        # When / Then: encryption fails asking for a temporary write permission
+        with pytest.raises(SecretError, match="Grant write permission"):
+            ldb_utils.encrypt_secrets_in_place("s", None, None)
+        assert secrets_path.read_text(encoding="utf-8") == original
+
+        # Then: once the permission is granted, the rerun encrypts the file
+        secrets_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+        assert ldb_utils.encrypt_secrets_in_place("s", None, None) == secrets_path
+        assert ldb_crypto.is_encrypted(json.loads(secrets_path.read_text(encoding="utf-8"))[_PLAIN_KEY])
+    finally:
+        secrets_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+
+
+def test_encrypting_without_a_secrets_file_creates_no_directories(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # Spec: README > Secrets & Encryption — nothing to encrypt when no secrets file exists
+    # Given: roots without any secrets file
+    user_root = tmp_path / "user"
+    monkeypatch.setattr(ldb_utils, "get_config_roots", lambda appname="LimitsDb": (user_root, tmp_path / "system"))
+    monkeypatch.setenv("LDB_MASTER_KEY", "A" * 32)
+
+    # When: encryption runs
+    result = ldb_utils.encrypt_secrets_in_place("s", None, None)
+
+    # Then: nothing is returned and no configuration directory appears as a side effect
+    assert result is None
+    assert not user_root.exists()

@@ -625,6 +625,20 @@ def test_build_config_passes_profile_to_config_loader(monkeypatch: pytest.Monkey
 # ---------------------------------------------------------------------------
 
 
+def test_system_root_on_windows_is_under_program_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Configuration Resolution — the system root is /etc/limitsdb on POSIX and
+    # %PROGRAMDATA%\LimitsDb on Windows, where /etc does not exist
+    # Given: a Windows host whose ProgramData folder is known
+    monkeypatch.setattr(ldb_utils.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path))
+
+    # When: the configuration roots are resolved
+    _, system_root = ldb_utils.get_config_roots()
+
+    # Then: the system root lives under ProgramData, not under a drive-relative \etc
+    assert system_root == tmp_path / "LimitsDb"
+
+
 def test_resolve_schema_file_finds_user_level_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/configuration-contract.md — schema files are resolved from user
     # then system roots; user-level files take precedence

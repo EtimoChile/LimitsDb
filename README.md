@@ -272,9 +272,14 @@ ldb-crypt --schema billing --profile prod
 non-empty plaintext value in `secrets[.<PROFILE>].json` with an
 `enc:v1:aes256gcm:…` token. Already-encrypted values are left unchanged.
 If this step is skipped, `ldb-run` and `ldb-impl` will encrypt any plaintext
-secrets automatically before the first run, provided the secrets file is in the
-default user configuration directory or an explicit `--config-dir` is supplied.
+secrets automatically before the first run, in the same file the configuration
+loader reads (`--config-dir`, else the user root, else the system root).
 `ldb-crypt` is a convenience to encrypt them without executing ILM.
+
+A secrets file in the system root is usually read-only for the account that runs
+LimitsDb. If it still holds cleartext secrets, the command stops with an error
+asking you to grant write permission on that file temporarily; rerun it to
+encrypt the file, and it then recommends removing the write permission again.
 
 The encryption key is stored in your user context and protected by OS
 permissions. Never version or copy the key file.
@@ -667,7 +672,7 @@ Each entry in `ilm[.<PROFILE>].yml` merges table-level attributes with one or mo
 
 Lowest → highest priority:
 
-1. System root: `/etc/limitsdb`
+1. System root: `/etc/limitsdb` (Windows: `%PROGRAMDATA%\LimitsDb`)
 2. User root: `~/.config/LimitsDb`
 3. `--config-file` (extra overlay)
 4. Registered environment variables (`Env("LDB_*")` metadata)
