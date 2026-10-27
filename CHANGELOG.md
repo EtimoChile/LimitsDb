@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Fix the `ldb-impl` bootstrap script finishing with `LimitsDb: OK` over a wrong primary key: after the tolerated "already exists" error, it checks in the dictionary that the primary key of `LDB_CTL` and `LDB_LOG` has the required name and columns, and fails otherwise without changing it.
+- Fix the bootstrap script mistaking another database link for the configured one: a link `HISTORY` no longer prevents creating `HIST`, and `_` or `%` in a name are matched literally. An existing link is detected by its exact name or the name plus a domain suffix.
 - Fix pending DDL files and `ldb-impl` bootstrap scripts overwriting an earlier file of the same second: they are created exclusively and a name already taken gets a `_2`, `_3`... suffix. A relative `ddl_pending_dir` is now placed under the configuration directory (`--config-dir`, else the user configuration root) instead of the working directory, and the logs show absolute paths.
 - Fix DDL failures collected by `ldb-run` being lost when a later engine call raised: they are written to the pending file before the error propagates.
 
