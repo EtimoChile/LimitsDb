@@ -187,6 +187,7 @@ but does not replace the sources defined in `AGENTS.md`.
   for that password once; `PEND-020` is resolved.
 - `DEC-045`: the script envelope (stop on error, echo, messages, exit) comes from the engine (`script_preamble`, `script_prompt`, `script_epilogue`); the core only orders it.
 - `DEC-046`: `history_indexes` (per table in `ilm.yml`) adds never-unique indexes to history tables through the history DDL path.
+- `DEC-047`: the ILM script of `--mode SCRIPT` (header, one block per table, footer) comes from the engine (`ilm_script_header`, `ilm_script_table`, `ilm_script_footer`); the core only orders the tables.
 - `DEC-030`: generated scripts ask for every password at their start (`script_password_prompts`), before
   changing anything.
 - `DEC-041`: `ldb-run --mode STATUS [--last n]` reports the state (`RUNNING`/`OK`/`ERRORS`/`PARTIAL`), rows and live Oracle session progress of the last executions for SOURCE and HISTORY; PREVIEW runs are excluded; `LDB_CTL` stores the worker session (rerun `ldb-impl`); executions are rebuilt from the `LDB_LOG` timestamps, with no run id in the log.

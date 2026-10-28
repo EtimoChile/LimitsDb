@@ -9,6 +9,15 @@ from typing import Any
 PREAMBLE = ["#stop-on-error", "#echo"]
 INTERACTIVE_PREAMBLE = ["#stop-on-error", "#echo", "#accept-input"]
 EPILOGUE = ["#end"]
+ILM_FOOTER = ["#close"]
+
+
+def ilm_header(schema: str) -> list[str]:
+    return [f"#open {schema}"]
+
+
+def ilm_table(owner: str, table_name: str, sql_block: str) -> list[str]:
+    return [f"#table {owner}.{table_name}", sql_block, "#run"]
 
 
 def prompt(message: str) -> str:
@@ -28,6 +37,13 @@ class ScriptEnvelope:
     def script_epilogue() -> list[str]:
         return list(EPILOGUE)
 
+    ilm_script_header = staticmethod(ilm_header)
+    ilm_script_table = staticmethod(ilm_table)
+
+    @staticmethod
+    def ilm_script_footer() -> list[str]:
+        return list(ILM_FOOTER)
+
 
 def script_envelope_methods() -> dict[str, Any]:
     """The same methods as keyword arguments for a ``SimpleNamespace`` double."""
@@ -35,4 +51,7 @@ def script_envelope_methods() -> dict[str, Any]:
         "script_preamble": lambda *, interactive: list(INTERACTIVE_PREAMBLE if interactive else PREAMBLE),
         "script_prompt": prompt,
         "script_epilogue": lambda: list(EPILOGUE),
+        "ilm_script_header": ilm_header,
+        "ilm_script_table": ilm_table,
+        "ilm_script_footer": lambda: list(ILM_FOOTER),
     }

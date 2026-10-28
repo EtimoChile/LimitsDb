@@ -256,13 +256,30 @@ def test_join_wrapped_splits_at_max_width_on_separator():
     assert wrapped.splitlines() == ["a,b", ",long_word"]
 
 
+@pytest.fixture
+def runner_log(caplog: pytest.LogCaptureFixture):
+    """``caplog`` wired to the runner logger, which does not propagate to the root logger."""
+    runner_logger = logging.getLogger(ldb_runner.logger.name)
+    runner_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.INFO, logger=runner_logger.name)
+    yield caplog
+    runner_logger.removeHandler(caplog.handler)
+
+
+def _plan(monkeypatch: pytest.MonkeyPatch, config: Config) -> int:
+    """Run ``ldb_run`` in PLAN mode over a database double and return its exit code."""
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: _MinimalEngine())
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner.ldb_run(config)
+    return exc_info.value.code
+
+
 # ---------------------------------------------------------------------------
-# PLAN mode — R2 exception: _plan_mode is the sole entry point to the PLAN
-# mode contract documented in README > Run ILM > --mode PLAN
+# PLAN mode — README > Run ILM > --mode PLAN, through ldb_run
 # ---------------------------------------------------------------------------
 
 
-def test_plan_mode_raises_for_cyclic_table_dependencies(monkeypatch: pytest.MonkeyPatch):
+def test_plan_mode_raises_for_cyclic_table_dependencies(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode PLAN — circular dependencies cannot be resolved;
     # PLAN mode must detect and report the cycle before any processing
     # Given: two tables that reference each other
@@ -270,15 +287,14 @@ def test_plan_mode_raises_for_cyclic_table_dependencies(monkeypatch: pytest.Monk
         {"source_owner": "A", "table_name": "T1", "referencing_tables": "A.T2 B"},
         {"source_owner": "A", "table_name": "T2", "referencing_tables": "A.T1 B"},
     ]
-    config = Config(schema="s", mode="PLAN")
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda current: rows)
+    config = Config(schema="s", mode="PLAN", ilm_config_file=ilm_file(rows))
 
     # When / Then: ValueError naming the cycle is raised
     with pytest.raises(ValueError, match=r"[Cc]ycl"):
-        ldb_runner._plan_mode(config)
+        _plan(monkeypatch, config)
 
 
-def test_source_orphan_purge_without_use_added_columns_raises(monkeypatch: pytest.MonkeyPatch):
+def test_source_orphan_purge_without_use_added_columns_raises(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: limitsdb/resources/ilm.example.yml — source_orphan_purge=Y requires
     # use_added_columns; disabling added columns while orphan purge is active is an error
     # Given: CHILD (with full orphan config) listed before PARENT so CHILD is validated first
@@ -290,27 +306,33 @@ def test_source_orphan_purge_without_use_added_columns_raises(monkeypatch: pytes
         referencing_tables="A.PARENT P",
     )
     parent = _minimal_row("PARENT")
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: [child, parent])
+    ilm_path = ilm_file([child, parent])
 
     # When / Then: ValueError names use_added_columns as the missing prerequisite
     with pytest.raises(ValueError, match="use_added_columns"):
-        ldb_runner.process_tables_cnf(object(), _script_config(use_added_columns=False), _MinimalEngine(), "20261007")
+        ldb_runner.process_tables_cnf(
+            object(), _script_config(ilm_config_file=ilm_path, use_added_columns=False), _MinimalEngine(), "20261007"
+        )
 
 
-def test_plan_mode_exits_without_error_when_ilm_has_no_tables(monkeypatch: pytest.MonkeyPatch):
+def test_plan_mode_exits_without_error_when_ilm_has_no_tables(
+    monkeypatch: pytest.MonkeyPatch, ilm_file, runner_log: pytest.LogCaptureFixture
+):
     # Spec: README > Run ILM > --mode PLAN — evaluates dependency graph and prints
     # execution plan; empty config is valid and exits 0
     # Given: PLAN mode config with no tables in the ILM file
-    config = Config(schema="s", mode="PLAN")
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda current: [])
+    config = Config(schema="s", mode="PLAN", ilm_config_file=ilm_file([]))
 
     # When: PLAN mode is executed
+    code = _plan(monkeypatch, config)
+
     # Then: exits with code 0 — nothing to plan is not an error
-    assert ldb_runner._plan_mode(config) == 0
+    assert code == 0
+    assert "No active ILM tables" in runner_log.text
 
 
 def test_plan_mode_exits_without_error_for_parent_child_configuration(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, ilm_file, runner_log: pytest.LogCaptureFixture
 ):
     # Spec: README > Run ILM > --mode PLAN — layered dependencies are shown and
     # the function returns 0
@@ -319,22 +341,24 @@ def test_plan_mode_exits_without_error_for_parent_child_configuration(
         {"source_owner": "A", "table_name": "PARENT", "referencing_tables": ""},
         {"source_owner": "A", "table_name": "CHILD", "referencing_tables": "A.PARENT P"},
     ]
-    config = Config(schema="s", mode="PLAN")
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda current: rows)
+    config = Config(schema="s", mode="PLAN", ilm_config_file=ilm_file(rows))
 
     # When: PLAN mode is executed
-    # Then: exits with code 0 — valid layered plan
-    assert ldb_runner._plan_mode(config) == 0
+    code = _plan(monkeypatch, config)
+    plan = runner_log.text
+
+    # Then: exits with code 0 — a valid plan that stages the referencing child before the parent it references
+    assert code == 0
+    assert plan.index("A.CHILD") < plan.index("A.PARENT")
 
 
 # ---------------------------------------------------------------------------
-# ILM config loading — R2 exception: _load_offline_rows is the sole entry
-# point to the ConfigurationError contract when no ILM file exists
-# (docs/exception-handling.md)
+# ILM config loading — docs/exception-handling.md: ConfigurationError when no
+# ILM file exists
 # ---------------------------------------------------------------------------
 
 
-def test_missing_ilm_file_raises_configuration_error():
+def test_missing_ilm_file_raises_configuration_error(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/exception-handling.md — ConfigurationError when no ILM config
     # can be resolved; message must identify the missing file
     # Given: a schema with no ILM file in the search path
@@ -342,13 +366,20 @@ def test_missing_ilm_file_raises_configuration_error():
 
     # When / Then: ConfigurationError names the missing file
     with pytest.raises(ConfigurationError, match=r"ilm\.yml"):
-        ldb_runner._load_offline_rows(config)
+        _plan(monkeypatch, config)
 
 
 # ---------------------------------------------------------------------------
-# VALIDATE mode — R2 exception: _validate_environment is the sole entry point
-# to the VALIDATE mode contract documented in README > Run ILM > --mode VALIDATE
+# VALIDATE mode — README > Run ILM > --mode VALIDATE, through ldb_run
 # ---------------------------------------------------------------------------
+
+
+def _validate(monkeypatch: pytest.MonkeyPatch, config: Config, engine: Any) -> int:
+    """Run ``ldb_run`` in VALIDATE mode over a database double and return its exit code."""
+    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
+    with pytest.raises(SystemExit) as exc_info:
+        ldb_runner.ldb_run(config)
+    return exc_info.value.code
 
 
 def _validate_config() -> Config:
@@ -368,14 +399,14 @@ def _validate_config() -> Config:
     )
 
 
-def test_validate_mode_opens_and_closes_all_four_connections(monkeypatch: pytest.MonkeyPatch):
+def test_validate_mode_opens_and_closes_all_four_connections(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode VALIDATE — checks source runtime, source admin,
     # history runtime and history admin connections, then closes all of them
     # Given: a DummyEngine that records opens and closes
     opened = []
     closed = []
 
-    class DummyEngine:
+    class DummyEngine(_MinimalEngine):
         @staticmethod
         def get_identifier_str(value):
             return value.upper()
@@ -391,10 +422,8 @@ def test_validate_mode_opens_and_closes_all_four_connections(monkeypatch: pytest
         def close_connection(self, connection):
             closed.append(connection)
 
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: {})
-
     # When: VALIDATE mode runs
-    result = ldb_runner._validate_environment(_validate_config(), DummyEngine())
+    result = _validate(monkeypatch, replace(_validate_config(), ilm_config_file=ilm_file([])), DummyEngine())
 
     # Then: 4 connections were opened and all were closed
     assert result == 0
@@ -402,15 +431,13 @@ def test_validate_mode_opens_and_closes_all_four_connections(monkeypatch: pytest
     assert closed == opened
 
 
-def test_validate_mode_returns_error_when_required_connection_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_validate_mode_returns_error_when_required_connection_fails(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode VALIDATE — a failed required connection
     # returns exit code 1; remaining connections are still closed
     # Given: a DummyEngine where source admin connection raises
     closed = []
 
-    class DummyEngine:
+    class DummyEngine(_MinimalEngine):
         @staticmethod
         def get_identifier_str(value):
             return value.upper()
@@ -426,24 +453,22 @@ def test_validate_mode_returns_error_when_required_connection_fails(
         def close_connection(self, connection):
             closed.append(connection)
 
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: {})
-
     # When: VALIDATE mode runs
-    result = ldb_runner._validate_environment(_validate_config(), DummyEngine())
+    result = _validate(monkeypatch, replace(_validate_config(), ilm_config_file=ilm_file([])), DummyEngine())
 
     # Then: exit code 1 and the three successful connections are closed
     assert result == 1
     assert len(closed) == 3
 
 
-def test_validate_mode_skips_optional_credentials_not_provided(monkeypatch: pytest.MonkeyPatch):
+def test_validate_mode_skips_optional_credentials_not_provided(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode VALIDATE — history runtime credentials are
     # optional for SOURCE_ILM; missing ones are skipped, not treated as errors
     # Given: config with no history runtime credentials (history admin is provided)
     opened = []
     closed = []
 
-    class DummyEngine:
+    class DummyEngine(_MinimalEngine):
         @staticmethod
         def get_identifier_str(value):
             return value.upper()
@@ -471,10 +496,8 @@ def test_validate_mode_skips_optional_credentials_not_provided(monkeypatch: pyte
         admin_history_username="history-admin",
         admin_history_password="history-admin-password",
     )
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: {})
-
     # When: VALIDATE mode runs
-    result = ldb_runner._validate_environment(config, DummyEngine())
+    result = _validate(monkeypatch, replace(config, ilm_config_file=ilm_file([])), DummyEngine())
 
     # Then: exactly 3 connections (source runtime, source admin, history admin)
     assert result == 0
@@ -482,15 +505,13 @@ def test_validate_mode_skips_optional_credentials_not_provided(monkeypatch: pyte
     assert closed == opened
 
 
-def test_validate_mode_returns_error_when_system_date_check_fails(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_validate_mode_returns_error_when_system_date_check_fails(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode VALIDATE — system date verification is part
     # of connection validation; failure is reported and connections are closed
     # Given: DummyEngine where get_system_date always raises
     closed = []
 
-    class DummyEngine:
+    class DummyEngine(_MinimalEngine):
         @staticmethod
         def get_identifier_str(value):
             return value.upper()
@@ -504,25 +525,21 @@ def test_validate_mode_returns_error_when_system_date_check_fails(
         def close_connection(self, connection):
             closed.append(connection)
 
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: pytest.fail("should not reach"))
-
     # When: VALIDATE mode runs
-    result = ldb_runner._validate_environment(_validate_config(), DummyEngine())
+    result = _validate(monkeypatch, replace(_validate_config(), ilm_config_file=ilm_file([])), DummyEngine())
 
     # Then: exit code 1 and all attempted connections are closed
     assert result == 1
     assert len(closed) == 4
 
 
-def test_validate_mode_returns_error_when_config_processing_raises(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_validate_mode_returns_error_when_config_processing_raises(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode VALIDATE — config processing errors surface
     # as exit code 1; all connections are still closed
-    # Given: process_tables_cnf raises
+    # Given: an ILM file whose table references a table that is not configured
     closed = []
 
-    class DummyEngine:
+    class DummyEngine(_MinimalEngine):
         @staticmethod
         def get_identifier_str(value):
             return value.upper()
@@ -536,30 +553,24 @@ def test_validate_mode_returns_error_when_config_processing_raises(
         def close_connection(self, connection):
             closed.append(connection)
 
-    monkeypatch.setattr(
-        ldb_runner,
-        "process_tables_cnf",
-        lambda *args: (_ for _ in ()).throw(ValueError("bad config")),
-    )
+    rows = [{"source_owner": "A", "table_name": "T1", "referencing_tables": "A.MISSING M"}]
 
     # When: VALIDATE mode runs
-    result = ldb_runner._validate_environment(_validate_config(), DummyEngine())
+    result = _validate(monkeypatch, replace(_validate_config(), ilm_config_file=ilm_file(rows)), DummyEngine())
 
     # Then: exit code 1 and all connections were closed
     assert result == 1
     assert len(closed) == 4
 
 
-def test_validate_mode_for_history_ilm_opens_history_then_source_connections(
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_validate_mode_for_history_ilm_opens_history_then_source_connections(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode VALIDATE (HISTORY_ILM) — HISTORY connections
     # are required; SOURCE connections are validated as optional
     # Given: a full HISTORY_ILM config with all credentials
     opened = []
     closed = []
 
-    class DummyEngine:
+    class DummyEngine(_MinimalEngine):
         @staticmethod
         def get_identifier_str(value):
             return value.upper()
@@ -575,7 +586,6 @@ def test_validate_mode_for_history_ilm_opens_history_then_source_connections(
         def close_connection(self, conn):
             closed.append(conn)
 
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: {})
     config = Config(
         schema="s",
         action="HISTORY_ILM",
@@ -593,7 +603,7 @@ def test_validate_mode_for_history_ilm_opens_history_then_source_connections(
     )
 
     # When: VALIDATE mode runs for HISTORY_ILM
-    result = ldb_runner._validate_environment(config, DummyEngine())
+    result = _validate(monkeypatch, replace(config, ilm_config_file=ilm_file([])), DummyEngine())
 
     # Then: 4 connections opened and all closed
     assert result == 0
@@ -606,7 +616,7 @@ def test_validate_mode_for_history_ilm_opens_history_then_source_connections(
 # ---------------------------------------------------------------------------
 
 
-class _MinimalEngine:
+class _MinimalEngine(ScriptEnvelope):
     """Minimal engine stub for tests that only need identifier and column expression support."""
 
     @staticmethod
@@ -650,20 +660,21 @@ def _minimal_row(
     }
 
 
-def test_reference_to_nonexistent_table_raises_before_processing(monkeypatch: pytest.MonkeyPatch):
+def test_reference_to_nonexistent_table_raises_before_processing(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: limitsdb/resources/ilm.example.yml — all referenced tables must be present
     # in the ILM configuration; unknown references are caught early during config processing
     # Given: T1 references a table that is not in the ILM config
     rows = [_minimal_row("T1", referencing_tables="A.NONEXISTENT r")]
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    ilm_path = ilm_file(rows)
 
     # When / Then: ValueError — reference to an undeclared table is caught
     with pytest.raises(ValueError):
-        ldb_runner.process_tables_cnf(object(), _script_config(), _MinimalEngine(), "20261007")
+        ldb_runner.process_tables_cnf(object(), _script_config(ilm_config_file=ilm_path), _MinimalEngine(), "20261007")
 
 
 def test_orphan_check_column_required_when_source_orphan_purge_enabled(
     monkeypatch: pytest.MonkeyPatch,
+    ilm_file,
 ):
     # Spec: limitsdb/resources/ilm.example.yml — source_orphan_purge=Y requires
     # orphan_check_column; missing it is a configuration error caught at startup
@@ -676,26 +687,26 @@ def test_orphan_check_column_required_when_source_orphan_purge_enabled(
             orphan_check_column=None,
         )
     ]
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    ilm_path = ilm_file(rows)
 
     # When / Then: ValueError names the missing orphan_check_column
     with pytest.raises(ValueError, match="orphan_check_column required"):
-        ldb_runner.process_tables_cnf(object(), _script_config(), _MinimalEngine(), "20261007")
+        ldb_runner.process_tables_cnf(object(), _script_config(ilm_config_file=ilm_path), _MinimalEngine(), "20261007")
 
 
-def test_orphan_check_column_without_purge_flag_raises(monkeypatch: pytest.MonkeyPatch):
+def test_orphan_check_column_without_purge_flag_raises(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: limitsdb/resources/ilm.example.yml — orphan_check_column is only valid
     # when source_orphan_purge=Y; an orphan column without the flag is a config error
     # Given: T1 has orphan_check_column but source_orphan_purge disabled
     rows = [_minimal_row("T1", source_orphan_purge="N", orphan_check_column="FK_COL")]
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    ilm_path = ilm_file(rows)
 
     # When / Then: ValueError explains the inconsistency
     with pytest.raises(ValueError, match="source_orphan_purge must be enabled"):
-        ldb_runner.process_tables_cnf(object(), _script_config(), _MinimalEngine(), "20261007")
+        ldb_runner.process_tables_cnf(object(), _script_config(ilm_config_file=ilm_path), _MinimalEngine(), "20261007")
 
 
-def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest.MonkeyPatch):
+def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: limitsdb/resources/ilm.example.yml — source: child uses outer join with
     # orphan detection; history: filter uses snapshotted column names, no source join
     def rules():
@@ -770,9 +781,10 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest
 
     # Given: SOURCE_ILM config and rules with parent-child orphan relationship
     loaded_rules = rules()
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: loaded_rules)
+    ilm_path = ilm_file(loaded_rules)
     source_config = Config(
         schema="s",
+        ilm_config_file=ilm_path,
         action="SOURCE_ILM",
         mode="SCRIPT",
         source_dsn="dsn",
@@ -802,6 +814,7 @@ def test_related_history_filter_is_snapshotted_and_rewritten(monkeypatch: pytest
     loaded_rules = rules()
     history_config = Config(
         schema="s",
+        ilm_config_file=ilm_path,
         action="HISTORY_ILM",
         mode="SCRIPT",
         history_dsn="dsn",
@@ -883,11 +896,12 @@ def _join_rules(join_expr: str) -> list[dict]:
     ]
 
 
-def _join_query(monkeypatch: pytest.MonkeyPatch, action: str, join_expr: str, **config_kwargs) -> str:
+def _join_query(ilm_file, action: str, join_expr: str, **config_kwargs) -> str:
     """Return the query of the CHILD table as planned for the action."""
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: _join_rules(join_expr))
+    ilm_path = ilm_file(_join_rules(join_expr))
     config = Config(
         schema="s",
+        ilm_config_file=ilm_path,
         action=action,
         mode="SCRIPT",
         source_dsn="dsn",
@@ -902,12 +916,12 @@ def _join_query(monkeypatch: pytest.MonkeyPatch, action: str, join_expr: str, **
     return tables[("GL", "CHILD")]["query_expr"]
 
 
-def test_history_join_reads_the_history_copy_of_the_referenced_table(monkeypatch: pytest.MonkeyPatch):
+def test_history_join_reads_the_history_copy_of_the_referenced_table(ilm_file):
     # Spec: README > ILM Rule Semantics > Referencing tables — join_expr names the referenced table by its source
     # owner; a HISTORY_ILM run without derived columns joins the history copy, which lives in its history_owner.
     # Given: a child joined to GL.PARENT whose history copy is GLH.PARENT, history run without added columns
     # When: the history query is planned
-    query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID", use_added_columns=False)
+    query = _join_query(ilm_file, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID", use_added_columns=False)
 
     # Then: the join reads GLH.PARENT, and the source owner does not appear
     assert "inner JOIN glh.PARENT B" in query
@@ -915,7 +929,7 @@ def test_history_join_reads_the_history_copy_of_the_referenced_table(monkeypatch
 
 
 def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_referenced_table(
-    monkeypatch: pytest.MonkeyPatch,
+    ilm_file,
 ):
     # Spec: README > ILM Rule Semantics > Referencing tables — only the referenced table moves to its history
     # owner; other text of the join (columns, aliases, longer names) must remain as written.
@@ -923,14 +937,14 @@ def test_history_join_rewrites_every_spelling_of_the_source_owner_only_on_the_re
     join_expr = "@ JOIN gl . parent B ON B.ID=A.PARENT_ID AND A.X=GL.PARENT_X.Y"
 
     # When: the history query is planned without added columns
-    query = _join_query(monkeypatch, "HISTORY_ILM", join_expr, use_added_columns=False)
+    query = _join_query(ilm_file, "HISTORY_ILM", join_expr, use_added_columns=False)
 
     # Then: the referenced table is rewritten (its token as written) and the longer name is untouched
     assert "JOIN glh.parent B" in query
     assert "GL.PARENT_X.Y" in query
 
 
-def test_config_identifiers_are_the_exact_dictionary_names(monkeypatch: pytest.MonkeyPatch):
+def test_config_identifiers_are_the_exact_dictionary_names(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: ilm.example.yml > Identifier rules — single-identifier parameters hold the name exactly as the data
     # dictionary has it; only the SQL text of expressions follows the engine's SQL identifier rules
     # Given: objects whose dictionary names are mixed case, written in the config exactly like that, and a join
@@ -939,9 +953,10 @@ def test_config_identifiers_are_the_exact_dictionary_names(monkeypatch: pytest.M
     for rule, table in zip(rules, ("Parent", "Child"), strict=True):
         rule.update(source_owner="Gl", history_owner="Glh", table_name=table)
     rules[1]["referencing_tables"] = "Gl.Parent B"
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rules)
+    ilm_path = ilm_file(rules)
     config = Config(
         schema="s",
+        ilm_config_file=ilm_path,
         action="HISTORY_ILM",
         mode="SCRIPT",
         use_added_columns=False,
@@ -1021,7 +1036,9 @@ def test_history_extra_select_tables_are_the_exact_dictionary_names(monkeypatch:
 
 
 @pytest.mark.parametrize("referencing", ["Gl.Missing B", "Gl.Parent"])
-def test_referencing_tables_must_name_configured_tables_with_a_alias(referencing: str):
+def test_referencing_tables_must_name_configured_tables_with_a_alias(
+    monkeypatch: pytest.MonkeyPatch, ilm_file, referencing: str
+):
     # Spec: README > ILM Rule Semantics > Referencing tables — each entry is [OWNER.]TABLE ALIAS of a configured
     # table
     # Given: a child pointing to an unconfigured table, or with no alias
@@ -1030,12 +1047,12 @@ def test_referencing_tables_must_name_configured_tables_with_a_alias(referencing
         {"source_owner": "Gl", "table_name": "Child", "referencing_tables": referencing},
     ]
 
-    # When / Then: the dependency graph is refused
+    # When / Then: the plan is refused
     with pytest.raises(ValueError):
-        ldb_runner._build_dependency_graph(rows)  # type: ignore[arg-type]
+        _plan(monkeypatch, Config(schema="s", mode="PLAN", ilm_config_file=ilm_file(rows)))
 
 
-def test_dependency_graph_matches_referenced_tables_case_sensitively():
+def test_dependency_graph_matches_referenced_tables_case_sensitively(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: ilm.example.yml > Identifier rules — names are exact, so Gl.Parent and GL.PARENT are different tables
     # Given: a child that references the table with another case than the configured one
     rows = [
@@ -1045,10 +1062,10 @@ def test_dependency_graph_matches_referenced_tables_case_sensitively():
 
     # When / Then: the reference is not found
     with pytest.raises(ValueError, match="not present"):
-        ldb_runner._build_dependency_graph(rows)  # type: ignore[arg-type]
+        _plan(monkeypatch, Config(schema="s", mode="PLAN", ilm_config_file=ilm_file(rows)))
 
 
-def test_dependency_graph_orders_mixed_case_tables():
+def test_dependency_graph_orders_mixed_case_tables(monkeypatch: pytest.MonkeyPatch, ilm_file, runner_log):
     # Spec: README > Run ILM > --mode PLAN — referencing (child) tables are planned before the tables they
     # reference
     # Given: mixed-case names written identically in the table and in its reference
@@ -1057,29 +1074,31 @@ def test_dependency_graph_orders_mixed_case_tables():
         {"source_owner": "Gl", "table_name": "Child", "referencing_tables": "Gl.Parent P"},
     ]
 
-    # When: the layers are computed
-    layers = ldb_runner._compute_plan_layers(ldb_runner._build_dependency_graph(rows))  # type: ignore[arg-type]
+    # When: the plan is computed
+    code = _plan(monkeypatch, Config(schema="s", mode="PLAN", ilm_config_file=ilm_file(rows)))
 
-    # Then: the child layer comes first
-    assert layers == [[("Gl", "Child")], [("Gl", "Parent")]]
+    # Then: the child stage comes first
+    assert code == 0
+    assert "Stage 1 (parallel=1): Gl.Child" in runner_log.text
+    assert "Stage 2 (parallel=1): Gl.Parent" in runner_log.text
 
 
-def test_source_join_keeps_the_source_owner(monkeypatch: pytest.MonkeyPatch):
+def test_source_join_keeps_the_source_owner(ilm_file):
     # Spec: README > ILM Rule Semantics > Referencing tables — SOURCE_ILM reads the referenced tables from source.
     # Given: the same child and join as the history case
     # When: the source query is planned
-    query = _join_query(monkeypatch, "SOURCE_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
+    query = _join_query(ilm_file, "SOURCE_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
 
     # Then: the join is not redirected to the history owner
     assert "inner JOIN GL.PARENT B" in query
     assert "JOIN GLH" not in query
 
 
-def test_history_join_with_added_columns_has_no_join(monkeypatch: pytest.MonkeyPatch):
+def test_history_join_with_added_columns_has_no_join(ilm_file):
     # Spec: README > ILM Rule Semantics > Historical predicate snapshot — with use_added_columns the history
     # run uses the stored values and does not join.
     # Given / When: a history run with the default added columns
-    query = _join_query(monkeypatch, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
+    query = _join_query(ilm_file, "HISTORY_ILM", "@ JOIN GL.PARENT B ON B.ID=A.PARENT_ID")
 
     # Then: the query has no join
     assert "JOIN" not in query.upper()
@@ -1118,16 +1137,17 @@ def test_script_output_orders_parents_before_children_and_skips_flagged_tables(
     }
 
     # When: script is generated
-    result = ldb_runner.generate_script_output(Config(schema="billing", mode="PLAN"), tables)
+    result = ldb_runner.generate_script_output(Config(schema="billing", mode="PLAN"), _MinimalEngine(), tables)
     output = capsys.readouterr().out
 
-    # Then: exit code 0, ordering respected, skipped table absent, footer present
+    # Then: exit code 0, ordering respected, skipped table absent, the engine's header and footer around them
     assert result == 0
     assert output.index("SOURCE.PARENT") < output.index("SOURCE.CHILD")
     assert "begin parent; end;" in output
     assert "begin child; end;" in output
     assert "begin skipped; end;" not in output
-    assert output.endswith("spool off\nexit 0\n\n")
+    assert output.startswith("\n#open billing\n")
+    assert output.endswith("#close\n\n")
 
 
 # ---------------------------------------------------------------------------
@@ -2888,6 +2908,7 @@ class _VisibilityEngine(_MinimalEngine):
 
 def test_table_without_visible_columns_is_skipped_with_a_warning_instead_of_failing(
     monkeypatch: pytest.MonkeyPatch,
+    ilm_file,
 ):
     # Spec: README > Run ILM — a table the runtime user cannot see (missing, or SELECT not granted) is
     # skipped with a warning; it does not abort the run.
@@ -2895,10 +2916,12 @@ def test_table_without_visible_columns_is_skipped_with_a_warning_instead_of_fail
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
     rows = [_full_row("OK"), _full_row("INV")]
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    ilm_path = ilm_file(rows)
 
     # When: the tables are processed
-    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"OK"}), "20261007")
+    tables = ldb_runner.process_tables_cnf(
+        object(), _script_config(ilm_config_file=ilm_path), _VisibilityEngine({"OK"}), "20261007"
+    )
 
     # Then: the invisible table is skipped with the message and the other one is kept
     assert tables[("A", "INV")]["skip"] is True
@@ -2906,17 +2929,19 @@ def test_table_without_visible_columns_is_skipped_with_a_warning_instead_of_fail
     assert any("A.INV is not visible to the runtime user" in m for m in recorder.messages.get("warning", []))
 
 
-def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: pytest.MonkeyPatch):
+def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM — a child inherits its parent's conditions, so it is skipped when the
     # parent is not visible.
     # Given: a child whose parent has no visible columns
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
     rows = [_full_row("PARENT"), _full_row("CHILD", referencing_tables="A.PARENT p")]
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    ilm_path = ilm_file(rows)
 
     # When: the tables are processed
-    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"CHILD"}), "20261007")
+    tables = ldb_runner.process_tables_cnf(
+        object(), _script_config(ilm_config_file=ilm_path), _VisibilityEngine({"CHILD"}), "20261007"
+    )
 
     # Then: both are skipped and the child names the parent
     assert tables[("A", "PARENT")]["skip"] is True
@@ -2924,15 +2949,17 @@ def test_child_of_a_table_without_visible_columns_is_skipped_too(monkeypatch: py
     assert any("references A.PARENT" in m for m in recorder.messages.get("warning", []))
 
 
-def test_child_before_its_parent_is_skipped_when_the_parent_is_not_visible(monkeypatch: pytest.MonkeyPatch):
+def test_child_before_its_parent_is_skipped_when_the_parent_is_not_visible(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM — a child inherits its parent's conditions, so it is skipped when the parent is not
     # visible, whatever the order of the configuration
     # Given: a child listed before its invisible parent
     rows = [_full_row("CHILD", referencing_tables="A.PARENT p"), _full_row("PARENT")]
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
+    ilm_path = ilm_file(rows)
 
     # When: the tables are processed
-    tables = ldb_runner.process_tables_cnf(object(), _script_config(), _VisibilityEngine({"CHILD"}), "20261007")
+    tables = ldb_runner.process_tables_cnf(
+        object(), _script_config(ilm_config_file=ilm_path), _VisibilityEngine({"CHILD"}), "20261007"
+    )
 
     # Then: both are skipped
     assert tables[("A", "PARENT")]["skip"] is True
@@ -2959,7 +2986,7 @@ def test_preview_is_refused_over_a_table_already_executed_for_the_date(
     assert "PREVIEW is refused" in caplog.text
 
 
-def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: pytest.MonkeyPatch):
+def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: pytest.MonkeyPatch, ilm_file):
     # Spec: README > Run ILM > --mode PREVIEW — a PREVIEW does not mark tables as processed for the day, so a
     # later run still processes them; a real TEND is kept
     # Given: ldb_ctl holds PTEND for one table (left by a PREVIEW) and TEND for another
@@ -2971,8 +2998,8 @@ def test_preview_leftover_status_is_ignored_when_the_run_resumes(monkeypatch: py
             ]
 
     rows = [_full_row("PREV"), _full_row("DONE")]
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rows)
-    config = _script_config()
+    ilm_path = ilm_file(rows)
+    config = _script_config(ilm_config_file=ilm_path)
     config.generate_script = False
 
     # When: the tables are processed
@@ -3217,20 +3244,14 @@ def test_validate_reports_missing_privileges_without_changing_anything(monkeypat
     engine = _HistoryDdlEngine()
     engine.missing_privileges["LDB_SOURCE_ROLE"] = [("SRC", "T1", "SELECT")]
     engine.missing_privileges["LDB_HISTORY_ROLE"] = [("HIST", "T1", "SELECT")]
-    runtime_conns = {"SOURCE": SimpleNamespace(), "HISTORY": SimpleNamespace()}
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
 
-    # When: the privileges are validated
-    ok = ldb_runner._validate_privileges(
-        _history_ddl_config(mode="VALIDATE"),
-        engine,
-        runtime_conns,
-        _make_tables_config("T1"),  # type: ignore[arg-type]
-    )
+    # When: VALIDATE runs
+    code = _run_ldb(monkeypatch, _history_ddl_config(mode="VALIDATE"), engine, "T1")
 
     # Then: validation fails on the source gap, the history gap is a warning and nothing was granted
-    assert ok is False
+    assert code == 1
     assert any("SOURCE runtime user lacks" in m for m in recorder.messages["error"])
     assert any("HISTORY runtime user lacks" in m for m in recorder.messages.get("warning", []))
     assert any("--mode PREPARE" in m for m in recorder.messages["error"])
@@ -3239,22 +3260,21 @@ def test_validate_reports_missing_privileges_without_changing_anything(monkeypat
 
 def test_prepare_fails_when_the_runtime_user_cannot_see_a_configured_table(monkeypatch: pytest.MonkeyPatch, tmp_path):
     # Spec: README > Run ILM > --mode PREPARE — a table the runtime user cannot see is an error, not a warning
-    # Given: PREPARE where the table configuration has no visible columns for T1
-    engine = _HistoryDdlEngine()
+    # Given: PREPARE where the database reports no visible columns for T1
+    class _BlindEngine(_HistoryDdlEngine):
+        def get_table_columns(self, connection, owner, table_name):
+            return [], {}
+
     recorder = _RecordingLogger()
     monkeypatch.setattr(ldb_runner, "logger", recorder)
-    monkeypatch.setattr(ldb_runner, "get_db_engine", lambda name: engine)
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda cfg: [])
-    invisible = _make_tables_config("T1")
-    invisible[("SRC", "T1")].update(skip=True, columns_metadata={})
-    monkeypatch.setattr(ldb_runner, "process_tables_cnf", lambda *args: invisible)
 
     # When: ldb-run executes
-    with pytest.raises(SystemExit) as exc_info:
-        ldb_runner.ldb_run(_history_ddl_config(mode="PREPARE", ddl_pending_dir=str(tmp_path / "p")))
+    code = _run_ldb(
+        monkeypatch, _history_ddl_config(mode="PREPARE", ddl_pending_dir=str(tmp_path / "p")), _BlindEngine(), "T1"
+    )
 
     # Then: it exits 1 and names the table
-    assert exc_info.value.code == 1
+    assert code == 1
     assert any("SRC.T1" in m for m in recorder.messages["error"])
 
 

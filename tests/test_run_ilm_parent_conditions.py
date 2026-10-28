@@ -1,5 +1,3 @@
-import pytest
-
 from limitsdb.core import ldb_runner
 from limitsdb.core.ldb_params_config import Config
 from limitsdb.db.ldb_engines import ColumnDefinition
@@ -71,10 +69,11 @@ def _status_rule(table_name: str, rule_id: int, status: str, months: int) -> dic
     )
 
 
-def _child_query(monkeypatch: pytest.MonkeyPatch, rules: list[dict]) -> str:
-    monkeypatch.setattr(ldb_runner, "_load_offline_rows", lambda config: rules)
+def _child_query(rules: list[dict], ilm_file) -> str:
+    ilm_path = ilm_file(rules)
     config = Config(
         schema="s",
+        ilm_config_file=ilm_path,
         action="SOURCE_ILM",
         mode="SCRIPT",
         source_dsn="dsn",
@@ -88,7 +87,7 @@ def _child_query(monkeypatch: pytest.MonkeyPatch, rules: list[dict]) -> str:
     return tables[("GL", "CHILD")]["query_expr"]
 
 
-def test_child_is_purged_only_when_every_parent_allows_it(monkeypatch: pytest.MonkeyPatch):
+def test_child_is_purged_only_when_every_parent_allows_it(ilm_file):
     # Spec: README > ILM Rule Semantics > Referencing tables — conditions of one table are alternatives (or);
     # a child inherits those of every referencing table and a row is purged only when all of them are met.
     # Given: a child referencing two parents, each with two alternative conditions
@@ -106,7 +105,7 @@ def test_child_is_purged_only_when_every_parent_allows_it(monkeypatch: pytest.Mo
     ]
 
     # When: the child query is planned
-    query = _child_query(monkeypatch, rules)
+    query = _child_query(rules, ilm_file)
 
     # Then: the alternatives of each parent are or-ed and the parents are and-ed
     where = " ".join(query.split("where", 1)[1].split())

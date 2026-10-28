@@ -595,6 +595,28 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def ilm_script_header(schema: str) -> list[str]:
+        """Lines that open the ILM script of ``--mode SCRIPT`` for ``schema``.
+
+        The script is run later with the engine's own client: it must stop at the first error, show what it
+        runs, log to a file, take the mode (EXECUTE or PREVIEW) as its argument and define the process date
+        that the SQL blocks of ``build_sql_block`` read."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ilm_script_table(owner: str, table_name: str, sql_block: str) -> list[str]:
+        """Lines that run the ``sql_block`` of one table in the ILM script, with a comment naming the table."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ilm_script_footer() -> list[str]:
+        """Lines that close the ILM script and end it successfully."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def ensure_database_links(
         conn: Any,
         links: Sequence[DatabaseLinkDefinition],

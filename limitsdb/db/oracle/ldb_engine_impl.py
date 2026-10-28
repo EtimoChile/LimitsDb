@@ -1779,6 +1779,27 @@ end;"""
         return ["exit success"]
 
     @staticmethod
+    def ilm_script_header(schema: str) -> list[str]:
+        return [
+            "whenever oserror exit 1",
+            "whenever sqlerror exit 1",
+            "set echo on ver off trimspool on",
+            f"spool ldb_{schema}.log",
+            "rem usage: sqlplus user/password@dsn @script EXECUTE|PREVIEW",
+            'DEFINE ldb_mode = "&1"',
+            "COLUMN ldb_process_date NEW_VALUE ldb_process_date",
+            "SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;",
+        ]
+
+    @staticmethod
+    def ilm_script_table(owner: str, table_name: str, sql_block: str) -> list[str]:
+        return [f"rem table: {owner}.{table_name}", sql_block, "/"]
+
+    @staticmethod
+    def ilm_script_footer() -> list[str]:
+        return ["spool off", "exit 0"]
+
+    @staticmethod
     def script_password_prompts(
         users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
     ) -> None:
