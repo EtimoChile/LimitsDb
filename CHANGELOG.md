@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `ilm_script_header(schema)`, `ilm_script_table(owner, table_name, sql_block)` and `ilm_script_footer()`. The ILM script written by `ldb-run --mode SCRIPT` (stop on error, log, mode argument, process date, one block per table, exit) now comes from the engine instead of the core; the Oracle engine writes the same SQL*Plus text as before.
+
 ## [0.9.0] - 2026-10-27
 
 - **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `script_preamble(interactive=...)`, `script_prompt(message)` and `script_epilogue()`. The client commands that wrap the pending DDL files and the `ldb-impl` bootstrap script (stop at the first error, echo, messages, exit code) now come from the engine instead of the core; the Oracle engine writes the same SQL*Plus text as before.

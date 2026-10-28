@@ -318,3 +318,21 @@ def test_oracle_script_envelope_stops_at_the_first_error_and_ends_with_exit_succ
     assert "set echo on define on verify off sqlblanklines on serveroutput on" in interactive
     assert OracleEngine.script_prompt("LimitsDb: OK") == "prompt LimitsDb: OK"
     assert OracleEngine.script_epilogue() == ["exit success"]
+
+
+def test_oracle_ilm_script_runs_each_table_block_between_a_stop_on_error_header_and_an_exit_footer():
+    # Spec: DatabaseEngine.ilm_script_header/ilm_script_table/ilm_script_footer — the engine owns the SQL*Plus
+    # text of the ILM script written by `ldb-run --mode SCRIPT`
+    # When: the engine is asked for the three parts of the script
+    header = OracleEngine.ilm_script_header("billing")
+    table = OracleEngine.ilm_script_table("SRC", "ORDERS", "begin null; end;")
+    footer = OracleEngine.ilm_script_footer()
+
+    # Then: the header stops on error, logs, takes the mode as argument and defines the process date the
+    # blocks read; the table is a comment, its block and the terminator; the footer closes the log and exits
+    assert "whenever sqlerror exit 1" in header
+    assert "spool ldb_billing.log" in header
+    assert 'DEFINE ldb_mode = "&1"' in header
+    assert any(line.startswith("SELECT TO_CHAR(SYSDATE") and "ldb_process_date" in line for line in header)
+    assert table == ["rem table: SRC.ORDERS", "begin null; end;", "/"]
+    assert footer == ["spool off", "exit 0"]

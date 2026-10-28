@@ -998,19 +998,8 @@ def _prepare_result(tables_config: TablesConfig, missing: list[Privilege]) -> in
     return 1
 
 
-def generate_script_output(config: Config, tables_config: TablesConfig) -> int:
-    print(
-        f"""
-whenever oserror exit 1
-whenever sqlerror exit 1
-set echo on ver off trimspool on
-spool ldb_{config.context.schema}.log
-rem usage: sqlplus user/password@dsn @script EXECUTE|PREVIEW
-DEFINE ldb_mode = "&1"
-COLUMN ldb_process_date NEW_VALUE ldb_process_date
-SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;
-    """
-    )
+def generate_script_output(config: Config, engine: DatabaseEngine, tables_config: TablesConfig) -> int:
+    print("\n".join(["", *engine.ilm_script_header(config.context.schema), ""]))
     while True:
         cycle_printed = False
         for (owner, table_name), table_info in tables_config.items():
@@ -1029,14 +1018,12 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;
                         break  # referencing table not GENERATED status
             if not all_referencing_tables_ready:
                 continue
-            print(f"rem table: {owner}.{table_name}")
-            print(table_info["sql_block"])
-            print("/")
+            print("\n".join(engine.ilm_script_table(owner, table_name, table_info["sql_block"])))
             cd["ctl_status"] = "GENERATED"  # print end
             cycle_printed = True
         if not cycle_printed:
             break  # There are no processes to launch, so go to waiting some process to end
-    print("\nspool off\nexit 0\n")
+    print("\n".join(["", *engine.ilm_script_footer(), ""]))
     return 0
 
 
@@ -1527,7 +1514,7 @@ def ldb_run(config: Config) -> None:
             _write_script_ddl_files(
                 config, engine, connection, tables_config, tables_conf_rows, source_grants_applied=source_grants_applied
             )
-            rc = generate_script_output(config, tables_config)
+            rc = generate_script_output(config, engine, tables_config)
         else:
             if _credentials_present(config, admin=True, env=None):
                 admin_connection = engine.get_connection(config, admin=True)
