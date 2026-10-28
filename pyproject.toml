@@ -1,6 +1,6 @@
 [project]
 name = "limitsdb"
-version = "0.9.0"
+version = "0.10.0"
 description = "Configuration-driven ILM (Information Lifecycle Management) for production and history databases"
 readme = "README.md"
 requires-python = ">=3.12,<4.0"
