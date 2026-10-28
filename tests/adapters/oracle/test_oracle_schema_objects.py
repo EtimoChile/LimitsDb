@@ -138,7 +138,8 @@ def test_non_unique_history_index_keeps_its_configured_columns_and_never_duplica
         indexes=(IndexDefinition(name="T1_ID_IDX", columns=("ID",), unique=False),),
     )
 
-    statements = OracleEngine._create_table_statements(table)
+    statements: list[str] = []
+    OracleEngine.ensure_table_structure(None, table, {}, ddl_sink=statements.append)
 
     index_statements = [s.replace('"', "").upper() for s in statements if s.upper().count("T1_ID_IDX")]
     assert len(index_statements) == 1
