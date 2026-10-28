@@ -573,6 +573,50 @@ class DatabaseEngine(ABC):
 
     @staticmethod
     @abstractmethod
+    def script_preamble(*, interactive: bool) -> list[str]:
+        """Lines that open a script a DBA runs with the engine's own client.
+
+        They make the client stop at the first error with a non-zero exit code and show every statement it
+        runs. With ``interactive`` the script also asks for passwords and reports notices, so the client must
+        accept substitution values and show messages."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def script_prompt(message: str) -> str:
+        """The line that makes the client print ``message`` (one line of text) when the script reaches it."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def script_epilogue() -> list[str]:
+        """Lines that end a script successfully, after its final message."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ilm_script_header(schema: str) -> list[str]:
+        """Lines that open the ILM script of ``--mode SCRIPT`` for ``schema``.
+
+        The script is run later with the engine's own client: it must stop at the first error, show what it
+        runs, log to a file, take the mode (EXECUTE or PREVIEW) as its argument and define the process date
+        that the SQL blocks of ``build_sql_block`` read."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ilm_script_table(owner: str, table_name: str, sql_block: str) -> list[str]:
+        """Lines that run the ``sql_block`` of one table in the ILM script, with a comment naming the table."""
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def ilm_script_footer() -> list[str]:
+        """Lines that close the ILM script and end it successfully."""
+        pass
+
+    @staticmethod
+    @abstractmethod
     def ensure_database_links(
         conn: Any,
         links: Sequence[DatabaseLinkDefinition],

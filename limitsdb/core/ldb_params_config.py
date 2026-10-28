@@ -18,7 +18,7 @@ from limitsdb.core.ldb_config_loader import load_runtime_config, read_env_overri
 from limitsdb.core.ldb_errors import ValidationError
 from limitsdb.core.ldb_logger import get_logger
 from limitsdb.core.ldb_meta import Cli, CliOnly, Env, Help, Secret
-from limitsdb.core.ldb_utils import resolve_schema_file  # markers for Annotated metadata
+from limitsdb.core.ldb_utils import resolve_pending_dir, resolve_schema_file  # markers for Annotated metadata
 
 logger = get_logger("params_config")
 
@@ -235,6 +235,11 @@ class Config:
         self.mode = normalized_mode  # type: ignore[assignment]
         if self.last < 1:
             raise ValidationError(f"last must be at least 1: {self.last}")
+        if self.history_baseline not in get_args(HistoryBaseline):
+            raise ValidationError(
+                f"invalid history_baseline: {self.history_baseline!r}; "
+                f"valid values: {', '.join(get_args(HistoryBaseline))}"
+            )
         if self.mode == "SCRIPT":
             self.generate_script = True
         requires_connections = self.mode in MODES_REQUIRING_CONNECTIONS
@@ -394,7 +399,11 @@ def build_argparser_from_config() -> argparse.ArgumentParser:
             parser.add_argument(cli, type=_arg_type_from_default(default), **arg_kwargs)
     # Builder-only flags (not part of Config dataclass)
     parser.add_argument(
-        "--config-dir", help="Configuration root (overrides autodiscovery of ~/.config/LimitsDb and /etc/limitsdb)"
+        "--config-dir",
+        help=(
+            "Configuration root (overrides autodiscovery of ~/.config/LimitsDb and /etc/limitsdb, "
+            r"or %%PROGRAMDATA%%\LimitsDb on Windows)"
+        ),
     )
     parser.add_argument("--config-file", help="Additional YAML overlay (highest priority)")
     parser.add_argument(
@@ -491,6 +500,9 @@ def build_config(defaults: Mapping[str, Any], cli_args: argparse.Namespace) -> d
     # Ensure schema/profile land in the object (the loader also uses them but they are not part of the dict)
     final["schema"] = schema
     final["profile"] = profile
+    # Neither the loader nor argparse supplies the default, so the declared one is resolved like any other value.
+    pending_dir = final.get("ddl_pending_dir") or Config.ddl_pending_dir
+    final["ddl_pending_dir"] = resolve_pending_dir(str(pending_dir), getattr(cli_args, "config_dir", None))
     final["ilm_config_file"] = resolve_schema_file(
         schema=str(schema),
         profile=cast(str | None, profile),

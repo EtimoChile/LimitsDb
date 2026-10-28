@@ -1,4 +1,5 @@
 import json
+import sys
 from dataclasses import FrozenInstanceError
 from json import JSONDecodeError
 from pathlib import Path
@@ -553,6 +554,26 @@ def test_history_baseline_defaults_to_empty_and_is_overridable_by_env_and_cli(mo
     assert ldb_params_config.read_env_overrides(bindings)["history_baseline"] == "SOURCE"
 
 
+@pytest.mark.parametrize("value", ["SORUCE", "source", "", "FULL"])
+def test_history_baseline_outside_empty_or_source_is_rejected_from_any_source(value: str):
+    # Spec: README > Configuration parameters reference — history_baseline accepts only EMPTY or
+    # SOURCE; YAML files and --set reach Config without passing through argparse choices.
+    # Given: a value supplied as YAML or --set would supply it, bypassing the CLI flag
+    # When / Then: the configuration is rejected naming the key and the accepted values
+    with pytest.raises(ldb_params_config.ValidationError, match=r"history_baseline.*EMPTY, SOURCE"):
+        ldb_params_config.Config.from_dict({"schema": "s", "mode": "PLAN", "history_baseline": value})
+
+
+@pytest.mark.parametrize("value", ["EMPTY", "SOURCE"])
+def test_history_baseline_empty_or_source_is_accepted_from_yaml_or_set(value: str):
+    # Spec: README > Configuration parameters reference — history_baseline: EMPTY | SOURCE.
+    # Given / When: a documented value arrives without passing through argparse
+    config = ldb_params_config.Config.from_dict({"schema": "s", "mode": "PLAN", "history_baseline": value})
+
+    # Then: it is kept in the typed execution view
+    assert config.execution.history_baseline == value
+
+
 def test_persistent_column_settings_cannot_be_overridden_via_cli_set(monkeypatch: pytest.MonkeyPatch):
     # Spec: docs/configuration-contract.md (DEC-013) — use_added_columns and
     # add_ldb_columns are set in persistent YAML only; --set must reject them to
@@ -620,9 +641,95 @@ def test_build_config_passes_profile_to_config_loader(monkeypatch: pytest.Monkey
     assert result["profile"] == "prod"
 
 
+def _build_with_pending_dir(
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path | None, *, yaml_text: str | None = None, user_root: Path
+) -> dict:
+    """Run the config build of the ldb-run entry points: real parser, real files, empty defaults."""
+    monkeypatch.delenv("LDB_DDL_PENDING_DIR", raising=False)
+    monkeypatch.delenv("LDB_SCHEMA", raising=False)
+    root = config_dir or user_root
+    if yaml_text is not None:
+        (root / "schemas" / "s").mkdir(parents=True)
+        (root / "schemas" / "s" / "config.yml").write_text(yaml_text, encoding="utf-8")
+    roots = (user_root, user_root / "system")
+    monkeypatch.setattr(ldb_utils, "get_config_roots", lambda appname="LimitsDb": roots)
+    monkeypatch.setattr(ldb_config_loader, "get_config_roots", lambda appname="LimitsDb": roots)
+    argv = ["ldb-run", "--schema", "s"] + (["--config-dir", str(config_dir)] if config_dir else [])
+    monkeypatch.setattr(sys, "argv", argv)
+    return ldb_params_config.build_config({}, ldb_params_config.parse_args())
+
+
+def test_default_ddl_pending_dir_is_placed_under_the_explicit_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Spec: README > Configuration parameters reference — ddl_pending_dir defaults to ldb_ddl_pending, and a
+    # relative directory is based on the configuration directory; the config carries the absolute path
+    # Given: an explicit --config-dir and a configuration that does not mention ddl_pending_dir
+    # When: the entry point builds its configuration
+    result = _build_with_pending_dir(monkeypatch, tmp_path, user_root=tmp_path / "user")
+
+    # Then: the default directory is under the config dir, not under the working directory
+    assert result["ddl_pending_dir"] == str((tmp_path / "ldb_ddl_pending").resolve())
+
+
+def test_relative_ddl_pending_dir_defaults_to_the_user_config_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Configuration parameters reference — without --config-dir the user configuration root is
+    # the base of a relative ddl_pending_dir
+    # Given: no --config-dir, a known user root and a configured relative directory
+    user_root = tmp_path / "user"
+    user_root.mkdir()
+
+    # When: the entry point builds its configuration
+    result = _build_with_pending_dir(monkeypatch, None, yaml_text="ddl_pending_dir: out\n", user_root=user_root)
+
+    # Then: the directory is under the user root
+    assert result["ddl_pending_dir"] == str((user_root / "out").resolve())
+
+
+def test_default_ddl_pending_dir_defaults_to_the_user_config_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Configuration parameters reference — ddl_pending_dir defaults to ldb_ddl_pending, based on
+    # the user configuration root when there is no --config-dir
+    # Given: no --config-dir and a configuration that does not mention ddl_pending_dir
+    # When: the entry point builds its configuration
+    result = _build_with_pending_dir(monkeypatch, None, user_root=tmp_path / "user")
+
+    # Then: the default directory is under the user root
+    assert result["ddl_pending_dir"] == str((tmp_path / "user" / "ldb_ddl_pending").resolve())
+
+
+def test_absolute_ddl_pending_dir_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Configuration parameters reference — an absolute directory is used as given
+    # Given: an absolute directory in the configuration and an unrelated --config-dir
+    absolute = tmp_path / "abs"
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+
+    # When: the entry point builds its configuration
+    result = _build_with_pending_dir(
+        monkeypatch, config_dir, yaml_text=f"ddl_pending_dir: {absolute.as_posix()}\n", user_root=tmp_path / "user"
+    )
+
+    # Then: the directory is kept
+    assert result["ddl_pending_dir"] == str(absolute.resolve())
+
+
 # ---------------------------------------------------------------------------
 # Schema file resolution
 # ---------------------------------------------------------------------------
+
+
+def test_system_root_on_windows_is_under_program_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Spec: README > Configuration Resolution — the system root is /etc/limitsdb on POSIX and
+    # %PROGRAMDATA%\LimitsDb on Windows, where /etc does not exist
+    # Given: a Windows host whose ProgramData folder is known
+    monkeypatch.setattr(ldb_utils.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path))
+
+    # When: the configuration roots are resolved
+    _, system_root = ldb_utils.get_config_roots()
+
+    # Then: the system root lives under ProgramData, not under a drive-relative \etc
+    assert system_root == tmp_path / "LimitsDb"
 
 
 def test_resolve_schema_file_finds_user_level_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

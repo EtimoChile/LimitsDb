@@ -149,7 +149,23 @@ def test_monitoring_access_names_the_grant_for_each_unreadable_view():
 
     # Then: only progress is lost, and the hint grants the SYS wrapper of the view to the role
     assert (access.session, access.progress, access.waits) == (True, False, True)
-    assert access.grants == ("GRANT SELECT ON sys.gv_$session_longops TO LDB_SOURCE_ROLE",)
+    assert access.grants == ("GRANT SELECT ON sys.gv_$session_longops TO ldb_source_role",)
+
+
+@pytest.mark.parametrize(
+    ("role", "rendered"), [("LdbHistoryRole", '"LdbHistoryRole"'), ("LDB_HISTORY_ROLE", "ldb_history_role")]
+)
+def test_monitoring_grant_names_the_role_as_the_dictionary_stores_it(role: str, rendered: str):
+    # Spec: ilm.example.yml > Identifier rules — role names are exact dictionary names; a mixed-case role must be
+    # quoted in the grant, or it resolves to another role (LDBHISTORYROLE)
+    # Given: a connection that cannot read gv$session and a role with the given dictionary name
+    conn = _Conn(denied=("gv$session",))
+
+    # When: the monitoring access is checked for that role
+    access = OracleEngine.check_monitoring_access(conn, role)  # type: ignore[arg-type]
+
+    # Then: the suggested grant names the role as the dictionary stores it
+    assert access.grants[0] == f"GRANT SELECT ON sys.gv_$session TO {rendered}"
 
 
 def test_monitoring_access_is_complete_when_every_view_is_readable_and_empty_when_none_is():
@@ -234,22 +250,38 @@ def test_session_activity_skips_the_views_the_user_cannot_read():
     assert activity.alive is None and activity.waits == ()
 
 
+class _HeldLock(_Conn):
+    """The runner lock row is held by another session; the key row names the run that published it."""
+
+    def __init__(self, holder_run_id, key_error=None):
+        super().__init__()
+        self.holder_run_id = holder_run_id
+        self.key_error = key_error
+        self.rollback = lambda: self.log.append(("ROLLBACK", None))  # type: ignore[method-assign]
+
+    def cursor(self):
+        cur = super().cursor()
+        plain_execute = cur.execute
+
+        def execute(sql, params=None):
+            text = " ".join(sql.split())
+            if text.endswith("FOR UPDATE NOWAIT"):
+                self.log.append((text, params))
+                raise oracledb.DatabaseError(type("E", (), {"code": 54, "message": "ORA-00054: busy"})())
+            if self.key_error is not None:
+                self.log.append((text, params))
+                raise self.key_error
+            self.results = {"rl_kind = 'K'": [] if self.holder_run_id is None else [(self.holder_run_id,)]}
+            plain_execute(sql, params)
+
+        cur.execute = execute  # type: ignore[method-assign]
+        return cur
+
+
 def test_a_held_runner_lock_is_reported_active_and_the_probe_never_waits():
     # Spec: README > Run ILM > --mode STATUS — liveness tries the runner lock with NOWAIT; ORA-00054 = a live runner
-    # Given: the lock is held by another session
-    class _Held(_Conn):
-        def cursor(self):
-            cur = super().cursor()
-
-            def busy(sql, params=None):
-                self.log.append((" ".join(sql.split()), params))
-                raise oracledb.DatabaseError(type("E", (), {"code": 54, "message": "ORA-00054: busy"})())
-
-            cur.execute = busy  # type: ignore[method-assign]
-            return cur
-
-    conn = _Held()
-    conn.rollback = lambda: conn.log.append(("ROLLBACK", None))  # type: ignore[attr-defined]
+    # Given: the lock is held by another session, and the key row of the table names the requested run
+    conn = _HeldLock("r1")
 
     # When/Then
     assert OracleEngine.is_run_alive(conn, "APP", "ITEMS", "r1") is True  # type: ignore[arg-type]
@@ -257,6 +289,39 @@ def test_a_held_runner_lock_is_reported_active_and_the_probe_never_waits():
     assert "FROM ldb_run_lock" in sql and sql.endswith("FOR UPDATE NOWAIT") and "rl_kind = 'L'" in sql
     assert params == ["APP", "ITEMS"]
     # And: nothing stays locked
+    assert conn.log[-1][0] == "ROLLBACK"
+
+
+def test_a_table_held_by_a_later_run_does_not_make_an_earlier_run_alive():
+    # Spec: docs/concurrency-control.md > Layer 1 — the key row names the run that owns the table; a lock held
+    # for another run says nothing about the run asked about (a stale execution must not show as RUNNING)
+    # Given: the table lock is held by run r2 and STATUS asks about the older run r1
+    conn = _HeldLock("r2")
+
+    # When/Then: r1 is not alive, while r2 itself is
+    assert OracleEngine.is_run_alive(conn, "APP", "ITEMS", "r1") is False  # type: ignore[arg-type]
+    assert OracleEngine.is_run_alive(conn, "APP", "ITEMS", "r2") is True  # type: ignore[arg-type]
+    key_queries = [sql for sql, _ in conn.log if "rl_kind = 'K'" in sql]
+    assert key_queries and all("FOR UPDATE" not in sql for sql in key_queries)
+
+
+@pytest.mark.parametrize(
+    "conn",
+    [
+        _HeldLock(None),
+        _HeldLock("r1", key_error=oracledb.DatabaseError(type("E", (), {"code": 942, "message": "ORA-00942"})())),
+    ],
+)
+def test_a_held_lock_with_an_unreadable_or_missing_key_row_leaves_liveness_unknown(conn):
+    # Spec: docs/concurrency-control.md — when the owner of the lock cannot be determined the answer is "unknown",
+    # decided by the session views, never a guess
+    # Given: a connection where the lock is held but its owner row is missing or unreadable (the parameter)
+
+    # When: the liveness of the run is probed
+    alive = OracleEngine.is_run_alive(conn, "APP", "ITEMS", "r1")  # type: ignore[arg-type]
+
+    # Then: liveness is unknown and the probe released what it took
+    assert alive is None
     assert conn.log[-1][0] == "ROLLBACK"
 
 

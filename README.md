@@ -272,9 +272,14 @@ ldb-crypt --schema billing --profile prod
 non-empty plaintext value in `secrets[.<PROFILE>].json` with an
 `enc:v1:aes256gcm:…` token. Already-encrypted values are left unchanged.
 If this step is skipped, `ldb-run` and `ldb-impl` will encrypt any plaintext
-secrets automatically before the first run, provided the secrets file is in the
-default user configuration directory or an explicit `--config-dir` is supplied.
+secrets automatically before the first run, in the same file the configuration
+loader reads (`--config-dir`, else the user root, else the system root).
 `ldb-crypt` is a convenience to encrypt them without executing ILM.
+
+A secrets file in the system root is usually read-only for the account that runs
+LimitsDb. If it still holds cleartext secrets, the command stops with an error
+asking you to grant write permission on that file temporarily; rerun it to
+encrypt the file, and it then recommends removing the write permission again.
 
 The encryption key is stored in your user context and protected by OS
 permissions. Never version or copy the key file.
@@ -326,7 +331,10 @@ The script:
 - contains no passwords: it prompts for all of them (hidden input) at its start,
   before it changes anything;
 - can be rerun: each object is created in a PL/SQL block that ignores only its
-  own "already exists" error, and an existing database link is skipped;
+  own "already exists" error, and an existing database link (the exact name, or
+  the name followed by a domain, as in `NAME.WORLD`) is skipped. An existing
+  primary key of `LDB_CTL` or `LDB_LOG` is accepted only if it has the required
+  name and columns; otherwise the script fails and leaves the key unchanged;
 - creates the database link after reconnecting as the runtime user, who owns it.
   It asks for that user's password once and reuses it to reconnect. An existing user keeps its password, so the one entered must
   match it; the script says so before it reconnects.
@@ -399,8 +407,8 @@ Each execution has one state:
 | `PARTIAL` | No table is running or failed, but some did not finish: the run was interrupted, for example because its session ended. |
 
 Whether a runner is alive is verified by trying its table lock (`LDB_RUN_LOCK`) with `NOWAIT` and releasing it at
-once: if another session holds it, the run is active; if the lock is free, the run died and the table is
-`INTERRUPTED`. `SCRIPT` runs take no lock, so they are checked through `gv$session` instead.
+once: if another session holds it for that run (the table's key row names the run), the run is active; if the
+lock is held for a later run, or is free, the run is not alive and the table is `INTERRUPTED`. `SCRIPT` runs take no lock, so they are checked through `gv$session` instead.
 
 Every execution shows its rows processed, start and elapsed time, and each table its status and rows. For a
 table being processed, Oracle adds:
@@ -530,14 +538,17 @@ is safe to rerun and meant to run first (`VALIDATE`, `PREPARE`, then the rest):
   tables (it could also drop columns); the DDL then goes through admin
   credentials or the DBA file. It does not cover `CREATE INDEX`, which needs
   the `INDEX` privilege and would create the index in the runtime user's
-  schema: indexes always go through admin credentials or the DBA file.
+  schema: the `history_indexes` of a table are created through admin
+  credentials or the DBA file.
 - `history_drop_unmanaged_indexes` (default `true`) drops, when the history
-  tables are reconciled, every index that is not the primary key, because
-  history tables carry only the primary key by design. Set it to `false` to
+  tables are reconciled, every index that is not the primary key nor listed in
+  the table's `history_indexes`, because history tables carry only the primary
+  key by design. Set it to `false` to
   keep indexes a DBA adds on purpose.
 - Tables owned by the runtime user itself are left out of the grants and of
   their checks: an owner already holds every privilege on its own tables, and
-  Oracle does not record a grant to oneself.
+  Oracle does not record a grant to oneself. The runtime username and the owners
+  are compared as exact names: user `hist` does not own the tables of schema `HIST`.
 - It creates or alters the history tables and grants them to the history role,
   with the same admin or runtime-connection rules as `EXECUTE`: statements that
   fail go to the pending file.
@@ -599,7 +610,7 @@ the same pending file as the failed DDL, so a DBA can run it.
 | `use_added_columns`      | Populate derived columns in history tables.                                                                                                                     | Default `True` (boolean toggle).                                                     |
 | `add_ldb_columns`        | Add LimitsDb execution-date columns in history tables.                                                                                                        | Default `True` (boolean toggle).                                                     |
 | `parallel_max`           | Maximum number of parallel processes.                                                                                                                           | Default `10`.                                                                        |
-| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials, and the DDL and grants files of `--mode SCRIPT`.                                                                      | Default `ldb_ddl_pending`.                                                           |
+| `ddl_pending_dir`        | Directory where `ldb-run` writes history DDL it could not apply without admin credentials, and the DDL and grants files of `--mode SCRIPT`.                                                                      | Default `ldb_ddl_pending`. A relative path is placed under the configuration directory (`--config-dir`, else the user configuration root); logs show the absolute path. A file name already taken gets a `_2`, `_3`... suffix, an existing file is never overwritten. |
 | `history_baseline`       | State assumed for the history tables by `--mode SCRIPT` when it cannot read them over the runtime history connection: `EMPTY` (no objects) or `SOURCE` (same objects as source). | Default `EMPTY`; choices `EMPTY`, `SOURCE`. |
 | `db_engine`              | Database engine.                                                                                                                                                | Default and only current choice: `"oracle"`.                                        |
 | `log_level`              | Logging level.                                                                                                                                                  | Default `"INFO"`; choices `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"`, `"CRITICAL"`. |
@@ -660,6 +671,7 @@ Each entry in `ilm[.<PROFILE>].yml` merges table-level attributes with one or mo
 - **Referencing tables:** Use `referencing_tables` to pull parent conditions into child tables. List entries as `<TABLE> <ALIAS>` (optionally `<OWNER>.<TABLE> <ALIAS>`) and supply matching `join_expr` fragments. The runner inherits the active conditions of each referenced table: the conditions of one table are alternatives (`or`), and a child row is purged only when its own conditions and those of every referenced table are met (`and` between tables). It rewrites the join fragments—`@` becomes `inner` joins by default or `left outer` joins when `source_orphan_purge: true` to find orphans.
 - **Join owners in history:** `join_expr` names each referenced table by its source owner. In `HISTORY_ILM` runs with `use_added_columns: false` the runner joins the history copy instead, replacing `<source_owner>.<table>` with `<history_owner>.<table>` for every table listed in `referencing_tables`. The owner is written with the engine's quoting rules, so a case-sensitive history owner keeps its quotes. With `use_added_columns: true` history runs do not join.
 - **Extra tables:** Filters may contain subqueries over tables that ILM does not manage. List them in `extra_select_tables` (read by `additional_filter_expr`, so source runs) and `history_extra_select_tables` (read by `history_addtl_filter_expr`) as comma-separated `[OWNER.]TABLE` entries; an entry without owner belongs to the environment's own owner. The environment's role gets `SELECT` on them wherever it gets the other table grants (`ldb-run`, `--mode PREPARE`, `--mode SCRIPT`) and the privilege checks include them. In history, `history_extra_select_tables` falls back to `extra_select_tables`, just as `history_addtl_filter_expr` falls back to `additional_filter_expr`. A table also managed by ILM keeps its full privileges. For tables that are not in the history database write the access in `history_addtl_filter_expr` yourself (for example `TABLE@SRC`, or `TABLE UNION ALL TABLE@SRC` in a subquery); LimitsDb does not rewrite subqueries. `SRC` is only the default name of the history-to-source database link; it can be overridden with `history_to_source_dblink_name` (and `source_to_history_dblink_name`, default `HIST`, for the other direction). The link connects as the source runtime user and uses the grants of its source role, so a table read as `TABLE@SRC` must also be listed in `extra_select_tables`.
+- **History indexes:** By default a history table carries only its primary key. `history_indexes` (per table) maps an index name to a comma-separated list of columns of the table, for example `{T1_H_DATE: "EVENT_DATE", T1_H_CUST: "CUSTOMER, EVENT_DATE"}`. They help queries on history and never reject a row, so they are never unique. Names and columns are exact dictionary names; an index cannot be named like the primary key (`<TABLE>_PK`), its columns must be distinct columns of the table, and anything else stops the run before it changes anything. `ldb-run` creates, replaces or drops them as part of the history DDL: through the history admin credentials when present, otherwise with the runtime user, and any statement that fails (the runtime user needs `CREATE ANY INDEX` to create an index in another schema) is written to the pending DDL file for a DBA. Indexes in this setting survive `history_drop_unmanaged_indexes`; the rest are dropped as before.
 - **Historical predicate snapshot:** With `use_added_columns` enabled, every archived row preserves the values needed to reevaluate all its predicates in history, including values sourced from related tables. Distinct cut-off dates are stored in helper columns such as `ldb_date_<suffix>`. Predicates that share a date reuse the same helper column while retaining their own filters and retention windows. Other values sourced from related tables are materialized as `<column>_<table_alias>`.
 - **Orphan handling:** Enable `source_orphan_purge` with `orphan_check_column` to archive source rows whose referenced parent is absent. The source query uses `left outer` joins and treats the row as an orphan when any comma-separated check column is `NULL`. `referencing_tables`, `join_expr`, `orphan_check_column`, `use_added_columns: true`, and a positive historical retention are required. Orphans follow the table's normal source-to-history flow rather than being deleted directly. LimitsDb snapshots this state in `LDB_IS_ORPHAN` and stores a fallback date so `HISTORY_ILM` can apply the configured retention without accessing the missing parent.
 
@@ -667,7 +679,7 @@ Each entry in `ilm[.<PROFILE>].yml` merges table-level attributes with one or mo
 
 Lowest → highest priority:
 
-1. System root: `/etc/limitsdb`
+1. System root: `/etc/limitsdb` (Windows: `%PROGRAMDATA%\LimitsDb`)
 2. User root: `~/.config/LimitsDb`
 3. `--config-file` (extra overlay)
 4. Registered environment variables (`Env("LDB_*")` metadata)

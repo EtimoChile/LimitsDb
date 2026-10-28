@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from limitsdb.core.ldb_crypto import load_or_create_key
-from limitsdb.core.ldb_ddl import render_script
+from limitsdb.core.ldb_ddl import render_script, write_pending_file
 from limitsdb.core.ldb_errors import InvalidCredentialsError, LimitsDbError
 from limitsdb.core.ldb_logger import configure_logger, get_logger, reconfigure_logger
 from limitsdb.core.ldb_params_config import Config, build_config
@@ -190,14 +189,17 @@ def run_cli() -> None:
         fragments: list[str] = []
         steps(fragments.append)
         title = f"{env} database of schema {config.schema}"
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = Path(config.execution.ddl_pending_dir) / f"bootstrap_{config.schema}_{env.lower()}_{stamp}.sql"
+        pending_dir = Path(config.execution.ddl_pending_dir)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(render_script(title, fragments), encoding="utf-8")
+            path = write_pending_file(
+                pending_dir, f"bootstrap_{config.schema}_{env.lower()}", render_script(engine, title, fragments)
+            )
         except OSError as exc:
             logger.error(
-                "Admin credentials for %s are absent and the script could not be written to %s: %s", env, path, exc
+                "Admin credentials for %s are absent and the script could not be written under %s: %s",
+                env,
+                pending_dir.resolve(),
+                exc,
             )
             raise SystemExit(1) from exc
         script_files.append(path)

@@ -3,7 +3,7 @@ import os
 import socket
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from functools import partial
 from operator import attrgetter
@@ -24,6 +24,7 @@ from limitsdb.db.ldb_engines import (
     DatabaseEngine,
     DdlFailures,
     DdlSink,
+    IndexDefinition,
     MonitoringAccess,
     TableDefinition,
 )
@@ -215,9 +216,9 @@ def _collect_privilege_plan(
             field, value = "history_extra_select_tables", row.get("history_extra_select_tables")
         extra.update(_parse_extra_tables(value, row[owner_key], engine, field, key))
     if runtime_user:
-        owned = engine.get_identifier_str(runtime_user)
-        configured = [table for table in configured if table[0] != owned]
-        extra = {table for table in extra if table[0] != owned}
+        # Owners and the username are exact dictionary names: `hist` and `HIST` are different schemas
+        configured = [table for table in configured if table[0] != runtime_user]
+        extra = {table for table in extra if table[0] != runtime_user}
     plan: PrivilegePlan = []
     if configured:
         plan.append((_TABLE_PRIVILEGES[env] + (("ALTER",) if alter and env == "HISTORY" else ()), configured))
@@ -426,7 +427,7 @@ def _status_environment(config: Config, engine: DatabaseEngine, env: Literal["SO
             if admin_conn is not None and admin_access is not None and not admin_access.grants:
                 access, monitor_conn = admin_access, admin_conn
             else:
-                script = _write_monitoring_grants_file(config, env, access)
+                script = _write_monitoring_grants_file(engine, config, env, access)
         return collect_environment(
             engine,
             conn,
@@ -443,7 +444,7 @@ def _status_environment(config: Config, engine: DatabaseEngine, env: Literal["SO
 
 
 def _write_monitoring_grants_file(
-    config: Config, env: Literal["SOURCE", "HISTORY"], access: MonitoringAccess
+    engine: DatabaseEngine, config: Config, env: Literal["SOURCE", "HISTORY"], access: MonitoringAccess
 ) -> Path | None:
     """Write the grants that open the session views to the runtime role, for a DBA to run (nothing is applied)."""
 
@@ -453,6 +454,7 @@ def _write_monitoring_grants_file(
             ddl_sink(grant)
 
     path = deliver_ddl(
+        engine,
         config,
         produce,
         destination="file",
@@ -490,6 +492,52 @@ def _clone_column_definition(name: str, template: ColumnDefinition) -> ColumnDef
     )
 
 
+def _parse_history_indexes(
+    rule: IlmRule, key: tuple[str, str], column_names: Iterable[str] | None = None
+) -> tuple[IndexDefinition, ...]:
+    """Parse ``history_indexes`` (index name -> comma-separated columns) into non-unique index definitions.
+
+    History indexes help the queries on history and never reject a row, so they are never unique. With
+    ``column_names`` every column must be one of them.
+    """
+    value = rule.get("history_indexes")
+    if value is None:
+        return ()
+    if not isinstance(value, Mapping):
+        raise ValueError(f"history_indexes for {key} must map each index name to its columns")
+    primary_key_index = f"{rule['table_name']}_PK"
+    known = set(column_names) if column_names is not None else None
+    indexes: list[IndexDefinition] = []
+    for name, columns_text in value.items():
+        index_name = str(name).strip()
+        if not index_name or "." in index_name or " " in index_name:
+            raise ValueError(f"Invalid history_indexes name '{name}' for {key}: expected a single index name")
+        if index_name == primary_key_index:
+            raise ValueError(f"history_indexes name '{index_name}' for {key} is the name of the primary key")
+        columns = tuple(column.strip() for column in str(columns_text or "").split(",") if column.strip())
+        if not columns or len(set(columns)) != len(columns) or any(" " in column for column in columns):
+            raise ValueError(f"Invalid history_indexes columns '{columns_text}' for index {index_name} of {key}")
+        unknown = [column for column in columns if known is not None and column not in known]
+        if unknown:
+            raise ValueError(f"history_indexes {index_name} of {key} names unknown column(s): {', '.join(unknown)}")
+        indexes.append(IndexDefinition(name=index_name, columns=columns, unique=False))
+    return tuple(indexes)
+
+
+def _history_columns(table_cnf: ProcessedTableConfig) -> list[ColumnDefinition]:
+    """Columns of a history table: those of the table, then the derived ones."""
+    columns: list[ColumnDefinition] = sorted(table_cnf.get("columns_metadata", {}).values(), key=attrgetter("id"))
+    for other_column in table_cnf.get("other_columns", []):
+        columns.append(other_column["metadata"])
+    return columns
+
+
+def _validate_history_indexes_syntax(rows: Iterable[IlmRule]) -> None:
+    """Reject a malformed ``history_indexes`` before any grant or DDL; its columns are checked once they are known."""
+    for row in rows:
+        _parse_history_indexes(row, (row["source_owner"], row["table_name"]))
+
+
 def _build_history_table_definition(
     config: Config,
     engine: DatabaseEngine,
@@ -499,11 +547,7 @@ def _build_history_table_definition(
     cnd0 = table_cnf["conds"][0]
     history_owner, table_name = cnd0["history_owner"], cnd0["table_name"]
     metadata_owner = _runtime_owner(config, cnd0)
-    required_columns: list[ColumnDefinition] = sorted(
-        table_cnf.get("columns_metadata", {}).values(), key=attrgetter("id")
-    )
-    for other_column in table_cnf.get("other_columns", []):
-        required_columns.append(other_column["metadata"])
+    required_columns = _history_columns(table_cnf)
     pk_columns = list(engine.get_primary_key_columns(source_connection, metadata_owner, table_name, table_cnf))
     if config.execution.add_ldb_columns:
         if "LDB_PROCESS_DATE" not in pk_columns:
@@ -514,6 +558,7 @@ def _build_history_table_definition(
         name=table_name,
         columns=tuple(required_columns),
         primary_key=primary_key,
+        indexes=_parse_history_indexes(cnd0, (cnd0["source_owner"], table_name), (c.name for c in required_columns)),
         drop_unmanaged_indexes=config.administration.history_drop_unmanaged_indexes,
     )
 
@@ -609,6 +654,7 @@ def _ensure_history_tables(
                 )
 
         deliver_ddl(
+            engine,
             config,
             apply_structure,
             destination="execute",
@@ -649,6 +695,7 @@ def _apply_history_delta_without_admin(
 
     try:
         deliver_ddl(
+            engine,
             config,
             apply_delta,
             destination="execute",
@@ -815,6 +862,7 @@ def _write_script_ddl_files(
             engine.ensure_table_privileges(None, _app_role(config, "HISTORY"), tables, privileges, ddl_sink=ddl_sink)
 
     deliver_ddl(
+        engine,
         config,
         script_history,
         destination="file",
@@ -831,6 +879,7 @@ def _write_script_ddl_files(
                 engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, privileges, ddl_sink=ddl_sink)
 
         deliver_ddl(
+            engine,
             config,
             script_source_grants,
             destination="file",
@@ -910,6 +959,7 @@ def _write_source_grants_file(config: Config, engine: DatabaseEngine, missing: l
             engine.ensure_table_privileges(None, _app_role(config, "SOURCE"), tables, (privilege,), ddl_sink=ddl_sink)
 
     deliver_ddl(
+        engine,
         config,
         produce,
         destination="file",
@@ -948,19 +998,8 @@ def _prepare_result(tables_config: TablesConfig, missing: list[Privilege]) -> in
     return 1
 
 
-def generate_script_output(config: Config, tables_config: TablesConfig) -> int:
-    print(
-        f"""
-whenever oserror exit 1
-whenever sqlerror exit 1
-set echo on ver off trimspool on
-spool ldb_{config.context.schema}.log
-rem usage: sqlplus user/password@dsn @script EXECUTE|PREVIEW
-DEFINE ldb_mode = "&1"
-COLUMN ldb_process_date NEW_VALUE ldb_process_date
-SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;
-    """
-    )
+def generate_script_output(config: Config, engine: DatabaseEngine, tables_config: TablesConfig) -> int:
+    print("\n".join(["", *engine.ilm_script_header(config.context.schema), ""]))
     while True:
         cycle_printed = False
         for (owner, table_name), table_info in tables_config.items():
@@ -979,14 +1018,12 @@ SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;
                         break  # referencing table not GENERATED status
             if not all_referencing_tables_ready:
                 continue
-            print(f"rem table: {owner}.{table_name}")
-            print(table_info["sql_block"])
-            print("/")
+            print("\n".join(engine.ilm_script_table(owner, table_name, table_info["sql_block"])))
             cd["ctl_status"] = "GENERATED"  # print end
             cycle_printed = True
         if not cycle_printed:
             break  # There are no processes to launch, so go to waiting some process to end
-    print("\nspool off\nexit 0\n")
+    print("\n".join(["", *engine.ilm_script_footer(), ""]))
     return 0
 
 
@@ -1203,6 +1240,7 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
     for key, table_cnf in tables_config.items():
         cnd0 = table_cnf["conds"][0]
         _validate_orphan_configuration(config, cnd0, key)
+        _parse_history_indexes(cnd0, key)
         runtime_owner = _runtime_owner(config, cnd0)
         table_cnf["table_columns"], table_cnf["columns_metadata"] = engine.get_table_columns(
             connection, runtime_owner, cnd0["table_name"]
@@ -1396,6 +1434,8 @@ def process_tables_cnf(connection: Any, config: Config, engine: DatabaseEngine, 
                     "metadata": ColumnDefinition(name="LDB_INSERT_DATE", data_type="date", nullable=False),
                 }
             )
+        # The history table exists only after this validation, so its indexes are checked against its columns here.
+        _parse_history_indexes(cnd0, key, (column.name for column in _history_columns(table_cnf)))
         _, cnf_table_name = key
         join_expr = _runtime_join_expression(config, cnd0, engine, history_owners)
         # Prepare query_expr with the cnf_table_name, join_expr and where_expr
@@ -1431,6 +1471,7 @@ def ldb_run(config: Config) -> None:
             raise SystemExit(_status_mode(config, engine))
         connection = engine.get_connection(config)
         tables_conf_rows = _load_offline_rows(config)
+        _validate_history_indexes_syntax(tables_conf_rows)
         source_plan = _privilege_plan(config, tables_conf_rows, "SOURCE", engine)
         # The runtime user reads column metadata through these grants, so SCRIPT applies them too when it can
         source_grants_applied = False
@@ -1473,7 +1514,7 @@ def ldb_run(config: Config) -> None:
             _write_script_ddl_files(
                 config, engine, connection, tables_config, tables_conf_rows, source_grants_applied=source_grants_applied
             )
-            rc = generate_script_output(config, tables_config)
+            rc = generate_script_output(config, engine, tables_config)
         else:
             if _credentials_present(config, admin=True, env=None):
                 admin_connection = engine.get_connection(config, admin=True)

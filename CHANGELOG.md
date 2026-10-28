@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-28
+
+- **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `ilm_script_header(schema)`, `ilm_script_table(owner, table_name, sql_block)` and `ilm_script_footer()`. The ILM script written by `ldb-run --mode SCRIPT` (stop on error, log, mode argument, process date, one block per table, exit) now comes from the engine instead of the core; the Oracle engine writes the same SQL*Plus text as before.
+
+## [0.9.0] - 2026-10-27
+
+- **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `script_preamble(interactive=...)`, `script_prompt(message)` and `script_epilogue()`. The client commands that wrap the pending DDL files and the `ldb-impl` bootstrap script (stop at the first error, echo, messages, exit code) now come from the engine instead of the core; the Oracle engine writes the same SQL*Plus text as before.
+- Fix the release workflow publishing to PyPI regardless of TestPyPI: `publish-pypi` now needs `publish-testpypi`, which no longer ignores its failures.
+- Add `history_indexes` to the ILM rules: a per-table map of index name to columns that `ldb-run` keeps on the history table, always non-unique so they help history queries and never reject a load. They are created with the history DDL (admin credentials, else the runtime user, with failures written to the pending DDL file) and are not dropped by `history_drop_unmanaged_indexes`. A malformed entry stops the run before any change.
+- Fix the `ldb-impl` bootstrap script finishing with `LimitsDb: OK` over a wrong primary key: after the tolerated "already exists" error, it checks in the dictionary that the primary key of `LDB_CTL` and `LDB_LOG` has the required name and columns, and fails otherwise without changing it.
+- Fix the bootstrap script mistaking another database link for the configured one: a link `HISTORY` no longer prevents creating `HIST`, and `_` or `%` in a name are matched literally. An existing link is detected by its exact name or the name plus a domain suffix.
+- Fix `--mode STATUS` showing an old execution as `RUNNING` while a later run holds the table: a held runner lock now counts only when the table's key row names the run asked about.
+- Fix the monitoring grants script of `--mode STATUS` for case-sensitive roles: the grantee is quoted as the dictionary stores it (`LdbHistoryRole` no longer resolves to another role).
+- Fix the runtime-user ownership of tables comparing names after normalization: a user `hist` no longer hides the grants and checks of schema `HIST`. The username and owners are compared as exact names.
+- Fix pending DDL files and `ldb-impl` bootstrap scripts overwriting an earlier file of the same second: they are created exclusively and a name already taken gets a `_2`, `_3`... suffix. A relative `ddl_pending_dir` is now placed under the configuration directory (`--config-dir`, else the user configuration root) instead of the working directory, and the logs show absolute paths.
+- Fix DDL failures collected by `ldb-run` being lost when a later engine call raised: they are written to the pending file before the error propagates.
+- Fix the default `ddl_pending_dir` (`ldb_ddl_pending`) staying relative to the working directory: it is now placed under the configuration directory like any other relative value.
+- Fix `--mode VALIDATE` accepting a `history_indexes` over a column the history table does not have: the columns are now checked while the configuration is processed, and a malformed `history_indexes` is rejected before the source grants are applied.
+- Fix the bootstrap script and `ldb-impl` recreating a database link configured with lowercase letters: the dictionary stores link names in upper case, so the existing-link check now looks for the upper-case name.
+
+- Fix automatic secret encryption ignoring a configuration discovered in the system root: `ldb-run`, `ldb-impl` and `ldb-crypt` now encrypt the secrets file the loader reads, wherever it is, and no longer create the user configuration directory when there is none. A cleartext secrets file that cannot be written stops with an error asking for a temporary write permission; the rerun that encrypts a system-root file recommends removing that permission.
+- Change the system root on Windows to `%PROGRAMDATA%\LimitsDb` (it was `/etc/limitsdb`, which resolved to `\etc\limitsdb` on the current drive); POSIX keeps `/etc/limitsdb`.
+
 ## [0.8.0] - 2026-10-23
 
 - Add the `history_drop_unmanaged_indexes` setting (default `true`, the previous behavior): set it to `false` to keep the history indexes other than the primary key instead of dropping them.

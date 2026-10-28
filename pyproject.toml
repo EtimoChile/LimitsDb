@@ -1,6 +1,6 @@
 [project]
 name = "limitsdb"
-version = "0.8.0"
+version = "0.10.0"
 description = "Configuration-driven ILM (Information Lifecycle Management) for production and history databases"
 readme = "README.md"
 requires-python = ">=3.12,<4.0"
@@ -98,7 +98,7 @@ patch = ["subprocess"]
 [tool.coverage.report]
 show_missing = true
 
-# para las libs externas sin stubs:
+# for external libraries without stubs:
 [[tool.mypy.overrides]]
 module = [
   "pytest",

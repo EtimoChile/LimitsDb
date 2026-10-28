@@ -930,8 +930,9 @@ end;"""
             table_name: Table name.
             run_id: Run recorded for the table.
         Returns:
-            True when another session holds the table's runner lock, False when nobody does, and None when
-            the run has no runner lock (a generated SCRIPT, whose id starts with S) or it cannot be probed."""
+            True when a session holds the table's runner lock and the key row names this run, False when
+            nobody does or the holder is a different run (a later one), and None when the run has no runner
+            lock (a generated SCRIPT, whose id starts with S) or it cannot be probed."""
         if run_id.startswith("S"):
             return None
         cursor = conn.cursor()
@@ -945,7 +946,19 @@ end;"""
             return False if found else None
         except oracledb.DatabaseError as exc:
             detail = exc.args[0] if exc.args else None
-            return True if getattr(detail, "code", None) == 54 else None
+            if getattr(detail, "code", None) != 54:
+                return None
+            # The lock is held, but the table may belong to a later run than the one asked about
+            try:
+                cursor.execute(
+                    """SELECT rl_run_id FROM ldb_run_lock
+                    WHERE rl_owner = :1 AND rl_table_name = :2 AND rl_kind = 'K'""",
+                    [owner, table_name],
+                )
+                key_row = cursor.fetchone()
+            except oracledb.DatabaseError:
+                return None
+            return None if key_row is None else key_row[0] == run_id
         finally:
             cursor.close()
             conn.rollback()
@@ -974,8 +987,9 @@ end;"""
                 readable[view] = False
             finally:
                 cursor.close()
+        target = OracleEngine._format_identifier(grantee)
         hints = tuple(
-            f"GRANT SELECT ON sys.{view.replace('$', '_$')} TO {grantee}" for view, ok in readable.items() if not ok
+            f"GRANT SELECT ON sys.{view.replace('$', '_$')} TO {target}" for view, ok in readable.items() if not ok
         )
         return MonitoringAccess(
             session=readable["gv$session"],
@@ -1748,6 +1762,44 @@ end;"""
         return created
 
     @staticmethod
+    def script_preamble(*, interactive: bool) -> list[str]:
+        settings = (
+            "set echo on define on verify off sqlblanklines on serveroutput on"
+            if interactive
+            else "set echo on define off sqlblanklines on"
+        )
+        return ["whenever oserror exit failure", "whenever sqlerror exit failure", settings]
+
+    @staticmethod
+    def script_prompt(message: str) -> str:
+        return f"prompt {message}"
+
+    @staticmethod
+    def script_epilogue() -> list[str]:
+        return ["exit success"]
+
+    @staticmethod
+    def ilm_script_header(schema: str) -> list[str]:
+        return [
+            "whenever oserror exit 1",
+            "whenever sqlerror exit 1",
+            "set echo on ver off trimspool on",
+            f"spool ldb_{schema}.log",
+            "rem usage: sqlplus user/password@dsn @script EXECUTE|PREVIEW",
+            'DEFINE ldb_mode = "&1"',
+            "COLUMN ldb_process_date NEW_VALUE ldb_process_date",
+            "SELECT TO_CHAR(SYSDATE, 'YYYYMMDD') ldb_process_date FROM DUAL;",
+        ]
+
+    @staticmethod
+    def ilm_script_table(owner: str, table_name: str, sql_block: str) -> list[str]:
+        return [f"rem table: {owner}.{table_name}", sql_block, "/"]
+
+    @staticmethod
+    def ilm_script_footer() -> list[str]:
+        return ["spool off", "exit 0"]
+
+    @staticmethod
     def script_password_prompts(
         users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
     ) -> None:
@@ -1934,6 +1986,37 @@ end;"""
         )
 
     @staticmethod
+    def _primary_key_check(table: TableDefinition) -> str:
+        """PL/SQL block that fails unless the table's primary key has the required name and columns.
+
+        ORA-02260 and ORA-02264 only say that some primary key or constraint name exists, so the script
+        checks it in the dictionary instead of trusting the tolerated error.
+        """
+        literal = OracleEngine._quote_literal
+        pk_name = f"{table.name}_PK"
+        columns = ",".join(table.primary_key or ())
+        message = (
+            f"Table {table.owner}.{table.name} must have primary key {pk_name} on ({columns}), but its primary "
+            "key or a constraint with that name is different. LimitsDb does not change it: fix it and rerun."
+        )
+        return (
+            "declare n number;\nbegin\n"
+            "  select count(*) into n from dba_constraints c\n"
+            f"    where c.owner = {literal(table.owner)} and c.table_name = {literal(table.name)}\n"
+            f"      and c.constraint_type = 'P' and c.constraint_name = {literal(pk_name)}\n"
+            "      and (select listagg(cc.column_name, ',') within group (order by cc.position)\n"
+            "             from dba_cons_columns cc\n"
+            "            where cc.owner = c.owner and cc.constraint_name = c.constraint_name) = "
+            f"{literal(columns)};\n"
+            f"  if n = 0 then raise_application_error(-20001, {literal(message)}); end if;\n"
+            "end;\n/"
+        )
+
+    @staticmethod
+    def _like_escape(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
     def _existing_user_notice(username: str) -> str:
         """PL/SQL block that warns when the user already exists, so its password stays unchanged."""
         name = username
@@ -1994,6 +2077,7 @@ end;"""
                     f"ALTER TABLE {owner}.{table_name} ADD CONSTRAINT {fmt(f'{table.name}_PK')} PRIMARY KEY ({cols})"
                 )
                 sink(block(pk_sql, (-2260, -2264)))
+                sink(OracleEngine._primary_key_check(table))
             for index in table.indexes:
                 unique = "UNIQUE " if index.unique else ""
                 cols = ", ".join(fmt(col) for col in index.columns)
@@ -2021,10 +2105,14 @@ end;"""
                 f"CREATE DATABASE LINK {fmt(link.name)} CONNECT TO {fmt(link.username)} "
                 f'IDENTIFIED BY "&{variable}" USING {literal(link.dsn)}'
             ).replace("'", "''")
+            # The dictionary stores database link names in upper case, however the name was written in the CREATE.
+            stored_name = link.name.upper()
             sink(
                 "declare n number;\n"
                 "begin\n"
-                f"  select count(*) into n from user_db_links where upper(db_link) like upper({literal(link.name)}) || '%';\n"
+                "  select count(*) into n from user_db_links\n"
+                f"    where db_link = {literal(stored_name)}\n"
+                f"       or db_link like {literal(OracleEngine._like_escape(stored_name) + '.%')} escape '\\';\n"
                 f"  if n = 0 then execute immediate '{create_link}'; end if;\n"
                 "end;\n/"
             )
@@ -2285,7 +2373,8 @@ end;"""
 
     @staticmethod
     def _db_link_exists(cursor: oracledb.Cursor, name: str) -> bool:
-        return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name])
+        # The dictionary stores database link names in upper case, however the name was written in the CREATE.
+        return OracleEngine._object_exists(cursor, "SELECT 1 FROM user_db_links WHERE db_link = :1", [name.upper()])
 
     @staticmethod
     def _get_primary_key_info(

@@ -40,7 +40,7 @@ def _bootstrap(
     OracleEngine.ensure_database_links(
         None, links, ddl_sink=fragments.append, connect_as=(runtime_username, runtime_dsn)
     )
-    return render_script(title, fragments)
+    return render_script(OracleEngine, title, fragments)
 
 
 def _script() -> str:
@@ -129,6 +129,102 @@ def test_bootstrap_script_creates_database_link_after_connecting_as_runtime_user
     assert "user_db_links" in script  # skipped when the link already exists
 
 
+def _tables_script(table: TableDefinition) -> str:
+    fragments: list[str] = []
+    OracleEngine.ensure_tables(None, [table], ddl_sink=fragments.append)
+    return "\n".join(fragments)
+
+
+def test_bootstrap_script_fails_when_the_existing_primary_key_is_not_the_required_one():
+    # Spec: README > ldb-impl without admin credentials — an "already exists" error for the primary key is
+    # tolerated only when the existing key has the required name and columns; otherwise the script fails
+    # Given: a control table whose primary key is the named constraint on two columns
+    table = TableDefinition(
+        owner="LDB_USER",
+        name="LDB_LOG",
+        columns=(ColumnDefinition(name="A", data_type="NUMBER"), ColumnDefinition(name="B", data_type="NUMBER")),
+        primary_key=("A", "B"),
+    )
+
+    # When: its script is generated
+    script = _tables_script(table)
+
+    # Then: after the tolerant block, the dictionary is checked for that name, type and column order, and a
+    # difference raises an error (which stops the script: whenever sqlerror exit failure)
+    tolerant = script.index("-2260, -2264")
+    check = script.index("from dba_constraints", tolerant)
+    assert "c.owner = 'LDB_USER' and c.table_name = 'LDB_LOG'" in script[check:]
+    assert "c.constraint_type = 'P' and c.constraint_name = 'LDB_LOG_PK'" in script[check:]
+    assert "within group (order by cc.position)" in script[check:]
+    assert ") = 'A,B';" in script[check:]
+    assert "raise_application_error(-20001" in script[check:]
+    assert "LimitsDb does not change it" in script[check:]
+
+
+def test_bootstrap_script_checks_the_primary_key_of_a_lowercase_table_as_it_was_created():
+    # Spec: limitsdb/resources/ilm.example.yml > Identifier rules — identifiers are exact dictionary names, so a
+    # lowercase name is a quoted identifier and the dictionary check must look for it as written
+    # Given: a table whose owner, name and key column are lowercase
+    table = TableDefinition(
+        owner="ldb", name="log", columns=(ColumnDefinition(name="id", data_type="NUMBER"),), primary_key=("id",)
+    )
+
+    # When: the bootstrap script is generated
+    script = _tables_script(table)
+
+    # Then: the primary key check names the table, constraint and column as they were created
+    assert "c.owner = 'ldb' and c.table_name = 'log'" in script
+    assert "c.constraint_name = 'log_PK'" in script
+    assert ") = 'id';" in script
+    assert "'LDB'" not in script
+
+
+def _link_script(name: str) -> str:
+    fragments: list[str] = []
+    link = DatabaseLinkDefinition(name=name, username="U", password=_SECRET, dsn="host/svc")
+    OracleEngine.ensure_database_links(None, [link], ddl_sink=fragments.append, connect_as=("ldb_user", "host/svc"))
+    return "\n".join(fragments)
+
+
+def test_bootstrap_script_detects_an_existing_database_link_by_exact_name_or_domain_suffix_only():
+    # Spec: README > ldb-impl without admin credentials — an existing database link is skipped; a link
+    # whose name merely starts with the configured one (HISTORY next to HIST) is another link
+    # Given: a database link named HIST
+    # When: the bootstrap script is generated
+    script = _link_script("HIST")
+
+    # Then: the link is looked up by exact name or by name plus domain, never by prefix
+    assert "where db_link = 'HIST'" in script
+    assert "or db_link like 'HIST.%' escape '\\'" in script
+    assert "like 'HIST%'" not in script
+    assert "upper(db_link)" not in script
+
+
+def test_bootstrap_script_matches_underscore_and_percent_of_a_link_name_literally():
+    # Spec: README > ldb-impl without admin credentials — an existing link is found by its own name, so `_` and
+    # `%` in a link name must not act as LIKE wildcards and match another link
+    # Given: a database link whose name contains `_` and `%`
+    # When: the bootstrap script is generated
+    script = _link_script("LDB_HI%T")
+
+    # Then: both characters are escaped in the lookup
+    assert "where db_link = 'LDB_HI%T'" in script
+    assert "like 'LDB\\_HI\\%T.%' escape '\\'" in script
+
+
+@pytest.mark.parametrize(("configured", "stored"), [("hist", "HIST"), ("Hist.Domain", "HIST.DOMAIN"), ("hi%t", "HI%T")])
+def test_bootstrap_script_looks_a_database_link_up_the_way_the_dictionary_stores_it(configured: str, stored: str):
+    # Spec: README > ldb-impl without admin credentials — an existing database link is skipped, so a rerun must
+    # find the link it created; the dictionary keeps database link names in upper case
+    # Given: a database link configured with lowercase or mixed-case letters
+    # When: the bootstrap script is generated
+    script = _link_script(configured)
+
+    # Then: the lookup uses the upper-case name, so the link is found instead of created again (ORA-02011)
+    assert f"where db_link = '{stored}'" in script
+    assert f"where db_link = '{configured}'" not in script
+
+
 def test_bootstrap_script_terminates_plsql_objects_with_slash():
     # Spec: supporting PL/SQL objects are created in the runtime user's schema and terminated for SQL*Plus
     script = _script()
@@ -205,3 +301,38 @@ def test_bootstrap_script_looks_up_a_lowercase_user_in_the_dictionary_as_it_was_
     assert "from dba_users where username = 'ldb'" in script
     assert "User ldb already exists" in script
     assert "'LDB'" not in script
+
+
+def test_oracle_script_envelope_stops_at_the_first_error_and_ends_with_exit_success():
+    # Spec: DatabaseEngine.script_preamble/script_prompt/script_epilogue — the engine owns the client commands
+    # of the scripts the core composes
+    # When: the engine is asked for the envelope of a non-interactive and an interactive script
+    plain = OracleEngine.script_preamble(interactive=False)
+    interactive = OracleEngine.script_preamble(interactive=True)
+
+    # Then: both stop on the first error; only the interactive one accepts substitution values and notices
+    for lines in (plain, interactive):
+        assert "whenever sqlerror exit failure" in lines
+        assert "whenever oserror exit failure" in lines
+    assert "set echo on define off sqlblanklines on" in plain
+    assert "set echo on define on verify off sqlblanklines on serveroutput on" in interactive
+    assert OracleEngine.script_prompt("LimitsDb: OK") == "prompt LimitsDb: OK"
+    assert OracleEngine.script_epilogue() == ["exit success"]
+
+
+def test_oracle_ilm_script_runs_each_table_block_between_a_stop_on_error_header_and_an_exit_footer():
+    # Spec: DatabaseEngine.ilm_script_header/ilm_script_table/ilm_script_footer — the engine owns the SQL*Plus
+    # text of the ILM script written by `ldb-run --mode SCRIPT`
+    # When: the engine is asked for the three parts of the script
+    header = OracleEngine.ilm_script_header("billing")
+    table = OracleEngine.ilm_script_table("SRC", "ORDERS", "begin null; end;")
+    footer = OracleEngine.ilm_script_footer()
+
+    # Then: the header stops on error, logs, takes the mode as argument and defines the process date the
+    # blocks read; the table is a comment, its block and the terminator; the footer closes the log and exits
+    assert "whenever sqlerror exit 1" in header
+    assert "spool ldb_billing.log" in header
+    assert 'DEFINE ldb_mode = "&1"' in header
+    assert any(line.startswith("SELECT TO_CHAR(SYSDATE") and "ldb_process_date" in line for line in header)
+    assert table == ["rem table: SRC.ORDERS", "begin null; end;", "/"]
+    assert footer == ["spool off", "exit 0"]
