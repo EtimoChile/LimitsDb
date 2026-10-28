@@ -2471,7 +2471,13 @@ end;"""
         desired_indexes: dict[str, tuple[tuple[str, ...], bool]] = {}
         for index in table.indexes:
             columns = tuple(index.columns)
-            if process_date_column and process_date_column not in columns and (not desired_pk or columns != desired_pk):
+            needs_date_for_uniqueness = (
+                index.unique
+                and process_date_column is not None
+                and process_date_column not in columns
+                and (not desired_pk or columns != desired_pk)
+            )
+            if process_date_column is not None and needs_date_for_uniqueness:
                 columns = (*columns, process_date_column)
             desired_indexes[index.name] = (columns, index.unique)
         return desired_indexes

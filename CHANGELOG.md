@@ -4,6 +4,7 @@
 
 ## [0.10.0] - 2026-10-28
 
+- Fix `history_indexes` failing with ORA-01408: a non-unique history index now keeps exactly the configured columns. `LDB_PROCESS_DATE` was appended to it, so `{T1_ID_IDX: "ID"}` became `(ID, LDB_PROCESS_DATE)`, the same column list as the history primary key. The column is now added only to unique indexes.
 - **Breaking for custom engines:** `DatabaseEngine` has three new abstract methods, `ilm_script_header(schema)`, `ilm_script_table(owner, table_name, sql_block)` and `ilm_script_footer()`. The ILM script written by `ldb-run --mode SCRIPT` (stop on error, log, mode argument, process date, one block per table, exit) now comes from the engine instead of the core; the Oracle engine writes the same SQL*Plus text as before.
 
 ## [0.9.0] - 2026-10-27

@@ -123,6 +123,28 @@ def test_non_pk_unique_index_gets_process_date_column_appended():
     }
 
 
+def test_non_unique_history_index_keeps_its_configured_columns_and_never_duplicates_the_primary_key():
+    # Spec: README > history_indexes — history indexes are non-unique and are created exactly
+    # as configured; appending LDB_PROCESS_DATE to (ID) would equal the history PK
+    # (ID, LDB_PROCESS_DATE) and Oracle rejects it with ORA-01408
+    table = TableDefinition(
+        owner="HIST",
+        name="T1_HIST",
+        columns=(
+            ColumnDefinition(name="ID", data_type="number"),
+            ColumnDefinition(name="LDB_PROCESS_DATE", data_type="date"),
+        ),
+        primary_key=("ID", "LDB_PROCESS_DATE"),
+        indexes=(IndexDefinition(name="T1_ID_IDX", columns=("ID",), unique=False),),
+    )
+
+    statements = OracleEngine._create_table_statements(table)
+
+    index_statements = [s.replace('"', "").upper() for s in statements if s.upper().count("T1_ID_IDX")]
+    assert len(index_statements) == 1
+    assert index_statements[0].endswith("ON HIST.T1_HIST (ID)")
+
+
 # R2 exception: _choose_best_index_for_primary_key is the sole entry to the PK-selection
 # algorithm; the selection criteria (not-null columns, uniqueness, cardinality) have no
 # public wrapper and are only observable through a full DB metadata query round-trip.
