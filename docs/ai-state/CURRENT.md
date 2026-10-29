@@ -24,7 +24,7 @@ but does not replace the sources defined in `AGENTS.md`.
   (9.5 or later, `pg8000`, rows moved with `dblink`) are the available adapters
   and the engines accepted by configuration (`DEC-048`). The PostgreSQL adapter
   has unit tests and an E2E suite (`postgres-integration` workflow job, ephemeral
-  PostgreSQL 9.5) that has not run yet: `PEND-043`. `PEND-007` is
+  PostgreSQL 9.5) that passes through the workflow (`PEND-043` resolved). `PEND-007` is
   resolved.
 - The published interfaces are `ldb-run`, `ldb-init`, `ldb-crypt`, and
   `ldb-impl`.
