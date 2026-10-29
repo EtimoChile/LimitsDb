@@ -288,6 +288,13 @@ jobs:
               raise SystemExit(f"PostgreSQL did not become ready within 120 seconds: {last_error}")
           PY
 
+      - name: Require passwords on loopback connections
+        shell: bash
+        # dblink as a non-superuser needs the target server to request a password; the image trusts loopback
+        run: |
+          docker exec "$LDB_PG_TEST_CONTAINER" sed -i 's/trust$/md5/' /var/lib/postgresql/data/pg_hba.conf
+          docker exec --user postgres "$LDB_PG_TEST_CONTAINER" pg_ctl reload -D /var/lib/postgresql/data
+
       - name: Run PostgreSQL integration tests with coverage
         shell: bash
         run: COVERAGE_FILE=.coverage-data/postgres/.coverage poetry run coverage run -m pytest -m postgres_integration -q
