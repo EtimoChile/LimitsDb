@@ -73,10 +73,21 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+# Columns the runner derives and writes unquoted (upper case), which PostgreSQL folds to lower case
+_DERIVED_COLUMN = re.compile(r"LDB_(?:DATE_[A-Z0-9_]+|IS_ORPHAN|PROCESS_DATE|INSERT_DATE)")
+
+
+def catalog_name(name: str) -> str:
+    """The name the catalog stores for a column written ``name`` by the runner."""
+    return name.lower() if _DERIVED_COLUMN.fullmatch(name) else name
+
+
 def format_identifier(name: str | None) -> str:
     """Render a catalog name for SQL: bare when PostgreSQL would fold it to itself, quoted exact otherwise."""
     if not name:
         return '""'
+    if _DERIVED_COLUMN.fullmatch(name):
+        return name.lower()
     if _BARE.fullmatch(name) and name not in _RESERVED:
         return name
     return quote(name)
@@ -1596,9 +1607,10 @@ class PostgresEngine(DatabaseEngine):
             return PostgresEngine._create_table_statements(table)
         _, existing_columns = PostgresEngine.get_table_columns(conn, current_owner, current_name)
         for column in table.columns:
-            if column.name not in existing_columns:
+            stored = catalog_name(column.name)
+            if stored not in existing_columns:
                 statements.append(f"ALTER TABLE {target} ADD COLUMN {PostgresEngine._column_sql(column)}")
-            elif PostgresEngine._column_needs_update(existing_columns[column.name], column):
+            elif PostgresEngine._column_needs_update(existing_columns[stored], column):
                 statements.append(
                     f"ALTER TABLE {target} ALTER COLUMN {format_identifier(column.name)} "
                     f"TYPE {PostgresEngine.get_column_type(column)}"
@@ -1607,7 +1619,7 @@ class PostgresEngine(DatabaseEngine):
         pk_name = next((name for name, info in existing.items() if info["primary"]), None)
         pk_columns = tuple(existing[pk_name]["columns"]) if pk_name else ()
         effective = {name: (tuple(info["columns"]), bool(info["unique"])) for name, info in existing.items()}
-        desired_pk = tuple(table.primary_key or ())
+        desired_pk = tuple(catalog_name(c) for c in table.primary_key or ())
         constraint = f"{table.name}_PK"
         if pk_name and pk_columns != desired_pk:
             statements.append(f"ALTER TABLE {target} DROP CONSTRAINT {format_identifier(pk_name)}")
@@ -1625,7 +1637,7 @@ class PostgresEngine(DatabaseEngine):
             pk_name = constraint
         desired = PostgresEngine._prepare_desired_indexes(table)
         for name, (columns, unique) in desired.items():
-            if effective.get(name) == (columns, unique):
+            if effective.get(name) == (tuple(catalog_name(c) for c in columns), unique):
                 continue
             if name in effective:
                 statements.append(f"DROP INDEX {PostgresEngine._qualified(table.owner, name)}")

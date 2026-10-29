@@ -67,6 +67,44 @@ def test_added_column_is_emitted_with_add_column():
     assert "ALTER TABLE history.items ADD COLUMN name varchar(20)" in statements
 
 
+def test_created_table_is_handed_to_its_schema_owner():
+    # Spec: README > Bootstrap — objects created by the administrator belong to the schema owner, as in Oracle
+    statements: list[str] = []
+
+    PostgresEngine.ensure_table_structure(None, _table(), {}, ddl_sink=statements.append)  # type: ignore[arg-type]
+
+    assert "ALTER TABLE history.items OWNER TO history" in statements
+
+
+def test_derived_column_already_present_is_not_added_again():
+    # Spec: README > Bootstrap — a rerun adds nothing: LDB_DATE_B is stored as ldb_date_b in the catalog
+    table = _table()
+    table = TableDefinition(
+        owner=table.owner,
+        name=table.name,
+        columns=[*table.columns, ColumnDefinition(name="LDB_DATE_B", data_type="date")],
+        primary_key=table.primary_key,
+        indexes=table.indexes,
+    )
+
+    def respond(conn: FakeConn, sql: str, params):
+        if "pg_class" in sql and "relkind" in sql:
+            return (1,)
+        if "information_schema.columns" in sql:
+            return [
+                (1, "id", "numeric", None, 10, 0, "NO", None, None),
+                (2, "name", "character varying", 20, None, None, "YES", None, None),
+                (3, "ldb_date_b", "timestamp without time zone", None, None, None, "YES", None, 0),
+            ]
+        return []
+
+    statements: list[str] = []
+
+    PostgresEngine.ensure_table_structure(FakeConn(respond), table, {}, ddl_sink=statements.append)
+
+    assert not any("ldb_date_b" in s.lower() for s in statements)
+
+
 def test_roles_are_scripted_as_tolerant_blocks():
     # Spec: README > Generate scripts — scripts are re-runnable: an existing role is not an error
     statements: list[str] = []

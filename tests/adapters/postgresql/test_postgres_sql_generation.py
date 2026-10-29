@@ -58,6 +58,13 @@ def test_identifiers_are_bare_only_when_postgresql_would_fold_them_to_themselves
     assert format_identifier('we"ird') == '"we""ird"'
 
 
+@pytest.mark.parametrize("name", ["LDB_DATE_B", "LDB_IS_ORPHAN", "LDB_PROCESS_DATE", "LDB_INSERT_DATE"])
+def test_runner_derived_columns_are_folded_to_lower_case(name):
+    # Spec: docs/configuration-contract.md — derived columns are written unquoted by the runner, so they fold in PostgreSQL
+    assert format_identifier(name) == name.lower()
+    assert format_identifier("Ldb_Date_B") == '"Ldb_Date_B"'
+
+
 def test_identifier_string_is_the_catalog_form_of_the_written_name():
     # Spec: README > Run ILM — quoted names keep their case, bare names are folded to lower case
     assert PostgresEngine.get_identifier_str('"MixedCase"') == "MixedCase"
