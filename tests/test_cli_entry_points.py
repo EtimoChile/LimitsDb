@@ -50,8 +50,12 @@ def test_argparser_requires_schema_and_rejects_unsupported_engine(monkeypatch: p
     # Then: it is accepted
     assert parser.parse_args(["--schema", "s", "--db-engine", "oracle"]).db_engine == "oracle"
 
-    # When: postgres is given as --db-engine
-    # Then: parser exits — not yet supported
+    # When: postgresql is given as --db-engine
+    # Then: it is accepted
+    assert parser.parse_args(["--schema", "s", "--db-engine", "postgresql"]).db_engine == "postgresql"
+
+    # When: the unsupported name postgres is given as --db-engine
+    # Then: parser exits
     with pytest.raises(SystemExit):
         parser.parse_args(["--schema", "s", "--db-engine", "postgres"])
 

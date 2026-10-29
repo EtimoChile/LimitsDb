@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add the `postgresql` engine (`db_engine: postgresql`, PostgreSQL 9.5 or later): it connects with the pure-Python `pg8000` driver, moves rows from SOURCE to HISTORY with `dblink` (a `dblink_fdw` server and user mapping, so no credential appears in a block) and keeps the same control tables, locks (advisory) and statuses as Oracle. `db_engine` accepts `oracle` and `postgresql`. Limitations are listed in the README. New dependency: `pg8000`.
+- Scripts written for a DBA no longer say they are SQL*Plus-only; the client wording is neutral (SQL*Plus, psql).
+
 ## [0.10.0] - 2026-10-28
 
 - Fix `history_indexes` failing with ORA-01408: a non-unique history index now keeps exactly the configured columns. `LDB_PROCESS_DATE` was appended to it, so `{T1_ID_IDX: "ID"}` became `(ID, LDB_PROCESS_DATE)`, the same column list as the history primary key. The column is now added only to unique indexes.

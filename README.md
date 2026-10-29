@@ -83,7 +83,7 @@ Configuration-driven ILM (Information Lifecycle Management) runner for operation
 
 - **Python**: 3.12+ — https://www.python.org/downloads/
 - **Oracle**: `oracledb` runs in thin mode (pure Python, no Oracle Instant Client required).
-- **PostgreSQL**: planned for a future adapter; not currently accepted in configuration.
+- **PostgreSQL** (`db_engine: postgresql`): 9.5 or later, through `pg8000` (pure Python, no client libraries). Rows move from SOURCE to HISTORY with `dblink`, so the `dblink` extension must be installable (`ldb-impl` runs `CREATE EXTENSION IF NOT EXISTS dblink`, which needs an administrator). The DSN is `host[:port]/dbname`. Limitations: no optimizer hints, no `ALTER` table privilege (history tables evolve with the owner's credentials), the copy and the delete of a chunk are two commits (a failure between them duplicates rows in history, never loses them), a `SCRIPT` runs one transaction per table without recording `ERROR`, and `psql \prompt` does not hide the passwords it asks for. The adapter has not been run against a real database yet.
 
 ## Installation
 
@@ -708,7 +708,7 @@ Every key is commented; the default value and short help appear inline. Example:
 # log_level: "INFO"     # Logging level
 ```
 
-`oracle` is the only supported `db_engine`. PostgreSQL remains a future implementation; any other value is rejected.
+`oracle` and `postgresql` are the supported `db_engine` values; any other value is rejected.
 
 Uncomment and set values as needed. Secrets are not listed here (they live in `secrets[.<PROFILE>].json`).
 

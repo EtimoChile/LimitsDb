@@ -206,3 +206,107 @@ jobs:
       - name: Remove ephemeral Oracle
         if: always()
         run: docker rm --force limitsdb-oracle || true
+
+  postgres-integration:
+    needs: quality
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    env:
+      # The oldest supported release: the adapter promises PostgreSQL 9.5 or later
+      POSTGRES_IMAGE: postgres:9.5
+      LDB_PG_TEST_HOST: localhost:5432
+      LDB_PG_TEST_USER: postgres
+      LDB_PG_TEST_CONTAINER: limitsdb-postgres
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: python -m pip install "poetry==2.5.1"
+
+      - name: Install project and development dependencies
+        run: poetry install --with dev --no-interaction
+
+      - name: Download unit test coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: unit-coverage-${{ github.run_id }}
+          path: .coverage-data/unit
+
+      - name: Generate ephemeral PostgreSQL password
+        shell: bash
+        run: |
+          postgres_password="LdbCI_$(openssl rand -hex 16)"
+          echo "::add-mask::$postgres_password"
+          echo "POSTGRES_PASSWORD=$postgres_password" >> "$GITHUB_ENV"
+          echo "LDB_PG_TEST_PASSWORD=$postgres_password" >> "$GITHUB_ENV"
+
+      - name: Start ephemeral PostgreSQL
+        shell: bash
+        run: |
+          docker run --detach --name "$LDB_PG_TEST_CONTAINER" \
+            --publish 5432:5432 \
+            --env "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" \
+            "$POSTGRES_IMAGE"
+
+      - name: Wait for PostgreSQL
+        shell: bash
+        run: |
+          poetry run python - <<'PY'
+          import os
+          import time
+
+          import pg8000.dbapi
+
+          deadline = time.monotonic() + 120
+          last_error = None
+          while time.monotonic() < deadline:
+              try:
+                  connection = pg8000.dbapi.connect(
+                      host="localhost",
+                      port=5432,
+                      database="postgres",
+                      user=os.environ["LDB_PG_TEST_USER"],
+                      password=os.environ["LDB_PG_TEST_PASSWORD"],
+                  )
+                  connection.close()
+                  print("PostgreSQL is accepting connections")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(2)
+          else:
+              raise SystemExit(f"PostgreSQL did not become ready within 120 seconds: {last_error}")
+          PY
+
+      - name: Run PostgreSQL integration tests with coverage
+        shell: bash
+        run: COVERAGE_FILE=.coverage-data/postgres/.coverage poetry run coverage run -m pytest -m postgres_integration -q
+
+      - name: Build combined coverage report
+        shell: bash
+        run: |
+          poetry run coverage combine .coverage-data/unit .coverage-data/postgres
+          {
+            echo "### Combined unit and PostgreSQL E2E coverage"
+            echo '```text'
+            poetry run coverage report -m
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Show PostgreSQL logs on failure
+        if: failure()
+        run: docker logs --tail 300 "$LDB_PG_TEST_CONTAINER"
+
+      - name: Remove ephemeral PostgreSQL
+        if: always()
+        run: docker rm --force "$LDB_PG_TEST_CONTAINER" || true

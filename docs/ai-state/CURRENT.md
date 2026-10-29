@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-27
-last-updated: 2026-10-27
+last-reviewed: 2026-10-28
+last-updated: 2026-10-28
 ---
 
 # Current state
@@ -20,10 +20,12 @@ but does not replace the sources defined in `AGENTS.md`.
 - The current name is `LimitsDb`, the Python package is `limitsdb`, and the
   public technical prefix is `ldb` / `LDB`; the change from the previous name
   is incompatible and documented in `README.md` and `CHANGELOG.md`.
-- The package implements configuration-driven ILM. Oracle is the available
-  adapter and the only engine accepted by configuration; PostgreSQL remains a
-  future implementation and is rejected before connecting. The `DatabaseEngine`
-  contract keeps the extension to other engines. `PEND-007` is resolved.
+- The package implements configuration-driven ILM. Oracle and PostgreSQL
+  (9.5 or later, `pg8000`, rows moved with `dblink`) are the available adapters
+  and the engines accepted by configuration (`DEC-048`). The PostgreSQL adapter
+  has unit tests and an E2E suite (`postgres-integration` workflow job, ephemeral
+  PostgreSQL 9.5) that has not run yet: `PEND-043`. `PEND-007` is
+  resolved.
 - The published interfaces are `ldb-run`, `ldb-init`, `ldb-crypt`, and
   `ldb-impl`.
 - Configuration is resolved by file, `LDB_*` variables, and `--set` options;
@@ -151,8 +153,8 @@ but does not replace the sources defined in `AGENTS.md`.
 - `DEC-013`: fix `use_added_columns` and `add_ldb_columns` exclusively in the
   persistent environment configuration and exclude them from CLI, environment,
   and `--set`.
-- `DEC-014`: accept only Oracle until another adapter exists and reject
-  PostgreSQL early in configuration, CLI, and engine loading.
+- `DEC-014` (replaced by `DEC-048`): accepted only Oracle until another adapter
+  existed.
 - `DEC-015`: measure coverage jointly for local and Oracle E2E suites, including
   child processes, and verify the baseline before enforcing a threshold.
 - `DEC-016`: archive orphans detected by outer join, using the process date as a
@@ -192,3 +194,4 @@ but does not replace the sources defined in `AGENTS.md`.
   changing anything.
 - `DEC-041`: `ldb-run --mode STATUS [--last n]` reports the state (`RUNNING`/`OK`/`ERRORS`/`PARTIAL`), rows and live Oracle session progress of the last executions for SOURCE and HISTORY; PREVIEW runs are excluded; `LDB_CTL` stores the worker session (rerun `ldb-impl`); executions are rebuilt from the `LDB_LOG` timestamps, with no run id in the log.
 - `DEC-039`: `HISTORY_ILM` joins (with `use_added_columns: false`) read the history owner of each referenced table; `extra_select_tables` / `history_extra_select_tables` grant `SELECT` on tables read by filter subqueries.
+- `DEC-048`: `postgresql` engine under `limitsdb/db/postgresql/` (PostgreSQL 9.5+, `pg8000`, `dblink` copy, client-driven phases, advisory locks); limitations are in the decision and the README.
