@@ -96,6 +96,7 @@ def _write_configuration(root: Path, *, source_password: str, history_password: 
                 f"history_role_name: {ROLES[1]}",
                 "parallel_max: 2",
                 "chunk_size: 2",
+                "use_added_columns: true",
             ]
         )
         + "\n",
