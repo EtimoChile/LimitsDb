@@ -82,6 +82,11 @@ def catalog_name(name: str) -> str:
     return name.lower() if _DERIVED_COLUMN.fullmatch(name) else name
 
 
+def runner_name(name: str) -> str:
+    """The name the runner uses for a catalog column: derived columns are written upper case."""
+    return name.upper() if _DERIVED_COLUMN.fullmatch(name.upper()) else name
+
+
 def format_identifier(name: str | None) -> str:
     """Render a catalog name for SQL: bare when PostgreSQL would fold it to itself, quoted exact otherwise."""
     if not name:
@@ -532,7 +537,7 @@ class PostgresEngine(DatabaseEngine):
             indexes = PostgresEngine._read_indexes(cursor, owner, table_name)
             for info in indexes.values():
                 if info["primary"]:
-                    return tuple(info["columns"])
+                    return tuple(runner_name(c) for c in info["columns"])
             if not indexes:
                 return ()
             cursor.execute(

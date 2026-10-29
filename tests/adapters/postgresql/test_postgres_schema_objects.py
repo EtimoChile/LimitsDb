@@ -105,6 +105,15 @@ def test_derived_column_already_present_is_not_added_again():
     assert not any("ldb_date_b" in s.lower() for s in statements)
 
 
+def test_primary_key_reports_derived_columns_the_way_the_runner_names_them():
+    # Spec: README > Run ILM — the runner appends LDB_PROCESS_DATE only when the key lacks it, so the catalog's
+    # lower case name must come back in the runner's form
+    rows = [("items_PK", True, True, "id"), ("items_PK", True, True, "ldb_process_date")]
+    conn = FakeConn(lambda c, sql, params: rows)
+
+    assert PostgresEngine.get_primary_key_columns(conn, "history", "items", {}) == ("id", "LDB_PROCESS_DATE")
+
+
 def test_roles_are_scripted_as_tolerant_blocks():
     # Spec: README > Generate scripts — scripts are re-runnable: an existing role is not an error
     statements: list[str] = []
