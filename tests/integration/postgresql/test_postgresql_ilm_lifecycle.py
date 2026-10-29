@@ -76,7 +76,14 @@ def clean_databases() -> Iterator[None]:
     reset()
 
 
-def _write_configuration(root: Path, *, source_password: str, history_password: str) -> None:
+def _write_configuration(
+    root: Path,
+    *,
+    source_password: str,
+    history_password: str,
+    source_filter: str | None = None,
+    history_filter: str | None = None,
+) -> None:
     host_port = os.environ["LDB_PG_TEST_HOST"]
     admin_user = os.environ["LDB_PG_TEST_USER"]
     admin_password = os.environ["LDB_PG_TEST_PASSWORD"]
@@ -115,6 +122,11 @@ def _write_configuration(root: Path, *, source_password: str, history_password: 
         ),
         encoding="utf-8",
     )
+    filter_lines = ""
+    if source_filter is not None:
+        filter_lines += f"        additional_filter_expr: {json.dumps(source_filter)}\n"
+    if history_filter is not None:
+        filter_lines += f"        history_addtl_filter_expr: {json.dumps(history_filter)}\n"
     (schema_dir / "ilm.yml").write_text(
         f"""tables:
   - source_owner: {SOURCE_USER}
@@ -126,7 +138,7 @@ def _write_configuration(root: Path, *, source_password: str, history_password: 
         retain_months_source: 2
         retain_months_history: 3
         purge_date_expr: "@CREATED_AT"
-  - source_owner: {SOURCE_USER}
+{filter_lines}  - source_owner: {SOURCE_USER}
     history_owner: {HISTORY_USER}
     table_name: ilm_order_lines
     frecuency: D
@@ -165,14 +177,45 @@ def _control_status(connection: pg8000.dbapi.Connection, table: str) -> tuple | 
     return rows[0] if rows else None
 
 
-def test_source_and_history_ilm_move_and_purge_rows_through_dblink(clean_databases: None, tmp_path: Path):
+@pytest.mark.parametrize(
+    ("snapshot_column", "source_filter", "history_filter"),
+    [
+        pytest.param(None, None, None, id="baseline"),
+        pytest.param(
+            "history_state_b",
+            "@SOURCE_STATE = 'READY'",
+            "@HISTORY_STATE = 'PURGE'",
+            id="distinct-history-filter-column",
+        ),
+        pytest.param(
+            "lifecycle_state_b",
+            "@LIFECYCLE_STATE IN ('KEEP', 'PURGE')",
+            "@LIFECYCLE_STATE = 'PURGE'",
+            id="shared-filter-column",
+        ),
+    ],
+)
+def test_source_and_history_ilm_move_and_purge_rows_through_dblink(
+    clean_databases: None,
+    tmp_path: Path,
+    snapshot_column: str | None,
+    source_filter: str | None,
+    history_filter: str | None,
+):
     # Spec: README § Run ILM (SOURCE_ILM, HISTORY_ILM) — SOURCE_ILM moves rows past the source retention to history
-    # through the database link; HISTORY_ILM purges rows past the history retention; both are idempotent on re-run
+    # through the database link; HISTORY_ILM purges rows past the history retention; both are idempotent on re-run;
+    # filter columns of the parent are snapshotted on the history children in lower case (the default case)
     # Given: users and control objects bootstrapped by ldb-impl on two databases of one server
     source_password = f"LdbE2E_{secrets.token_hex(11)}"
     history_password = f"LdbE2E_{secrets.token_hex(11)}"
     config_root = tmp_path / "config"
-    _write_configuration(config_root, source_password=source_password, history_password=history_password)
+    _write_configuration(
+        config_root,
+        source_password=source_password,
+        history_password=history_password,
+        source_filter=source_filter,
+        history_filter=history_filter,
+    )
     environment = {key: value for key, value in os.environ.items() if not key.startswith("LDB_")}
     environment["HOME"] = environment["USERPROFILE"] = str(tmp_path / "home")
     common = ("--schema", "e2e", "--config-dir", str(config_root))
@@ -189,17 +232,19 @@ def test_source_and_history_ilm_move_and_purge_rows_through_dblink(clean_databas
         cursor = source.cursor()
         cursor.execute(
             f"CREATE TABLE {SOURCE_USER}.ilm_orders (id numeric(10) PRIMARY KEY, created_at timestamp(0) NOT NULL,"
-            " payload varchar(40) NOT NULL)"
+            " source_state varchar(10) NOT NULL, history_state varchar(10) NOT NULL,"
+            " lifecycle_state varchar(10) NOT NULL, payload varchar(40) NOT NULL)"
         )
         cursor.execute(
             f"CREATE TABLE {SOURCE_USER}.ilm_order_lines (line_id numeric(10) PRIMARY KEY,"
             f" order_id numeric(10) NOT NULL REFERENCES {SOURCE_USER}.ilm_orders (id), payload varchar(40) NOT NULL)"
         )
-        for order_id, months, payload in [(1, 1, "recent"), (2, 3, "archive"), (3, 7, "purge")]:
+        orders = [(1, 1, "KEEP", "recent"), (2, 3, "KEEP", "archive"), (3, 7, "PURGE", "purge")]
+        for order_id, months, state, payload in orders:
             cursor.execute(
                 f"INSERT INTO {SOURCE_USER}.ilm_orders VALUES (%s, date_trunc('day', localtimestamp)"
-                " - (%s * interval '1 month'), %s)",
-                [order_id, months, payload],
+                " - (%s * interval '1 month'), 'READY', %s, %s, %s)",
+                [order_id, months, state, state, payload],
             )
         for line in [(11, 1, "recent-line"), (21, 2, "archive-line"), (31, 3, "purge-line-a"), (32, 3, "purge-line-b")]:
             cursor.execute(f"INSERT INTO {SOURCE_USER}.ilm_order_lines VALUES (%s, %s, %s)", list(line))
@@ -225,6 +270,13 @@ def test_source_and_history_ilm_move_and_purge_rows_through_dblink(clean_databas
         assert _ids(history, f"{HISTORY_USER}.ilm_order_lines", "line_id") == [21, 31, 32]
         assert _control_status(source, "ilm_orders") == ("SOURCE_ILM", "TEND", 2)
         assert _control_status(source, "ilm_order_lines") == ("SOURCE_ILM", "TEND", 3)
+
+        if snapshot_column is not None:
+            # And: the parent filter column was added to the history children under its default-case name
+            rows = _fetch(
+                history, f"SELECT line_id, {snapshot_column} FROM {HISTORY_USER}.ilm_order_lines ORDER BY line_id"
+            )
+            assert [(int(line), value) for line, value in rows] == [(21, "KEEP"), (31, "PURGE"), (32, "PURGE")]
 
         # When: SOURCE_ILM runs again on the same day
         _run_cli("ldb-run", *common, "--action", "SOURCE_ILM", "--mode", "EXECUTE", environment=environment)
