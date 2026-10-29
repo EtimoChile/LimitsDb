@@ -65,6 +65,13 @@ def test_runner_derived_columns_are_folded_to_lower_case(name):
     assert format_identifier("Ldb_Date_B") == '"Ldb_Date_B"'
 
 
+def test_filter_columns_of_referencing_tables_are_folded_with_their_alias_suffix():
+    # Spec: docs/configuration-contract.md — the runner appends the upper case alias (history_state_B); the column is
+    # created and read in the default case
+    assert format_identifier("history_state_B") == "history_state_b"
+    assert format_identifier("MixedCase") == '"MixedCase"'
+
+
 def test_identifier_string_is_the_catalog_form_of_the_written_name():
     # Spec: README > Run ILM — quoted names keep their case, bare names are folded to lower case
     assert PostgresEngine.get_identifier_str('"MixedCase"') == "MixedCase"

@@ -74,7 +74,15 @@ def quote_literal(value: str) -> str:
 
 
 # Columns the runner derives and writes unquoted (upper case), which PostgreSQL folds to lower case
-_DERIVED_COLUMN = re.compile(r"LDB_(?:DATE_[A-Z0-9_]+|IS_ORPHAN|PROCESS_DATE|INSERT_DATE)")
+_DERIVED_COLUMN = re.compile(
+    r"LDB_(?:DATE_[A-Z0-9_]+|IS_ORPHAN|PROCESS_DATE|INSERT_DATE)"
+    # a filter column of a referencing table: the lower case column plus the upper case table alias (history_state_B)
+    # (not the primary key constraint, which is named <table>_PK and stays quoted)
+    r"|(?!.*_PK$)[a-z_][a-z0-9_$]*_[A-Z][A-Z0-9]*"
+)
+
+
+_LDB_COLUMN = re.compile(r"LDB_(?:DATE_[A-Z0-9_]+|IS_ORPHAN|PROCESS_DATE|INSERT_DATE)")
 
 
 def catalog_name(name: str) -> str:
@@ -84,7 +92,7 @@ def catalog_name(name: str) -> str:
 
 def runner_name(name: str) -> str:
     """The name the runner uses for a catalog column: derived columns are written upper case."""
-    return name.upper() if _DERIVED_COLUMN.fullmatch(name.upper()) else name
+    return name.upper() if _LDB_COLUMN.fullmatch(name.upper()) else name
 
 
 def format_identifier(name: str | None) -> str:
