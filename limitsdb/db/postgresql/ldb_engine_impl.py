@@ -1729,6 +1729,13 @@ class PostgresEngine(DatabaseEngine):
 
     # ------------------------------------------------------------------ sequences
     @staticmethod
+    def _sequence_owner_sql(sequence: SequenceDefinition) -> str:
+        return (
+            f"ALTER SEQUENCE {PostgresEngine._qualified(sequence.owner, sequence.name)}"
+            f" OWNER TO {format_identifier(sequence.owner)}"
+        )
+
+    @staticmethod
     def _create_sequence_sql(sequence: SequenceDefinition) -> str:
         sql = (
             f"CREATE SEQUENCE IF NOT EXISTS {PostgresEngine._qualified(sequence.owner, sequence.name)} "
@@ -1751,6 +1758,7 @@ class PostgresEngine(DatabaseEngine):
             PostgresEngine._require_script_mode(conn)
             for sequence in sequences:
                 ddl_sink(PostgresEngine._create_sequence_sql(sequence) + ";")
+                ddl_sink(PostgresEngine._sequence_owner_sql(sequence) + ";")
                 ddl_sink("")
             return created
         cursor = conn.cursor()
@@ -1764,6 +1772,7 @@ class PostgresEngine(DatabaseEngine):
                 ):
                     continue
                 PostgresEngine._execute_ddl(conn, cursor, PostgresEngine._create_sequence_sql(sequence))
+                PostgresEngine._execute_ddl(conn, cursor, PostgresEngine._sequence_owner_sql(sequence))
                 created.append(PostgresEngine._qualified(sequence.owner, sequence.name))
             conn.commit()
         except Exception as exc:
