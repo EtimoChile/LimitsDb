@@ -1505,7 +1505,11 @@ class PostgresEngine(DatabaseEngine):
     def _create_table_statements(table: TableDefinition) -> list[str]:
         target = PostgresEngine._qualified(table.owner, table.name)
         columns = ",\n        ".join(PostgresEngine._column_sql(col) for col in table.columns)
-        statements = [f"CREATE TABLE {target} (\n        {columns}\n    )"]
+        # The administrator creates the table, so ownership is handed to the schema owner (as in Oracle)
+        statements = [
+            f"CREATE TABLE {target} (\n        {columns}\n    )",
+            f"ALTER TABLE {target} OWNER TO {format_identifier(table.owner)}",
+        ]
         pk = tuple(table.primary_key or ())
         if pk:
             statements.append(
