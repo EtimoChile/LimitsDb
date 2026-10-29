@@ -55,6 +55,8 @@ def _fetch(connection: pg8000.dbapi.Connection, sql: str, params: list | None = 
         return [tuple(row) for row in cursor.fetchall()]
     finally:
         cursor.close()
+        # End the read transaction: an open one would hold locks that block the runner's ALTER TABLE
+        connection.rollback()
 
 
 @pytest.fixture
@@ -211,7 +213,6 @@ def test_source_and_history_ilm_move_and_purge_rows_through_dblink(clean_databas
         assert _ids(source, f"{SOURCE_USER}.ilm_orders") == [1, 2, 3]
         status = _control_status(source, "ilm_orders")
         assert status is not None and status[:2] == ("SOURCE_ILM", "PTEND")
-        source.rollback()
 
         # When: SOURCE_ILM executes
         _run_cli("ldb-run", *common, "--action", "SOURCE_ILM", "--mode", "EXECUTE", environment=environment)
@@ -235,7 +236,6 @@ def test_source_and_history_ilm_move_and_purge_rows_through_dblink(clean_databas
         _run_cli("ldb-run", *common, "--action", "HISTORY_ILM", "--mode", "EXECUTE", environment=environment)
 
         # Then: only the rows past the history retention are purged
-        history.rollback()
         assert _ids(history, f"{HISTORY_USER}.ilm_orders") == [2]
         assert _ids(history, f"{HISTORY_USER}.ilm_order_lines", "line_id") == [21]
     finally:
