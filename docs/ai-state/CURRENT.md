@@ -96,13 +96,12 @@ but does not replace the sources defined in `AGENTS.md`.
   `development` and `main`. The combined coverage report (local + E2E) is
   produced by the `oracle-integration` job and retained for 14 days.
 - The release pipeline is in `.github/workflows/release.yaml`: triggered by a
-  version tag (`v*`) on any branch, it builds once and publishes sequentially
-  to TestPyPI then PyPI via Trusted Publisher (OIDC, no stored credentials).
-  Both publish jobs require manual approval through GitHub Environments
-  `testpypi` and `pypi` (required reviewer: `gcantiza`). The repo is public;
-  Trusted Publishers registered on test.pypi.org and pypi.org under
-  `gustavo.cantizano@etimo.cl`; transfer to PyPI org `EtimoChile` pending org
-  approval. `PEND-006` resolved; `DEC-019`.
+  version tag (`v*`) on any branch, it builds once and publishes to PyPI via
+  Trusted Publisher (OIDC, no stored credentials). The publish job requires
+  manual approval through the GitHub Environment `pypi` (required reviewer:
+  `gcantiza`). The repo is public; Trusted Publisher registered on pypi.org
+  under `gustavo.cantizano@etimo.cl`; transfer to PyPI org `EtimoChile` pending
+  org approval. TestPyPI was dropped (`DEC-049`); `PEND-006` resolved; `DEC-019`.
 - `docs/prompts/test-authoring.md` defines the mandatory test authoring rules:
   tests must be derived from the specification (README, ilm.example.yml, docs/),
   not from the implementation. `AGENTS.md` references it as required reading

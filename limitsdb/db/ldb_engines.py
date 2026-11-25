@@ -588,6 +588,11 @@ class DatabaseEngine(ABC):
         pass
 
     @staticmethod
+    def script_client_name() -> str:
+        """Name of the command-line client that runs the scripts a DBA is asked to run, for messages."""
+        return "the database command-line client"
+
+    @staticmethod
     @abstractmethod
     def script_epilogue() -> list[str]:
         """Lines that end a script successfully, after its final message."""

@@ -378,13 +378,47 @@ def _ld_code(sqlstate: str | None) -> int | None:
     return 20000 + int(match.group(1)) if match else None
 
 
+_DSN_SCHEME = re.compile(r"^postgres(?:ql)?://", re.IGNORECASE)
+_TLS_SSLMODES = frozenset({"require", "verify-ca", "verify-full"})
+
+
+def _split_dsn_options(dsn: str) -> tuple[str, dict[str, str]]:
+    """Separate the ``?key=value&...`` options of a DSN from its ``host[:port]/dbname`` part."""
+    base, _, query = _DSN_SCHEME.sub("", dsn.strip()).partition("?")
+    options = {key: value for key, _, value in (pair.partition("=") for pair in query.split("&") if pair)}
+    return base, options
+
+
 def _parse_dsn(dsn: str) -> tuple[str, int | None, str]:
-    """Split ``host[:port]/dbname``."""
-    endpoint, _, database = dsn.partition("/")
-    if not endpoint or not database:
-        raise ValueError(f"Invalid PostgreSQL DSN '{dsn}': use host[:port]/dbname")
+    """Split ``host[:port]/dbname``; a ``postgresql://`` prefix and ``?options`` are accepted."""
+    base, _ = _split_dsn_options(dsn)
+    endpoint, _, database = base.partition("/")
+    if not endpoint or not database or "@" in endpoint:
+        raise ValueError(f"Invalid PostgreSQL DSN '{dsn}': use host[:port]/dbname (credentials do not go in the DSN)")
     host, _, port = endpoint.partition(":")
     return host, int(port) if port else None, database
+
+
+def _libpq_value(value: str) -> str:
+    """A libpq connection string value, quoted when it holds spaces, quotes or backslashes."""
+    if value and not re.search(r"[\s'\\]", value):
+        return value
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _inline_conninfo(user: str, password: str, dsn: str) -> str:
+    """Connection string of the HISTORY database for ``dblink_connect`` when no foreign server can be used."""
+    host, port, database = _parse_dsn(dsn)
+    parts = {"host": host, "port": str(port or 5432), "dbname": database, "user": user, "password": password}
+    sslmode = _dsn_sslmode(dsn)
+    if sslmode:
+        parts["sslmode"] = sslmode
+    return " ".join(f"{key}={_libpq_value(value)}" for key, value in parts.items())
+
+
+def _dsn_sslmode(dsn: str) -> str | None:
+    """The ``sslmode`` option of the DSN (``require``, ``verify-full``...), if any."""
+    return _split_dsn_options(dsn)[1].get("sslmode")
 
 
 class PostgresEngine(DatabaseEngine):
@@ -392,6 +426,8 @@ class PostgresEngine(DatabaseEngine):
 
     _connection_envs: ClassVar[dict[int, str]] = {}
     _admin_connections: ClassVar[set[int]] = set()
+    # Connection string towards HISTORY of a SOURCE session, for hosts where the dblink_fdw wrapper cannot be used
+    _history_conninfo: ClassVar[dict[int, str]] = {}
     REQUIRED_SYSTEM_PRIVILEGES: tuple[str, ...] = ()
     _QUALIFIED_TABLE = re.compile(
         r'(?<![\w$."])("(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*("(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$]*)'
@@ -409,7 +445,7 @@ class PostgresEngine(DatabaseEngine):
             host, port, database = _parse_dsn(dsn)
             connection = pg8000.dbapi.connect(
                 user=user, password=password, host=host, port=port or 5432, database=database,
-                application_name="LimitsDb",
+                application_name="LimitsDb", ssl_context=True if _dsn_sslmode(dsn) in _TLS_SSLMODES else None,
             )  # fmt: skip
         except Exception as exc:
             logger.critical("Failed to connect to PostgreSQL %s.", target, exc_info=True)
@@ -418,6 +454,16 @@ class PostgresEngine(DatabaseEngine):
             raise DatabaseConnectionError(f"Failed to connect to PostgreSQL database {target}") from exc
         if env:
             PostgresEngine._connection_envs[id(connection)] = env
+        # Same rule as get_effective_credentials: without an explicit env the action decides which side this is
+        is_source = config.execution.action == "SOURCE_ILM" if env is None else env == "SOURCE"
+        if is_source and not admin:
+            try:
+                history_user, history_password, history_dsn = get_effective_credentials(config, env="HISTORY")
+                PostgresEngine._history_conninfo[id(connection)] = _inline_conninfo(
+                    history_user, history_password, history_dsn
+                )
+            except Exception:
+                logger.debug("No HISTORY connection to offer to the SOURCE session.", exc_info=True)
         if admin:
             PostgresEngine._admin_connections.add(id(connection))
         return connection
@@ -427,6 +473,7 @@ class PostgresEngine(DatabaseEngine):
         try:
             if conn:
                 PostgresEngine._connection_envs.pop(id(conn), None)
+                PostgresEngine._history_conninfo.pop(id(conn), None)
                 PostgresEngine._admin_connections.discard(id(conn))
                 conn.close()
         except Exception:
@@ -717,10 +764,14 @@ class PostgresEngine(DatabaseEngine):
             move += f"        PERFORM dblink_exec({quote_literal(_DBLINK_CONNECTION)}, {quote_literal(insert_prefix)} || l_values);\n"
         move += f"        DELETE FROM {target} WHERE ctid = ANY(l_ids);"
         count_select = f"SELECT count(*) INTO l_n\n      {indent_lines(query_expr, 6)};"
+        link_name = quote_literal(config.administration.source_to_history_dblink_name)
         connect = (
             f"IF NOT coalesce({quote_literal(_DBLINK_CONNECTION)} = ANY(dblink_get_connections()), false) THEN\n"
-            f"        PERFORM dblink_connect({quote_literal(_DBLINK_CONNECTION)}, "
-            f"{quote_literal(config.administration.source_to_history_dblink_name)});\n    END IF;"
+            f"        IF EXISTS (SELECT 1 FROM pg_foreign_server WHERE srvname = {link_name}) THEN\n"
+            f"            PERFORM dblink_connect({quote_literal(_DBLINK_CONNECTION)}, {link_name});\n"
+            "        ELSE\n"
+            f"            PERFORM dblink_connect({quote_literal(_DBLINK_CONNECTION)}, current_setting('ldb.hist_conn'));\n"
+            "        END IF;\n    END IF;"
         )
         if script:
             return PostgresEngine._script_block(
@@ -738,6 +789,7 @@ class PostgresEngine(DatabaseEngine):
             "check_refs": check_refs,
             "copy": copy,
             "dblink": _DBLINK_CONNECTION,
+            "link": config.administration.source_to_history_dblink_name,
         }
         sections: dict[str, str] = {}
         if copy:
@@ -876,7 +928,9 @@ class PostgresEngine(DatabaseEngine):
                     )
                     conn.commit()
                 if copy:
-                    cursor.execute(program.sections["connect"])
+                    PostgresEngine._connect_history(
+                        conn, cursor, program.sections["connect"], str(header.get("link", ""))
+                    )
                 section = program.sections["count" if preview else "chunk"]
                 while True:
                     chunk_start = PostgresEngine._now(cursor)
@@ -926,6 +980,23 @@ class PostgresEngine(DatabaseEngine):
             if copy:
                 PostgresEngine._disconnect_dblink(conn, cursor)
             cursor.close()
+
+    @staticmethod
+    def _connect_history(conn: Any, cursor: Any, connect_sql: str, link_name: str) -> None:
+        """Open the dblink connection; without a foreign server the session carries the connection string."""
+        conninfo = None
+        if not PostgresEngine._exists(cursor, "SELECT 1 FROM pg_foreign_server WHERE srvname = %s", [link_name]):
+            conninfo = PostgresEngine._history_conninfo.get(id(conn))
+            if conninfo is None:
+                raise BlockAborted(
+                    20001, f"Database link {link_name} does not exist and no HISTORY connection is known"
+                )
+            cursor.execute("SELECT set_config('ldb.hist_conn', %s, false)", [conninfo])
+        try:
+            cursor.execute(connect_sql)
+        finally:
+            if conninfo is not None:
+                cursor.execute("SELECT set_config('ldb.hist_conn', '', false)")
 
     @staticmethod
     def _run_phase(conn: Any, cursor: Any, sql: str) -> int:
@@ -1431,6 +1502,22 @@ class PostgresEngine(DatabaseEngine):
         return created
 
     @staticmethod
+    def _set_role_grant_sql(name: str) -> str:
+        """Let the administrator act as ``name`` (SET ROLE), needed to hand it schemas and tables.
+
+        From PostgreSQL 16 the creator of a role is granted it without the SET option, so it is stated explicitly;
+        older versions have no such option.
+        """
+        return (
+            "DO $ldb$\nBEGIN\n"
+            "    IF current_setting('server_version_num')::integer >= 160000 THEN\n"
+            f"        EXECUTE {quote_literal(f'GRANT {name} TO CURRENT_USER WITH SET TRUE')};\n"
+            "    ELSE\n"
+            f"        EXECUTE {quote_literal(f'GRANT {name} TO CURRENT_USER')};\n"
+            "    END IF;\nEND\n$ldb$"
+        )
+
+    @staticmethod
     def _create_user_sql(user: UserDefinition, password_expression: str) -> str:
         return f"CREATE ROLE {format_identifier(user.name)} LOGIN PASSWORD {password_expression}"
 
@@ -1452,6 +1539,7 @@ class PostgresEngine(DatabaseEngine):
                         conn, cursor, PostgresEngine._create_user_sql(user, f"##{quote_literal(user.password)}##")
                     )
                     created.append(name)
+                PostgresEngine._execute_ddl(conn, cursor, PostgresEngine._set_role_grant_sql(name))
                 PostgresEngine._execute_ddl(conn, cursor, f"CREATE SCHEMA IF NOT EXISTS {name} AUTHORIZATION {name}")
                 admin_option = {format_identifier(r) for r in user.roles_with_admin_option}
                 for role in user.roles:
@@ -1507,6 +1595,7 @@ class PostgresEngine(DatabaseEngine):
                 f"        RAISE NOTICE {quote_literal(f'User {user.name} already exists: its password was not changed. The runtime password must match it.')};\n"
                 "    END IF;\nEND\n$ldb$;"
             )
+            sink(PostgresEngine._set_role_grant_sql(name) + ";")
             sink(f"CREATE SCHEMA IF NOT EXISTS {name} AUTHORIZATION {name};")
             admin_option = {fmt(role) for role in user.roles_with_admin_option}
             for role in user.roles:
@@ -1719,6 +1808,8 @@ class PostgresEngine(DatabaseEngine):
             target = PostgresEngine._qualified(table.owner, table.name)
             columns = ",\n        ".join(PostgresEngine._column_sql(col) for col in table.columns)
             sink(f"CREATE TABLE IF NOT EXISTS {target} (\n        {columns}\n    );")
+            # The administrator runs the script, so the table is handed to the schema owner (also if it already existed)
+            sink(f"ALTER TABLE {target} OWNER TO {format_identifier(table.owner)};")
             for col in table.columns:
                 add = f"ALTER TABLE {target} ADD COLUMN {PostgresEngine._column_sql(col)}"
                 sink(PostgresEngine._tolerant_block(add, ("duplicate_column",)))
@@ -1817,23 +1908,28 @@ class PostgresEngine(DatabaseEngine):
     def script_password_prompts(
         users: Sequence[UserDefinition], links: Sequence[DatabaseLinkDefinition], *, ddl_sink: DdlSink
     ) -> None:
-        # psql cannot hide a \prompt answer: it is echoed. The answers go to session settings the DO blocks read.
+        # psql cannot hide a \prompt answer: it is echoed. The answers go to session settings the DO blocks read;
+        # SET (unlike SELECT set_config) does not print the value back.
         for position, user in enumerate(users, start=1):
             prompt = f"Password for user {user.name} (set if it does not exist yet; must match it if it does): "
             ddl_sink(f"\\prompt {quote_literal(prompt)} ldb_user_pwd_{position}")
-            ddl_sink(f"SELECT set_config('ldb.user_pwd_{position}', :'ldb_user_pwd_{position}', false);")
+            ddl_sink(f"SET ldb.user_pwd_{position} = :'ldb_user_pwd_{position}';")
         for position, link in enumerate(links, start=1):
             prompt = f"Password of {link.username} for database link {link.name}: "
             ddl_sink(f"\\prompt {quote_literal(prompt)} ldb_link_pwd_{position}")
-            ddl_sink(f"SELECT set_config('ldb.link_pwd_{position}', :'ldb_link_pwd_{position}', false);")
+            ddl_sink(f"SET ldb.link_pwd_{position} = :'ldb_link_pwd_{position}';")
 
     @staticmethod
     def script_preamble(*, interactive: bool) -> list[str]:
-        return ["\\set ON_ERROR_STOP on", "\\set ECHO all"]
+        return ["\\set ON_ERROR_STOP on", "\\set ECHO none", "\\set QUIET on"]
 
     @staticmethod
     def script_prompt(message: str) -> str:
         return f"\\echo {message}"
+
+    @staticmethod
+    def script_client_name() -> str:
+        return "psql"
 
     @staticmethod
     def script_epilogue() -> list[str]:
@@ -1865,6 +1961,9 @@ class PostgresEngine(DatabaseEngine):
         options = [f"host {quote_literal(host)}", f"dbname {quote_literal(database)}"]
         if port is not None:
             options.append(f"port {quote_literal(str(port))}")
+        sslmode = _dsn_sslmode(link.dsn)
+        if sslmode:
+            options.append(f"sslmode {quote_literal(sslmode)}")
         return ", ".join(options)
 
     @staticmethod
@@ -1888,6 +1987,15 @@ class PostgresEngine(DatabaseEngine):
         try:
             for link in links:
                 if PostgresEngine._exists(cursor, "SELECT 1 FROM pg_foreign_server WHERE srvname = %s", [link.name]):
+                    continue
+                if not PostgresEngine._exists(
+                    cursor, "SELECT 1 WHERE has_foreign_data_wrapper_privilege('dblink_fdw', 'USAGE')", []
+                ):
+                    logger.warning(
+                        "No USAGE on dblink_fdw: database link %s is not created; the runner will open it with a "
+                        "connection string.",
+                        link.name,
+                    )
                     continue
                 name = format_identifier(link.name)
                 PostgresEngine._execute_ddl(
@@ -1917,17 +2025,29 @@ class PostgresEngine(DatabaseEngine):
     ) -> None:
         username, dsn = connect_as
         host, port, database = _parse_dsn(dsn)
-        sink(f"\\echo Connecting as {username}; psql asks for its password.")
+        # The runtime user is the one ensure_users scripted first in this same script: its password was already
+        # asked once (ldb_user_pwd_1), so the DBA is never asked twice for it. \connect takes no password, hence
+        # PGPASSWORD, which only lives for the reconnection (\setenv needs psql 15 or later).
+        sink(
+            f"\\echo Connecting as {username}. If this fails with a password error, the user already existed "
+            "with a password different from the one entered above."
+        )
+        sink("\\setenv PGPASSWORD :ldb_user_pwd_1")
         sink(f"\\connect {quote(database)} {quote(username)} {host} {port or 5432}")
+        sink("\\setenv PGPASSWORD")
         for position, link in enumerate(links, start=1):
             sink(
                 "DO $ldb$\nBEGIN\n"
-                f"    IF NOT EXISTS (SELECT 1 FROM pg_foreign_server WHERE srvname = {quote_literal(link.name)}) THEN\n"
+                f"    IF NOT EXISTS (SELECT 1 FROM pg_foreign_server WHERE srvname = {quote_literal(link.name)})\n"
+                "       AND has_foreign_data_wrapper_privilege('dblink_fdw', 'USAGE') THEN\n"
                 f"        CREATE SERVER {format_identifier(link.name)} FOREIGN DATA WRAPPER dblink_fdw "
                 f"OPTIONS ({PostgresEngine._server_options(link)});\n"
                 f"        EXECUTE format('CREATE USER MAPPING FOR CURRENT_USER SERVER %I OPTIONS (user %L, password %L)',\n"
                 f"            {quote_literal(link.name)}, {quote_literal(link.username)}, "
                 f"current_setting('ldb.link_pwd_{position}'));\n"
+                "    ELSIF NOT EXISTS (SELECT 1 FROM pg_foreign_server WHERE srvname = "
+                f"{quote_literal(link.name)}) THEN\n"
+                f"        RAISE NOTICE {quote_literal(f'dblink_fdw is not usable: link {link.name} is not created; the runner connects with a connection string')};\n"
                 "    END IF;\nEND\n$ldb$;"
             )
 
@@ -1942,12 +2062,22 @@ class PostgresEngine(DatabaseEngine):
         return f"GRANT {privilege} ON {PostgresEngine._qualified(owner, table_name)} TO {format_identifier(role)}"
 
     @staticmethod
+    def _schema_usage_sql(role: str, owner: str) -> str:
+        """A role reaches the tables of a schema only with USAGE on the schema as well (Oracle has no such layer)."""
+        return f"GRANT USAGE ON SCHEMA {format_identifier(owner)} TO {format_identifier(role)}"
+
+    @staticmethod
     def _has_privilege(cursor: Any, grantee: str, owner: str, table_name: str, privilege: str) -> bool:
+        # The table is found through the catalog: resolving "schema.table" by name would fail with "permission denied
+        # for schema" when the connected user has no USAGE on it yet, which is exactly what is being checked. The
+        # grantee also needs USAGE on the schema, so a missing one counts as a missing privilege.
         cursor.execute(
-            "SELECT has_table_privilege(%s::name, quote_ident(%s) || '.' || quote_ident(%s), %s)",
-            [grantee, owner, table_name, privilege],
+            "SELECT has_table_privilege(%s::name, c.oid, %s) AND has_schema_privilege(%s::name, n.oid, 'USAGE') "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s",
+            [grantee, privilege, grantee, owner, table_name],
         )
-        return bool(cursor.fetchone()[0])
+        row = cursor.fetchone()
+        return bool(row and row[0])
 
     @staticmethod
     def ensure_table_privileges(
@@ -1966,6 +2096,8 @@ class PostgresEngine(DatabaseEngine):
         if conn is None:
             if ddl_sink is None:
                 raise ValueError("ensure_table_privileges needs a ddl_sink when conn is None")
+            for owner in dict.fromkeys(owner for owner, _ in tables):
+                ddl_sink(PostgresEngine._schema_usage_sql(role, owner))
             for owner, table_name in tables:
                 for privilege in wanted:
                     ddl_sink(PostgresEngine._grant_sql(role, owner, table_name, privilege))
@@ -1973,6 +2105,13 @@ class PostgresEngine(DatabaseEngine):
             return granted
         cursor = conn.cursor()
         try:
+            for owner in dict.fromkeys(owner for owner, _ in tables):
+                if not PostgresEngine._exists(
+                    cursor, "SELECT 1 WHERE has_schema_privilege(%s::name, %s::name, 'USAGE')", [role, owner]
+                ):
+                    PostgresEngine._emit_ddl(
+                        conn, cursor, PostgresEngine._schema_usage_sql(role, owner), ddl_sink, ddl_failures
+                    )
             for owner, table_name in tables:
                 for privilege in wanted:
                     if PostgresEngine._has_privilege(cursor, role, owner, table_name, privilege):
@@ -2004,7 +2143,7 @@ class PostgresEngine(DatabaseEngine):
             enabled = PostgresEngine._role_enabled(cursor, role)
             for owner, table_name in tables:
                 for privilege in PostgresEngine._grantable(privileges):
-                    if not enabled or not PostgresEngine._has_privilege(cursor, "", owner, table_name, privilege):
+                    if not enabled or not PostgresEngine._has_privilege(cursor, role, owner, table_name, privilege):
                         missing.append((owner, table_name, privilege))
         except Exception as exc:
             logger.critical("Failed to read table privileges.", exc_info=True)
@@ -2034,9 +2173,12 @@ class PostgresEngine(DatabaseEngine):
         role: str, tables: Sequence[tuple[str, str]], privileges: Sequence[str]
     ) -> list[str]:
         return [
-            PostgresEngine._grant_sql(role, owner, table_name, privilege)
-            for owner, table_name in tables
-            for privilege in PostgresEngine._grantable(privileges)
+            *(PostgresEngine._schema_usage_sql(role, owner) for owner in dict.fromkeys(owner for owner, _ in tables)),
+            *(
+                PostgresEngine._grant_sql(role, owner, table_name, privilege)
+                for owner, table_name in tables
+                for privilege in PostgresEngine._grantable(privileges)
+            ),
         ]
 
     # ------------------------------------------------------------------ supporting objects
@@ -2044,9 +2186,21 @@ class PostgresEngine(DatabaseEngine):
     def ensure_supporting_objects(conn: Any, owner: str, *, ddl_sink: DdlSink | None = None) -> list[str]:
         prerequisites = [
             "CREATE EXTENSION IF NOT EXISTS dblink",
-            f"GRANT USAGE ON FOREIGN DATA WRAPPER dblink_fdw TO {format_identifier(owner)}",
+            # Hosted services (e.g. Neon) keep dblink_fdw for themselves: then the links are opened with a connection string
+            "DO $ldb$\nBEGIN\n"
+            f"    GRANT USAGE ON FOREIGN DATA WRAPPER dblink_fdw TO {format_identifier(owner)};\n"
+            "EXCEPTION WHEN insufficient_privilege THEN\n"
+            "    RAISE NOTICE 'dblink_fdw cannot be granted: database links will use a connection string';\n"
+            "END\n$ldb$",
         ]
-        statements = [*prerequisites, *supporting_functions(owner)]
+        # The administrator creates the functions, so they are handed to the schema owner (as in Oracle)
+        target = format_identifier(owner)
+        handovers = [
+            f"ALTER FUNCTION {target}.check_save_status(varchar, varchar, timestamp, varchar, varchar, timestamp, "
+            f"timestamp, timestamp, varchar, bigint, text, varchar, integer) OWNER TO {target}",
+            f"ALTER FUNCTION {target}.check_referencing_tables(varchar[], timestamp, integer) OWNER TO {target}",
+        ]
+        statements = [*prerequisites, *supporting_functions(owner), *handovers]
         if ddl_sink is not None:
             PostgresEngine._require_script_mode(conn)
             ddl_sink("\n".join(f"{statement};\n" for statement in statements))

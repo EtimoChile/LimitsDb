@@ -464,9 +464,10 @@ def _write_monitoring_grants_file(
     )
     if path is not None:
         logger.warning(
-            "%s: STATUS skips the data of the session views it cannot read. Run %s in SQL*Plus as a DBA to enable it.",
+            "%s: STATUS skips the data of the session views it cannot read. Run %s in %s as a DBA to enable it.",
             env,
             path,
+            engine.script_client_name(),
         )
     return path
 

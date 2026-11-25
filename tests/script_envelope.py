@@ -37,6 +37,10 @@ class ScriptEnvelope:
     def script_epilogue() -> list[str]:
         return list(EPILOGUE)
 
+    @staticmethod
+    def script_client_name() -> str:
+        return "the database client"
+
     ilm_script_header = staticmethod(ilm_header)
     ilm_script_table = staticmethod(ilm_table)
 
@@ -51,6 +55,7 @@ def script_envelope_methods() -> dict[str, Any]:
         "script_preamble": lambda *, interactive: list(INTERACTIVE_PREAMBLE if interactive else PREAMBLE),
         "script_prompt": prompt,
         "script_epilogue": lambda: list(EPILOGUE),
+        "script_client_name": lambda: "the database client",
         "ilm_script_header": ilm_header,
         "ilm_script_table": ilm_table,
         "ilm_script_footer": lambda: list(ILM_FOOTER),
