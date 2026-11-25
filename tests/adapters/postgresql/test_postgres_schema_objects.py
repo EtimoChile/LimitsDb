@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 from limitsdb.core.ldb_errors import DatabaseConnectionError, InvalidCredentialsError
@@ -38,8 +40,23 @@ def test_missing_table_is_created_with_primary_key_and_indexes():
 
     assert statements[0].startswith("CREATE TABLE history.items")
     assert "id numeric(10,0) NOT NULL" in statements[0] or "id numeric(10) NOT NULL" in statements[0]
-    assert any("ADD CONSTRAINT items_PK".replace("items_PK", '"items_PK"') in s for s in statements)
+    assert any("ADD CONSTRAINT items_pk PRIMARY KEY (id)" in s for s in statements)
     assert any(s.startswith("CREATE INDEX items_ix ON history.items (name)") for s in statements)
+
+
+def test_primary_key_name_is_lower_case_for_lower_case_tables_and_upper_case_for_upper_case_ones():
+    # Spec: README > Bootstrap — PostgreSQL folds names to lower case, so a primary key of a lower case table is
+    # named in lower case and needs no quotes; a table kept in upper case (LDB control tables) keeps <table>_PK
+    lower: list[str] = []
+    upper: list[str] = []
+    upper_table = dataclasses.replace(_table(), name="LDB_ITEMS")
+
+    PostgresEngine.ensure_table_structure(None, _table(), {}, ddl_sink=lower.append)  # type: ignore[arg-type]
+    PostgresEngine.ensure_table_structure(None, upper_table, {}, ddl_sink=upper.append)  # type: ignore[arg-type]
+
+    assert any("ADD CONSTRAINT items_pk PRIMARY KEY" in s for s in lower)
+    assert not any('"items_PK"' in s for s in lower)
+    assert any('ADD CONSTRAINT "LDB_ITEMS_PK" PRIMARY KEY' in s for s in upper)
 
 
 def test_scripting_without_a_connection_emits_the_create_statements():
@@ -130,7 +147,7 @@ def test_derived_column_already_present_is_not_added_again():
 def test_primary_key_reports_derived_columns_the_way_the_runner_names_them():
     # Spec: README > Run ILM — the runner appends LDB_PROCESS_DATE only when the key lacks it, so the catalog's
     # lower case name must come back in the runner's form
-    rows = [("items_PK", True, True, "id"), ("items_PK", True, True, "ldb_process_date")]
+    rows = [("items_pk", True, True, "id"), ("items_pk", True, True, "ldb_process_date")]
     conn = FakeConn(lambda c, sql, params: rows)
 
     assert PostgresEngine.get_primary_key_columns(conn, "history", "items", {}) == ("id", "LDB_PROCESS_DATE")

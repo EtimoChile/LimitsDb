@@ -95,6 +95,15 @@ def runner_name(name: str) -> str:
     return name.upper() if _LDB_COLUMN.fullmatch(name.upper()) else name
 
 
+def primary_key_name(table_name: str) -> str:
+    """Name of the primary key constraint LimitsDb creates: ``<table>_pk`` (``<table>_PK`` for an upper case table).
+
+    The suffix follows the case of the table name, so a regular lower case table gets a bare lower case constraint
+    name that needs no quoting, while a table kept in upper case (the LDB control tables) keeps ``_PK``.
+    """
+    return f"{table_name}_pk" if table_name == table_name.lower() else f"{table_name}_PK"
+
+
 def format_identifier(name: str | None) -> str:
     """Render a catalog name for SQL: bare when PostgreSQL would fold it to itself, quoted exact otherwise."""
     if not name:
@@ -1626,7 +1635,7 @@ class PostgresEngine(DatabaseEngine):
         pk = tuple(table.primary_key or ())
         if pk:
             statements.append(
-                f"ALTER TABLE {target} ADD CONSTRAINT {format_identifier(f'{table.name}_PK')}"
+                f"ALTER TABLE {target} ADD CONSTRAINT {format_identifier(primary_key_name(table.name))}"
                 f" PRIMARY KEY ({', '.join(format_identifier(c) for c in pk)})"
             )
         for name, (columns_, unique) in PostgresEngine._prepare_desired_indexes(table).items():
@@ -1722,7 +1731,7 @@ class PostgresEngine(DatabaseEngine):
         pk_columns = tuple(existing[pk_name]["columns"]) if pk_name else ()
         effective = {name: (tuple(info["columns"]), bool(info["unique"])) for name, info in existing.items()}
         desired_pk = tuple(catalog_name(c) for c in table.primary_key or ())
-        constraint = f"{table.name}_PK"
+        constraint = primary_key_name(table.name)
         if pk_name and pk_columns != desired_pk:
             statements.append(f"ALTER TABLE {target} DROP CONSTRAINT {format_identifier(pk_name)}")
             effective.pop(pk_name, None)
@@ -1815,7 +1824,7 @@ class PostgresEngine(DatabaseEngine):
                 sink(PostgresEngine._tolerant_block(add, ("duplicate_column",)))
             if table.primary_key:
                 cols = ", ".join(format_identifier(c) for c in table.primary_key)
-                name = format_identifier(f"{table.name}_PK")
+                name = format_identifier(primary_key_name(table.name))
                 pk = f"ALTER TABLE {target} ADD CONSTRAINT {name} PRIMARY KEY ({cols})"
                 sink(PostgresEngine._tolerant_block(pk, ("duplicate_object", "invalid_table_definition")))
                 sink(PostgresEngine._primary_key_check(table))
@@ -1827,7 +1836,7 @@ class PostgresEngine(DatabaseEngine):
     @staticmethod
     def _primary_key_check(table: TableDefinition) -> str:
         """DO block that fails unless the primary key has the required name and columns."""
-        name = f"{table.name}_PK"
+        name = primary_key_name(table.name)
         columns = ",".join(table.primary_key or ())
         message = (
             f"Table {table.owner}.{table.name} must have primary key {name} on ({columns}), but its primary "
