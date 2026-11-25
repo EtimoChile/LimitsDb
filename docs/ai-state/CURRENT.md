@@ -25,7 +25,11 @@ but does not replace the sources defined in `AGENTS.md`.
   and the engines accepted by configuration (`DEC-048`). The PostgreSQL adapter
   has unit tests and an E2E suite (`postgres-integration` workflow job, ephemeral
   PostgreSQL 9.5) that passes through the workflow (`PEND-043` resolved). `PEND-007` is
-  resolved.
+  resolved. On 2026-11-25 the PostgreSQL flow without administrative credentials was validated by hand
+  on Neon (PG16/18): `ldb-impl` scripts, `PREPARE` leaving the history DDL in `ddl_pending_dir`, a DBA
+  applying it, then `PREPARE`, `PREVIEW` and `EXECUTE`. A new E2E case covers it
+  (`test_prepare_without_history_admin_leaves_the_ddl_in_a_script_that_a_dba_applies`); it has not run
+  in the workflow yet.
 - The published interfaces are `ldb-run`, `ldb-init`, `ldb-crypt`, and
   `ldb-impl`.
 - Configuration is resolved by file, `LDB_*` variables, and `--set` options;

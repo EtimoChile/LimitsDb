@@ -15,6 +15,7 @@ SOURCE_DB = "ldbt_src"
 HISTORY_DB = "ldbt_hist"
 SOURCE_USER = "ldbt_source"
 HISTORY_USER = "ldbt_history"
+HISTORY_OWNER = "ldbt_hist_owner"
 ROLES = ("ldbt_source_role", "ldbt_history_role")
 
 
@@ -66,7 +67,7 @@ def clean_databases() -> Iterator[None]:
     def reset() -> None:
         for database in (SOURCE_DB, HISTORY_DB):
             _admin_execute(f"DROP DATABASE IF EXISTS {database}")
-        for role in (SOURCE_USER, HISTORY_USER, *ROLES):
+        for role in (SOURCE_USER, HISTORY_USER, HISTORY_OWNER, *ROLES):
             _admin_execute(f"DROP ROLE IF EXISTS {role}")
 
     reset()
@@ -83,6 +84,7 @@ def _write_configuration(
     history_password: str,
     source_filter: str | None = None,
     history_filter: str | None = None,
+    history_owner: str = HISTORY_USER,
 ) -> None:
     host_port = os.environ["LDB_PG_TEST_HOST"]
     admin_user = os.environ["LDB_PG_TEST_USER"]
@@ -130,7 +132,7 @@ def _write_configuration(
     (schema_dir / "ilm.yml").write_text(
         f"""tables:
   - source_owner: {SOURCE_USER}
-    history_owner: {HISTORY_USER}
+    history_owner: {history_owner}
     table_name: ilm_orders
     frecuency: D
     conds:
@@ -139,7 +141,7 @@ def _write_configuration(
         retain_months_history: 3
         purge_date_expr: "@CREATED_AT"
 {filter_lines}  - source_owner: {SOURCE_USER}
-    history_owner: {HISTORY_USER}
+    history_owner: {history_owner}
     table_name: ilm_order_lines
     frecuency: D
     referencing_tables: ilm_orders B
@@ -149,7 +151,9 @@ def _write_configuration(
     )
 
 
-def _run_cli(command: str, *arguments: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    command: str, *arguments: str, environment: dict[str, str], expected_returncode: int = 0
+) -> subprocess.CompletedProcess[str]:
     executable = shutil.which(command, path=environment.get("PATH"))
     assert executable is not None, f"installed CLI entry point not found: {command}"
     result = subprocess.run(
@@ -160,7 +164,9 @@ def _run_cli(command: str, *arguments: str, environment: dict[str, str]) -> subp
         text=True,
         timeout=180,
     )
-    assert result.returncode == 0, f"{command} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert result.returncode == expected_returncode, (
+        f"{command} exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
     return result
 
 
@@ -292,5 +298,95 @@ def test_source_and_history_ilm_move_and_purge_rows_through_dblink(
         assert _ids(history, f"{HISTORY_USER}.ilm_order_lines", "line_id") == [21]
     finally:
         source.close()
+        if history is not None:
+            history.close()
+
+
+def test_prepare_without_history_admin_leaves_the_ddl_in_a_script_that_a_dba_applies(
+    clean_databases: None, tmp_path: Path
+):
+    # Spec: README § PREPARE — without history admin credentials, ldb-run applies the history DDL with the runtime
+    # user, writes what it cannot apply to the pending DDL directory and exits 1; once a DBA runs that file, PREPARE
+    # exits 0 and the runs move rows into the history schema owned by another role
+    # Given: a history schema created by the DBA and owned by a role the runtime history user does not belong to
+    source_password = f"LdbE2E_{secrets.token_hex(11)}"
+    history_password = f"LdbE2E_{secrets.token_hex(11)}"
+    config_root = tmp_path / "config"
+    _write_configuration(
+        config_root,
+        source_password=source_password,
+        history_password=history_password,
+        history_owner=HISTORY_OWNER,
+    )
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("LDB_")}
+    environment["HOME"] = environment["USERPROFILE"] = str(tmp_path / "home")
+    common = ("--schema", "e2e", "--config-dir", str(config_root))
+    admin_history = _connect(HISTORY_DB)
+    admin_history.autocommit = True
+    cursor = admin_history.cursor()
+    cursor.execute(f"CREATE ROLE {HISTORY_OWNER} NOLOGIN")
+    cursor.execute(f"CREATE SCHEMA {HISTORY_OWNER} AUTHORIZATION {HISTORY_OWNER}")
+    cursor.close()
+    source: pg8000.dbapi.Connection | None = None
+    history: pg8000.dbapi.Connection | None = None
+    try:
+        _run_cli("ldb-impl", *common, environment=environment)
+        # And: the history admin credentials removed from the configuration
+        config_file = config_root / "schemas" / "e2e" / "config.yml"
+        lines = config_file.read_text("utf-8").splitlines()
+        config_file.write_text(
+            "\n".join(line for line in lines if not line.startswith("admin_history_username")) + "\n",
+            encoding="utf-8",
+        )
+        source = _connect(SOURCE_DB, SOURCE_USER, source_password)
+        cursor = source.cursor()
+        cursor.execute(
+            f"CREATE TABLE {SOURCE_USER}.ilm_orders (id numeric(10) PRIMARY KEY, created_at timestamp(0) NOT NULL)"
+        )
+        cursor.execute(
+            f"CREATE TABLE {SOURCE_USER}.ilm_order_lines (line_id numeric(10) PRIMARY KEY,"
+            f" order_id numeric(10) NOT NULL REFERENCES {SOURCE_USER}.ilm_orders (id))"
+        )
+        for order_id, months in [(1, 1), (2, 3), (3, 7)]:
+            cursor.execute(
+                f"INSERT INTO {SOURCE_USER}.ilm_orders VALUES (%s, date_trunc('day', localtimestamp)"
+                " - (%s * interval '1 month'))",
+                [order_id, months],
+            )
+        for line_id, order_id in [(11, 1), (21, 2), (31, 3)]:
+            cursor.execute(f"INSERT INTO {SOURCE_USER}.ilm_order_lines VALUES (%s, %s)", [line_id, order_id])
+        source.commit()
+        cursor.close()
+
+        # When: PREPARE runs without history admin credentials
+        _run_cli("ldb-run", *common, "--mode", "PREPARE", environment=environment, expected_returncode=1)
+
+        # Then: the history tables are not created and the DDL was written for a DBA
+        pending = sorted(config_root.rglob("history_ddl_e2e_*.sql"))
+        assert len(pending) == 1
+        script = pending[0].read_text("utf-8")
+        assert f"CREATE TABLE {HISTORY_OWNER}.ilm_orders" in script
+        assert f"ALTER TABLE {HISTORY_OWNER}.ilm_orders OWNER TO {HISTORY_OWNER}" in script
+        assert _fetch(admin_history, "SELECT 1 FROM pg_tables WHERE schemaname = %s", [HISTORY_OWNER]) == []
+
+        # When: a DBA applies the file (the psql meta-commands are not SQL)
+        body = "\n".join(line for line in script.splitlines() if line.strip() and not line.startswith(("\\", "--")))
+        cursor = admin_history.cursor()
+        for statement in (part.strip() for part in body.split(";")):
+            if statement:
+                cursor.execute(statement)
+        cursor.close()
+
+        # Then: PREPARE completes and SOURCE_ILM moves the old rows into the history schema
+        _run_cli("ldb-run", *common, "--mode", "PREPARE", environment=environment)
+        _run_cli("ldb-run", *common, "--action", "SOURCE_ILM", "--mode", "EXECUTE", environment=environment)
+        history = _connect(HISTORY_DB, HISTORY_USER, history_password)
+        assert _ids(source, f"{SOURCE_USER}.ilm_orders") == [1]
+        assert _ids(history, f"{HISTORY_OWNER}.ilm_orders") == [2, 3]
+        assert _ids(history, f"{HISTORY_OWNER}.ilm_order_lines", "line_id") == [21, 31]
+    finally:
+        admin_history.close()
+        if source is not None:
+            source.close()
         if history is not None:
             history.close()
