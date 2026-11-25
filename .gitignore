@@ -183,6 +183,7 @@ structure.txt
 limitsdb.zip
 *.yml
 !examples/**/*.yml
+!.github/ISSUE_TEMPLATE/*.yml
 
 # Output of ldb-impl scripts
 ldb_ddl_pending/

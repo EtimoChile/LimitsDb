@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/EtimoChile/LimitsDb/security/policy
+    about: Please report security issues privately; see the security policy.
+  - name: Questions and ideas
+    url: https://github.com/EtimoChile/LimitsDb/discussions
+    about: Ask questions and discuss ideas in GitHub Discussions.
