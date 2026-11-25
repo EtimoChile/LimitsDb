@@ -3952,6 +3952,7 @@ def _nothing_was_applied(engine: _HistoryDdlEngine) -> bool:
     [
         ("EVENT_DATE", "must map each index name"),
         ({"T1_PK": "ID"}, "name of the primary key"),
+        ({"t1_pk": "ID"}, "name of the primary key"),
         ({"HIST.IX": "ID"}, "single index name"),
         ({"IX": ""}, "Invalid history_indexes columns"),
         ({"IX": "ID, ID"}, "Invalid history_indexes columns"),

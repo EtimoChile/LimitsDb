@@ -8,6 +8,7 @@
 - The messages that ask a DBA to run a script name the engine's own client (`psql` for PostgreSQL, SQL*Plus for Oracle) instead of always SQL*Plus.
 - Add `examples/postgresql/glhst.sql`, which creates the history owner (login role and schema) of the PostgreSQL example, in the history database; like `gl.sql` it is idempotent.
 - PostgreSQL: the primary key LimitsDb creates on a lower case table is now named `<table>_pk` (it was `<table>_PK`, a quoted upper case name that had to be quoted forever); tables kept in upper case, such as the LDB control tables, keep `<table>_PK`. A primary key that already exists is not renamed.
+- `history_indexes` rejects an index named like the primary key ignoring case (`t1_pk` for `T1_PK`), so it also covers the lower case `<table>_pk` of PostgreSQL.
 - Add the foreign key `INV_DET_FK2` (`INV_ID` to `INV_HEAD`) to the GL example scripts of both engines (`examples/oracle/gl.sql`, `examples/postgresql/gl.sql`). The history owner schema is created manually by a DBA (`examples/postgresql/glhst.sql`); `ldb-impl` and `PREPARE` do not create it.
 - PostgreSQL: the table privileges given to the environment's role now include `USAGE` on the schema of the tables, which a runtime user that does not own them needs (`permission denied for schema`).
 - PostgreSQL: the privilege check of the runtime role no longer fails with `role "" does not exist` when the runtime user is not the owner of the tables.

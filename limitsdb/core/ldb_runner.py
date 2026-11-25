@@ -513,7 +513,7 @@ def _parse_history_indexes(
         index_name = str(name).strip()
         if not index_name or "." in index_name or " " in index_name:
             raise ValueError(f"Invalid history_indexes name '{name}' for {key}: expected a single index name")
-        if index_name == primary_key_index:
+        if index_name.upper() == primary_key_index.upper():
             raise ValueError(f"history_indexes name '{index_name}' for {key} is the name of the primary key")
         columns = tuple(column.strip() for column in str(columns_text or "").split(",") if column.strip())
         if not columns or len(set(columns)) != len(columns) or any(" " in column for column in columns):
