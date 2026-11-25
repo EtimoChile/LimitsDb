@@ -39,29 +39,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish-testpypi:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/limitsdb
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v4
-        with:
-          name: dist-${{ github.ref_name }}
-          path: dist/
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
   publish-pypi:
-    needs: [build, publish-testpypi]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: read
