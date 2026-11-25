@@ -7,6 +7,7 @@
 - The PostgreSQL DSN accepts the `postgresql://host[:port]/dbname?sslmode=require` form: `sslmode=require|verify-ca|verify-full` connects with TLS (needed by hosted services such as Neon) and is also set on the `dblink` server; a DSN carrying credentials is rejected.
 - The messages that ask a DBA to run a script name the engine's own client (`psql` for PostgreSQL, SQL*Plus for Oracle) instead of always SQL*Plus.
 - Add `examples/postgresql/glhst.sql`, which creates the history owner (login role and schema) of the PostgreSQL example, in the history database; like `gl.sql` it is idempotent.
+- Add the foreign key `INV_DET_FK2` (`INV_ID` to `INV_HEAD`) to the GL example scripts of both engines (`examples/oracle/gl.sql`, `examples/postgresql/gl.sql`). The history owner schema is created manually by a DBA (`examples/postgresql/glhst.sql`); `ldb-impl` and `PREPARE` do not create it.
 - PostgreSQL: the table privileges given to the environment's role now include `USAGE` on the schema of the tables, which a runtime user that does not own them needs (`permission denied for schema`).
 - PostgreSQL: the privilege check of the runtime role no longer fails with `role "" does not exist` when the runtime user is not the owner of the tables.
 - PostgreSQL: the runner worker now carries the HISTORY connection string when it connects without an explicit side (fixes `no HISTORY connection is known` where `dblink_fdw` is not usable).

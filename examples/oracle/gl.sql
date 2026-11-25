@@ -223,6 +223,8 @@ whenever sqlerror exit failure rollback
 
   ALTER TABLE "GL"."INV_DET" ADD CONSTRAINT "INV_DET_FK1" FOREIGN KEY ("PRO_ID")
 	  REFERENCES "GL"."PRO_MASTER" ("PRO_ID") ENABLE;
+  ALTER TABLE "GL"."INV_DET" ADD CONSTRAINT "INV_DET_FK2" FOREIGN KEY ("INV_ID")
+	  REFERENCES "GL"."INV_HEAD" ("INV_ID") ENABLE;
 --------------------------------------------------------
 --  Ref Constraints for Table INV_HEAD
 --------------------------------------------------------

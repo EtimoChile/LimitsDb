@@ -125,7 +125,8 @@ CREATE TABLE gl.inv_det (
   ind_amount   numeric,
   ind_subtotal numeric,
   CONSTRAINT inv_det_pk PRIMARY KEY (ind_id),
-  CONSTRAINT inv_det_fk1 FOREIGN KEY (pro_id) REFERENCES gl.pro_master (pro_id)
+  CONSTRAINT inv_det_fk1 FOREIGN KEY (pro_id) REFERENCES gl.pro_master (pro_id),
+  CONSTRAINT inv_det_fk2 FOREIGN KEY (inv_id) REFERENCES gl.inv_head (inv_id)
 );
 CREATE INDEX inv_det_i1 ON gl.inv_det (inv_id);
 
