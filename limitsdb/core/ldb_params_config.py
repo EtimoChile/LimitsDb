@@ -30,8 +30,8 @@ IlmAction = Literal["SOURCE_ILM", "HISTORY_ILM"]
 RuntimeMode = Literal["VALIDATE", "PREPARE", "PLAN", "PREVIEW", "SCRIPT", "EXECUTE", "STATUS"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 HistoryBaseline = Literal["EMPTY", "SOURCE"]
-DatabaseEngineName = Literal["oracle"]
-SUPPORTED_DATABASE_ENGINES: tuple[DatabaseEngineName, ...] = ("oracle",)
+DatabaseEngineName = Literal["oracle", "postgresql"]
+SUPPORTED_DATABASE_ENGINES: tuple[DatabaseEngineName, ...] = ("oracle", "postgresql")
 
 
 def _normalize_mode(value: str) -> str:
@@ -165,7 +165,7 @@ class Config:
     ] = "EMPTY"
     db_engine: Annotated[
         DatabaseEngineName,
-        Help("Database engine (Oracle only)"),
+        Help("Database engine (oracle or postgresql)"),
         Cli("--db-engine"),
         Env("LDB_DB_ENGINE"),
     ] = "oracle"
@@ -192,14 +192,18 @@ class Config:
     # Database connection parameters
     source_dsn: Annotated[
         str | None,
-        Help("Oracle DSN / connection descriptor: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL)."),
+        Help(
+            "Connection descriptor. Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). PostgreSQL: host[:port]/dbname."
+        ),
         Env("LDB_SOURCE_DSN"),
     ] = ""
     source_username: Annotated[str | None, Help("Username"), Env("LDB_SOURCE_USERNAME")] = ""
     source_password: Annotated[str | None, Help("Password"), Secret()] = ""
     history_dsn: Annotated[
         str | None,
-        Help("Oracle DSN / connection descriptor: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL)."),
+        Help(
+            "Connection descriptor. Oracle: host:port/service (EZCONNECT) or TNS alias (e.g., ORCL). PostgreSQL: host[:port]/dbname."
+        ),
         Env("LDB_HISTORY_DSN"),
     ] = ""
     history_username: Annotated[str | None, Help("Username"), Env("LDB_HISTORY_USERNAME")] = ""

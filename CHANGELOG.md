@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+- The release workflow no longer publishes to TestPyPI: `publish-pypi` follows `build` directly and keeps its manual approval and Trusted Publisher.
+- Add the `postgresql` engine (`db_engine: postgresql`, PostgreSQL 9.5 or later): it connects with the pure-Python `pg8000` driver, moves rows from SOURCE to HISTORY with `dblink` (a `dblink_fdw` server and user mapping, so no credential appears in a block) and keeps the same control tables, locks (advisory) and statuses as Oracle. `db_engine` accepts `oracle` and `postgresql`. Limitations are listed in the README. New dependency: `pg8000`.
+- The PostgreSQL DSN accepts the `postgresql://host[:port]/dbname?sslmode=require` form: `sslmode=require|verify-ca|verify-full` connects with TLS (needed by hosted services such as Neon) and is also set on the `dblink` server; a DSN carrying credentials is rejected.
+- The messages that ask a DBA to run a script name the engine's own client (`psql` for PostgreSQL, SQL*Plus for Oracle) instead of always SQL*Plus.
+- Add `examples/postgresql/glhst.sql`, which creates the history owner (login role and schema) of the PostgreSQL example, in the history database; like `gl.sql` it is idempotent.
+- PostgreSQL: the primary key LimitsDb creates on a lower case table is now named `<table>_pk` (it was `<table>_PK`, a quoted upper case name that had to be quoted forever); tables kept in upper case, such as the LDB control tables, keep `<table>_PK`. A primary key that already exists is not renamed.
+- `history_indexes` rejects an index named like the primary key ignoring case (`t1_pk` for `T1_PK`), so it also covers the lower case `<table>_pk` of PostgreSQL.
+- Add the foreign key `INV_DET_FK2` (`INV_ID` to `INV_HEAD`) to the GL example scripts of both engines (`examples/oracle/gl.sql`, `examples/postgresql/gl.sql`). The history owner schema is created manually by a DBA (`examples/postgresql/glhst.sql`); `ldb-impl` and `PREPARE` do not create it.
+- PostgreSQL: the table privileges given to the environment's role now include `USAGE` on the schema of the tables, which a runtime user that does not own them needs (`permission denied for schema`).
+- PostgreSQL: the privilege check of the runtime role no longer fails with `role "" does not exist` when the runtime user is not the owner of the tables.
+- PostgreSQL: the runner worker now carries the HISTORY connection string when it connects without an explicit side (fixes `no HISTORY connection is known` where `dblink_fdw` is not usable).
+- PostgreSQL: the generated script asks the runtime user's password once and reuses it for the reconnection (`\setenv PGPASSWORD`, psql 15 or later), as the Oracle script does.
+- PostgreSQL: the privilege check of a runtime user without `USAGE` on the schema no longer fails with `permission denied for schema`: it finds the table in the catalog, and a missing `USAGE` on the schema counts as a missing privilege.
+- PostgreSQL: the supporting functions (`check_save_status`, `check_referencing_tables`) are also handed to the schema owner, so each runtime user keeps its own copy in its own schema.
+- PostgreSQL: the bootstrap script hands every table it creates (control tables included) to the schema owner, as the Oracle script does; before, they stayed owned by the administrator and the runtime user got `permission denied for table LDB_CTL`. Rerunning the script repairs tables already created.
+- PostgreSQL: the generated bootstrap scripts are quiet (`ECHO none`, `QUIET on`): psql no longer echoes every statement and command tag, so only the intentional messages, the notices and the final `LimitsDb: OK` line are printed.
+- PostgreSQL: the generated script no longer prints the passwords back after asking for them (`SET` instead of `SELECT set_config`). `psql` cannot hide what is typed at a prompt, unlike Oracle's `accept ... hide`.
+- PostgreSQL: the generated script prints a notice when a database link is skipped because `dblink_fdw` is not usable.
+- PostgreSQL: on version 16 or later the administrator is granted the `SET` option on the users it creates, so that it can own their schemas (`must be able to SET ROLE`).
+- PostgreSQL: the bootstrap no longer fails when the administrator cannot grant `USAGE` on `dblink_fdw` (Neon and similar services). The database link is then not created as a foreign server; the runner opens the dblink connection with a connection string held in the session only while it connects.
+- Add PostgreSQL examples under `examples/postgresql/`: the GL test model creation and synthetic data script (`gl.sql`), the statistics script (`gl_stats.sql`, run once per database) and example `config/config.yml` and `config/ilm.yml` with lower-case names.
+- Scripts written for a DBA no longer say they are SQL*Plus-only; the client wording is neutral (SQL*Plus, psql).
+
 ## [0.10.0] - 2026-10-28
 
 - Fix `history_indexes` failing with ORA-01408: a non-unique history index now keeps exactly the configured columns. `LDB_PROCESS_DATE` was appended to it, so `{T1_ID_IDX: "ID"}` became `(ID, LDB_PROCESS_DATE)`, the same column list as the history primary key. The column is now added only to unique indexes.

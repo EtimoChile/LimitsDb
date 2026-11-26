@@ -30,6 +30,7 @@ dependencies = [
   "pyyaml>=6.0.2,<7.0.0",
   "cryptography>=46.0.2,<47.0.0",
   "platformdirs>=4.5.0,<5.0.0",
+  "pg8000>=1.31.2,<2.0.0",
 ]
 
 [project.urls]
@@ -82,9 +83,10 @@ packages = ["limitsdb"]
 exclude = "^tests/"
 
 [tool.pytest.ini_options]
-addopts = "-m 'not oracle_integration'"
+addopts = "-m 'not oracle_integration and not postgres_integration'"
 markers = [
   "oracle_integration: requires an explicitly configured disposable Oracle database",
+  "postgres_integration: requires an explicitly configured disposable PostgreSQL database",
 ]
 
 [tool.coverage.run]
@@ -106,5 +108,6 @@ module = [
   "cryptography.*",
   "platformdirs",
   "oracledb",
+  "pg8000.*",
 ]
 ignore_missing_imports = true

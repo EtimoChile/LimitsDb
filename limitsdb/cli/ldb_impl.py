@@ -308,9 +308,9 @@ def run_cli() -> None:
             logger.info("Created %s: %s", key.replace("_", " "), ", ".join(values))
     for script_file in script_files:
         logger.warning(
-            "Admin credentials are absent for this database, so nothing was created there. "
-            "Ask a DBA to run %s in SQL*Plus.",
+            "Admin credentials are absent for this database, so nothing was created there. Ask a DBA to run %s in %s.",
             script_file,
+            engine.script_client_name(),
         )
     if not anything_created and not script_files:
         logger.info("All LimitsDb database objects are already present.")

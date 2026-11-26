@@ -59,7 +59,7 @@ def write_ddl_file(
     *,
     env: DdlEnv = "HISTORY",
 ) -> Path:
-    """Write statements to a SQL*Plus file under ``ddl_pending_dir`` for a DBA to run once.
+    """Write statements to a SQL file under ``ddl_pending_dir`` for a DBA to run once.
 
     Each entry is (comment, statement); the comment, when present, precedes the statement.
     """
@@ -67,9 +67,9 @@ def write_ddl_file(
     lines = [
         f"-- LimitsDb: {description}",
         f"-- Schema: {config.context.schema}; {env.lower()} user: {user}",
-        "-- Run it from SQL*Plus as a user with the required privileges.",
-        "-- Plain SQL, no PL/SQL. Execution stops at the first failing statement and SQL*Plus",
-        "-- exits with a non-zero code; reaching the final OK banner means every statement worked.",
+        "-- Run it with the database command-line client (SQL*Plus, psql) as a user with the required privileges.",
+        "-- Plain SQL. Execution stops at the first failing statement and the client exits with",
+        "-- a non-zero code; reaching the final OK banner means every statement worked.",
         *engine.script_preamble(interactive=False),
         "",
     ]
@@ -87,14 +87,14 @@ def write_ddl_file(
 
 
 def render_script(engine: DatabaseEngine, title: str, fragments: Sequence[str]) -> str:
-    """Compose a SQL*Plus script from engine fragments that are already terminated and ready to run.
+    """Compose a SQL script from engine fragments that are already terminated and ready to run.
 
     Used by ``ldb-impl``: the fragments ask for the passwords they need, so the script can be rerun
     by a DBA and embeds no secret.
     """
     lines = [
         f"-- LimitsDb: bootstrap DDL for {title}.",
-        "-- Run it in SQL*Plus connected as a user with administrative privileges on this database.",
+        "-- Run it with the database command-line client (SQL*Plus, psql) as a user with administrative privileges.",
         "-- It asks for the passwords it needs and can be rerun: objects that already exist are skipped.",
         "-- The database link section reconnects as the runtime user, who owns the link.",
         *engine.script_preamble(interactive=True),

@@ -362,7 +362,7 @@ def render_environment(status: EnvironmentStatus) -> list[str]:
     if access is not None and access.grants:
         lines.append("  Session monitoring is skipped for what it cannot read: some views are not readable.")
         if status.grants_script is not None:
-            lines.append(f"  Ask a DBA to run {status.grants_script} in SQL*Plus, then rerun STATUS.")
+            lines.append(f"  Ask a DBA to run {status.grants_script}, then rerun STATUS.")
         else:
             lines.append("  Ask a DBA to run:")
             lines.extend(f"    {grant};" for grant in access.grants)

@@ -1775,6 +1775,10 @@ end;"""
         return f"prompt {message}"
 
     @staticmethod
+    def script_client_name() -> str:
+        return "SQL*Plus"
+
+    @staticmethod
     def script_epilogue() -> list[str]:
         return ["exit success"]
 

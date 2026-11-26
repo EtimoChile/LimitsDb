@@ -2,8 +2,8 @@
 status: active
 authority: operational-state
 scope: development/maintenance/release
-last-reviewed: 2026-10-27
-last-updated: 2026-10-27
+last-reviewed: 2026-10-28
+last-updated: 2026-10-28
 ---
 
 # Open pending items

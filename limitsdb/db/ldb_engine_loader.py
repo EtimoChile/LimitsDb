@@ -13,4 +13,8 @@ def get_db_engine(engine_name: str) -> DatabaseEngine:
         from limitsdb.db.oracle.ldb_engine_impl import OracleEngine
 
         return cast(DatabaseEngine, OracleEngine)
-    raise ValueError(f"Unsupported database engine: {engine_name}; supported engines: oracle")
+    if engine_name == "postgresql":
+        from limitsdb.db.postgresql.ldb_engine_impl import PostgresEngine
+
+        return cast(DatabaseEngine, PostgresEngine)
+    raise ValueError(f"Unsupported database engine: {engine_name}; supported engines: oracle, postgresql")
